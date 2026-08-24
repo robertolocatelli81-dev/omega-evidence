@@ -82,3 +82,21 @@ EUDI and the Digital Public Goods Standard (PII-free by design).
 ```bash
 python3 tests/test_toolkit.py
 ```
+
+## Releasing (maintainers)
+
+Releases publish to PyPI via **Trusted Publishing (OIDC)** — no API token is
+stored anywhere. Two halves:
+
+1. **One-time PyPI registration** (owner, on pypi.org → the project's *Publishing*
+   settings → *Add a trusted publisher* → GitHub):
+   - Owner: `robertolocatelli81-dev`
+   - Repository: `omega-evidence`
+   - Workflow: `publish.yml`
+   - Environment: `pypi`
+2. **Cut a release**: create a GitHub Release (tag e.g. `v0.1.0`). The
+   `publish.yml` workflow builds, `twine check`s, runs the tests, and publishes
+   to PyPI using short-lived OIDC credentials.
+
+CI (`ci.yml`) runs the test suite on every push and pull request across
+Python 3.9 / 3.11 / 3.13.
