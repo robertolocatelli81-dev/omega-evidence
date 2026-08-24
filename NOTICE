@@ -1,0 +1,13 @@
+OMEGA Open Evidence toolkit
+Copyright 2026 Roberto Locatelli
+
+This product includes software developed by Roberto Locatelli.
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+This toolkit is the open, Apache-2.0 reference layer extracted from the OMEGA
+project. It is self-contained and does NOT include OMEGA's proprietary sector
+engines, which remain under a separate licence and are not distributed here.
+
+Dependency: `cryptography` (BSD/Apache-2.0), used for Ed25519 signatures.
+Optional runtime tool: `openssl`, used for RFC 3161 timestamping.

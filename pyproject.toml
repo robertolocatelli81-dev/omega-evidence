@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omega-evidence"
+version = "0.1.0"
+description = "Open, standard toolkit for verifiable, long-term compliance evidence"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Roberto Locatelli" }]
+keywords = ["evidence", "audit", "hash-chain", "rfc3161", "eidas", "provenance", "compliance"]
+dependencies = ["cryptography>=3.4"]
+
+[project.urls]
+Homepage = "https://github.com/robertolocatelli81-dev"
+
+[tool.setuptools.packages.find]
+include = ["omega_evidence*"]
