@@ -88,12 +88,17 @@ python3 tests/test_toolkit.py
 Releases publish to PyPI via **Trusted Publishing (OIDC)** — no API token is
 stored anywhere. Two halves:
 
-1. **One-time PyPI registration** (owner, on pypi.org → the project's *Publishing*
-   settings → *Add a trusted publisher* → GitHub):
+1. **One-time PyPI registration** (owner). Because the project does not exist on
+   PyPI yet, register a **pending publisher** first: pypi.org → *Your account* →
+   *Publishing* → *Add a pending publisher* → GitHub, with:
+   - PyPI Project Name: `omega-evidence`
    - Owner: `robertolocatelli81-dev`
    - Repository: `omega-evidence`
    - Workflow: `publish.yml`
    - Environment: `pypi`
+
+   (After the first successful publish the project exists, and the same entry
+   appears under the project's own *Publishing* settings.)
 2. **Cut a release**: create a GitHub Release (tag e.g. `v0.1.0`). The
    `publish.yml` workflow builds, `twine check`s, runs the tests, and publishes
    to PyPI using short-lived OIDC credentials.
