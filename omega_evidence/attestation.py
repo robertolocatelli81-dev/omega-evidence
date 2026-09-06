@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
+SCOPE: salted digests protect UNLINKABILITY across records (different salts). They do NOT
+hide a LOW-ENTROPY value: the per-record salt is stored IN the record and `matches()` is a
+public oracle, so an enumerable attribute (a birthdate, an over18 flag, a formatted ID) is
+brute-forceable in milliseconds. For real value-hiding use a keyed HMAC/commitment whose key
+is NOT in the record. This is a linkability primitive, not value confidentiality.
+
 omega_evidence.attestation — PII-free attestation primitive.
 
 Records THAT an attribute was presented and verified, without ever storing the
@@ -26,7 +32,7 @@ import hashlib
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from .canonical import sha3
 

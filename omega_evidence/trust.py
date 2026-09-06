@@ -45,7 +45,15 @@ class TrustRegistry:
         act, sid = d.get("action"), d.get("signer_id")
         if not sid:
             return
-        if act in ("trust", "rotate"):
+        if act == "trust":
+            cur = self._state.get(sid)
+            if cur and cur.get("revoked"):
+                # mirror the live trust() guard on the authoritative reload path:
+                # a revoked signer is NOT silently re-trusted by a 'trust' entry
+                # (rotate() is the explicit way to re-establish).
+                return
+            self._state[sid] = {"pubkey": d.get("pubkey"), "revoked": False, "since": d.get("ts")}
+        elif act == "rotate":
             self._state[sid] = {"pubkey": d.get("pubkey"), "revoked": False, "since": d.get("ts")}
         elif act == "revoke" and sid in self._state:
             self._state[sid]["revoked"] = True

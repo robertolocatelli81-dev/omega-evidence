@@ -26,7 +26,7 @@ import json
 import os
 import threading
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 GENESIS = "0" * 64
 
