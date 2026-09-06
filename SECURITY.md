@@ -26,3 +26,9 @@ pack** as release assets. Honest scope: this project is non-commercial open
 source (outside the EU Cyber Resilience Act's obligations for commercial
 products); the artifacts demonstrate the evidence practice the tools themselves
 implement — they are not a legal conformity claim.
+
+## Downstream commercial use
+
+If you integrate this software into a commercial product placed on the EU market,
+CRA obligations for that product are **yours** as its manufacturer; nothing here
+transfers or discharges them.
