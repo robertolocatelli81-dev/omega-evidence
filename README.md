@@ -14,6 +14,20 @@ This is the open reference layer of the OMEGA project. It does **not** include
 OMEGA's proprietary sector engines; those remain private and interoperate with,
 but do not derive from, this toolkit.
 
+## Install
+
+```bash
+# from the static PEP 503 index (artifacts on GitHub Releases, sha256-pinned)
+pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
+
+# or straight from the tagged source
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.5.0
+```
+
+Release artifacts (`.whl` / `.tar.gz`) are attached to each
+[GitHub Release](https://github.com/robertolocatelli81-dev/omega-evidence/releases);
+the index links carry `#sha256=` fragments, so pip verifies every download.
+
 ## Building blocks
 
 | Module | What it does |
