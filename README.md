@@ -1,6 +1,6 @@
 # OMEGA Open Evidence
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22539634.svg)](https://doi.org/10.5281/zenodo.22539634)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22539633.svg)](https://doi.org/10.5281/zenodo.22539633)
 
 An open, standard toolkit for **verifiable, long-term compliance evidence** —
 so anyone can prove that a record was not altered, and anyone can verify it
