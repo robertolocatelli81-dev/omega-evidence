@@ -89,9 +89,13 @@ prevents silent key-swap, not the legal identity of the holder.
 
 ## Standards
 
-RFC 3161 (timestamping), RFC 4998 (long-term evidence, on the roadmap),
-Ed25519 / ML-DSA (FIPS 204, hybrid on the roadmap), aligned with eIDAS 2.0 /
-EUDI and the Digital Public Goods Standard (PII-free by design).
+RFC 3161 (timestamping, optional `openssl`); RFC 4998 / eIDAS LTA renewal *semantics*
+(`preservation`: long-term evidence records renewed across hash and timestamp aging, verifiable
+offline, tested — not the RFC 4998 ASN.1 wire format); Ed25519 with an optional post-quantum
+co-signature (SLH-DSA / FIPS 205 through an external liboqs backend; any PQ scheme is admitted only
+by a known-answer-test gate — no home-grown PQ crypto; a hybrid pack is reported `pq-protected` only
+when a verifying backend is present); SD-JWT (RFC 9901) issue/verify for the eIDAS 2.0 / EUDI wallet
+lane; PII-free by design (salted per-record digests, no linkability).
 
 ## Tests
 
