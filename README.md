@@ -102,9 +102,10 @@ monotonic timestamps, canonical UUID v4 identifiers), including the optional ECD
 r||s). The draft's author has an IPR disclosure on the datatracker: reading and verifying the format is what
 this module does.
 Declared: the mapping is lossy (omega's policy rule, decision and attestation travel inside `action_detail`)
-but never fabricates (unknown action/outcome, missing agent id or unparsable timestamp raise); identifiers are
-UUID-v4-format values derived deterministically from the omega digests, so the same ledger exports to the same
-chain; signing happens inside the export (the draft hashes all fields of the previous record, signature
+but never fabricates (unknown action/outcome, missing agent id or unparsable timestamp raise); identifiers carry the
+UUID version-4 bits but are derived deterministically from the omega digests (RFC 9562 reserves v4 for random
+generation: a strict reader may object — the draft mandates the v4 format, reproducibility of evidence mandates
+determinism; both stated), so the same ledger exports to the same chain; signing happens inside the export (the draft hashes all fields of the previous record, signature
 included); `trust_level` is what the caller declares; JCS follows RFC 8785 with ES6 number serialisation, so foreign
 chains with non-integer numbers verify too (integers beyond 2^53 are refused on export); the draft may change —
 its version is pinned in `AAT_DRAFT`.
