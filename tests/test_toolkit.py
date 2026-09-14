@@ -895,8 +895,8 @@ class TestDoctorSelfExamine(unittest.TestCase):
 
 
 class TestAATInterop(unittest.TestCase):
-    """draft-sharif-agent-audit-trail-00: export of an AgentEvidenceLog, chain verification, signatures.
-    Negatives first; every positive has its tampered twin."""
+    """draft-sharif-agent-audit-trail-00: export of an AgentEvidenceLog (one chain per session, genesis lifecycle
+    record), chain verification, ES6/JCS numbers, signatures. Negatives first; every positive has its tampered twin."""
 
     def _log(self, tmp):
         log = agent.AgentEvidenceLog(os.path.join(tmp, "agent.jsonl"), runtime_id="rt-1")
@@ -906,86 +906,88 @@ class TestAATInterop(unittest.TestCase):
                    agent.Outcome.PENDING_APPROVAL, human_approver="op-9", reason="needs a human")
         return log
 
-    def test_jcs_subset(self):
+    def test_jcs_and_es6_numbers(self):
         from omega_evidence.interop import aat
-        self.assertEqual(aat.jcs({"b": 1, "a": [True, None, "é"]}), b'{"a":[true,null,"\u00e9"],"b":1}'.replace(b"\\u00e9", "é".encode()))
+        self.assertEqual(aat.jcs({"b": 1, "a": [True, None, "é"]}), '{"a":[true,null,"é"],"b":1}'.encode())
         self.assertEqual(aat.jcs({"\u20ac": 1, "a": 2}), aat.jcs({"a": 2, "\u20ac": 1}))
-        self.assertEqual(aat.jcs({"x": 1.5}), b'{"x":1.5}')                          # ES6: i float si serializzano
+        keys = list(json.loads(aat.jcs({"\U0001F600": 1, "\uFFFD": 2, "\uD7FF": 3}).decode()).keys())
+        self.assertEqual(keys, ["\uD7FF", "\U0001F600", "\uFFFD"])                     # ordine per unità UTF-16
+        self.assertEqual(aat.jcs({"x": 1.5}), b'{"x":1.5}')
         with self.assertRaises(ValueError):
             aat.jcs({"x": float("nan")})
         with self.assertRaises(ValueError):
-            aat.jcs({"x": 2 ** 53 + 1})                       # export: oltre l'esattezza IEEE 754 → rifiutato
-        self.assertEqual(aat.jcs({"x": 2 ** 53 + 1}, strict=False), b'{"x":9007199254740992}')   # verify: come ES6
-        # numeri ES6 (RFC 8785 §3.2.2.3): catene esterne con float devono verificare
-        self.assertEqual(aat.jcs({"a": 1.5, "b": 100.0, "c": 1e21, "d": 1e-7, "e": 0.1, "f": -0.0}), b'{"a":1.5,"b":100,"c":1e+21,"d":1e-7,"e":0.1,"f":0}')
-        with self.assertRaises(ValueError):
             aat.jcs({"x": float("inf")})
-        # ordinamento per unità UTF-16: un carattere astrale (surrogati D83D…) viene DOPO U+FFFD? no: prima di U+FFFF, dopo U+D7FF
-        keys = list(json.loads(aat.jcs({"\U0001F600": 1, "\uFFFD": 2, "\uD7FF": 3}).decode()).keys())
-        self.assertEqual(keys, ["\uD7FF", "\U0001F600", "\uFFFD"])
+        with self.assertRaises(ValueError):
+            aat.jcs({"x": 2 ** 53 + 1})                                    # export: perdita di precisione → rifiutato
+        self.assertEqual(aat.jcs({"x": 2 ** 53 + 1}, strict=False), b'{"x":9007199254740992}')   # verify: come ES6
+        # ES6 Number::toString (RFC 8785 §3.2.2.3 + Appendix B): fissa per 1e-7 <= |x| < 1e21 (round 3)
+        for f, exp in ((295147905179352825856.0, "295147905179352830000"), (5e-324, "5e-324"),
+                       (1.7976931348623157e308, "1.7976931348623157e+308"), (0.000001, "0.000001"), (1e-7, "1e-7"),
+                       (1e21, "1e+21"), (999999999999999900000.0, "999999999999999900000"), (-1.5, "-1.5"), (0.1, "0.1"),
+                       (333333333.3333333, "333333333.3333333"), (2.0, "2"), (1e20, "100000000000000000000"),
+                       (1e-5, "0.00001"), (-0.0, "0"), (123456789012345680000.0, "123456789012345680000")):
+            self.assertEqual(aat._es6_number(f), exp, f)
 
-    def test_export_and_verify_then_tamper(self):
+    def test_export_one_chain_per_session_with_genesis(self):
         from omega_evidence.interop import aat
+        import uuid as _u
         with tempfile.TemporaryDirectory() as tmp:
-            log = self._log(tmp)
-            entries = list(log._ledger.entries())
-            recs = aat.from_omega(entries, agent_version="1.2.3", trust_level="L1")
-            self.assertEqual(len(recs), 3)
-            # deterministico: stesso ledger → stessa catena (Opus); id in formato UUID v4 (Opus+Gemini)
-            self.assertEqual(recs, aat.from_omega(entries, agent_version="1.2.3", trust_level="L1"))
-            import uuid as _u
-            self.assertEqual(_u.UUID(recs[0]["record_id"]).version, 4); self.assertEqual(_u.UUID(recs[0]["session_id"]).version, 4)
+            entries = list(self._log(tmp)._ledger.entries())
+            chains = aat.from_omega(entries, agent_version="1.2.3", trust_level="L1")
+            self.assertEqual(len(chains), 1)                                        # una catena = una sessione (§3)
+            recs = next(iter(chains.values()))
+            self.assertEqual(len(recs), 4)                                         # genesi + 3 azioni
+            self.assertEqual(recs[0]["action_type"], "lifecycle"); self.assertEqual(recs[0]["action_detail"]["event"], "session_start")
+            self.assertIn("synthesised_by", recs[0]["action_detail"])              # dichiarato, non nascosto
+            self.assertIsNone(recs[0]["prev_hash"]); self.assertIsNone(recs[0]["parent_record_id"])
+            self.assertEqual(recs[1]["prev_hash"], aat.record_hash(recs[0]))
+            self.assertEqual([r["outcome"] for r in recs[1:]], ["success", "denied", "escalated"])
+            self.assertEqual(recs[3]["human_override"]["operator_id"], "op-9")
+            self.assertTrue(recs[1]["agent_id"].startswith("urn:omega:agent:"))
+            self.assertEqual(len({r["session_id"] for r in recs}), 1)
+            self.assertEqual(chains, aat.from_omega(entries, agent_version="1.2.3", trust_level="L1"))   # deterministico
+            self.assertEqual(_u.UUID(recs[1]["record_id"]).version, 4); self.assertEqual(_u.UUID(recs[1]["session_id"]).version, 4)
+            v = aat.verify_chain(recs)
+            self.assertTrue(v["ok"], v["problems"])
+            # manomissioni: riordino, alterazione, genesi mancante, sessioni miste, non UTC, non monotono, id duplicato
+            self.assertFalse(aat.verify_chain([recs[0], recs[2], recs[1], recs[3]])["ok"])
+            alt = json.loads(json.dumps(recs)); alt[1]["outcome"] = "failure"
+            self.assertFalse(aat.verify_chain(alt)["ok"])
+            self.assertTrue(any("6.1" in p["why"] for p in aat.verify_chain(recs[1:])["problems"]))
+            mix = json.loads(json.dumps(recs)); mix[2]["session_id"] = aat._uuid4_from("other")
+            self.assertTrue(any("one session" in p["why"] for p in aat.verify_chain(mix)["problems"]))
+            tz = json.loads(json.dumps(recs)); tz[1]["timestamp"] = tz[1]["timestamp"].replace("Z", "+02:00")
+            self.assertTrue(any("UTC" in p["why"] for p in aat.verify_chain(tz)["problems"]))
+            back = json.loads(json.dumps(recs)); back[2]["timestamp"] = "2000-01-01T00:00:00.000Z"
+            self.assertTrue(any("monotonic" in p["why"] for p in aat.verify_chain(back)["problems"]))
+            dup = json.loads(json.dumps(recs)); dup[2]["record_id"] = dup[1]["record_id"]
+            self.assertTrue(any("duplicate" in p["why"] for p in aat.verify_chain(dup)["problems"]))
+            v1 = json.loads(json.dumps(recs)); v1[1]["session_id"] = str(_u.uuid1())
+            self.assertTrue(any("v4" in p["why"] for p in aat.verify_chain(v1)["problems"]))
+            v2 = json.loads(json.dumps(recs)); v2[1]["record_id"] = "urn:uuid:" + v2[1]["record_id"]
+            self.assertTrue(any("canonical" in p["why"] for p in aat.verify_chain(v2)["problems"]))
             self.assertFalse(aat.verify_chain([])["ok"])
-            # mai inventare: azione ignota, esito ignoto, timestamp rotto, agent_id assente → ValueError
-            for bad in ({"action": "teleport"}, {"outcome": "meh"}, {"timestamp_utc": "garbage"}, {"agent_id": None}):
+            # mai inventare: azione/esito ignoti, timestamp rotto o in formato base, agent_id assente, self_hash assente
+            for bad in ({"action": "teleport"}, {"outcome": "meh"}, {"timestamp_utc": "garbage"}, {"timestamp_utc": "20260914T134000Z"}, {"agent_id": None}):
                 e2 = json.loads(json.dumps(entries)); e2[0].update(bad)
                 with self.assertRaises(ValueError):
                     aat.from_omega(e2, "1.0")
-            v1 = json.loads(json.dumps(recs)); v1[0]["session_id"] = str(_u.uuid1())
-            self.assertTrue(any("v4" in p["why"] for p in aat.verify_chain(v1)["problems"]))
-            # id non canonici (urn:uuid:…, maiuscole) → rifiutati dal verificatore; record senza self_hash → export rifiutato
-            v2 = json.loads(json.dumps(recs)); v2[0]["record_id"] = "urn:uuid:" + v2[0]["record_id"]
-            self.assertTrue(any("canonical" in p["why"] for p in aat.verify_chain(v2)["problems"]))
             e3 = json.loads(json.dumps(entries)); e3[0].pop("self_hash", None); e3[0].pop("record_sha3", None)
             with self.assertRaises(ValueError):
                 aat.from_omega(e3, "1.0")
             with self.assertRaises(ValueError):
                 aat.from_omega(entries, "1.0", session_ids={"sess-a": "not-a-uuid"})
-            # record_id duplicato e timestamp in formato base (vietato da RFC 3339) → problemi
-            v3 = json.loads(json.dumps(recs)); v3[1]["record_id"] = v3[0]["record_id"]
-            self.assertTrue(any("duplicate" in p["why"] for p in aat.verify_chain(v3)["problems"]))
-            with self.assertRaises(ValueError):
-                aat._rfc3339("20260914T134000Z")
-            # catena ESTERNA conforme con float e agent_id spiffe: deve verificare
-            g = {"record_id": aat._uuid4_from("g1"), "timestamp": "2026-09-14T13:40:00.000Z", "agent_id": "spiffe://x/y",
-                 "agent_version": "1", "session_id": aat._uuid4_from("s"), "action_type": "decision",
-                 "action_detail": {"risk": 0.25, "n": 3}, "outcome": "success", "trust_level": "L2",
-                 "parent_record_id": None, "prev_hash": None, "risk_score": 0.75}
-            g2 = dict(g, record_id=aat._uuid4_from("g2"), parent_record_id=g["record_id"], prev_hash=aat.record_hash(g, strict=False))
-            self.assertTrue(aat.verify_chain([g, g2])["ok"], aat.verify_chain([g, g2])["problems"])
-            # un elemento non-oggetto in mezzo non azzera la catena (nessuna genesi a metà log)
-            self.assertFalse(aat.verify_chain([g, "junk", dict(g2, parent_record_id=None, prev_hash=None)])["ok"])
-            self.assertIsNone(recs[0]["prev_hash"]); self.assertIsNone(recs[0]["parent_record_id"])
-            self.assertEqual(recs[1]["prev_hash"], aat.record_hash(recs[0]))
-            self.assertEqual([r["outcome"] for r in recs], ["success", "denied", "escalated"])
-            self.assertEqual(recs[2]["human_override"]["operator_id"], "op-9")
-            self.assertTrue(recs[0]["agent_id"].startswith("urn:omega:agent:"))
-            self.assertEqual(recs[0]["session_id"], recs[1]["session_id"])
-            v = aat.verify_chain(recs)
-            self.assertTrue(v["ok"], v["problems"])
-            # riordino → prev_hash e parent non corrispondono
-            bad = [recs[0], recs[2], recs[1]]
-            self.assertFalse(aat.verify_chain(bad)["ok"])
-            # alterazione di un campo del record 0 → il record 1 non lo aggancia più
-            alt = json.loads(json.dumps(recs)); alt[0]["outcome"] = "failure"
-            self.assertFalse(aat.verify_chain(alt)["ok"])
-            # vocabolario e genesi
-            alt = json.loads(json.dumps(recs)); alt[1]["action_type"] = "hack"
-            self.assertTrue(any("vocabulary" in p["why"] for p in aat.verify_chain(alt)["problems"]))
-            alt = json.loads(json.dumps(recs)); alt[0]["prev_hash"] = "00" * 32
-            self.assertTrue(any("genesis" in p["why"] for p in aat.verify_chain(alt)["problems"]))
             with self.assertRaises(ValueError):
                 aat.from_omega(entries, "1.0", trust_level="L9")
+            # catena ESTERNA conforme (float, spiffe URI, genesi lifecycle) deve verificare
+            g = {"record_id": aat._uuid4_from("g1"), "timestamp": "2026-09-14T13:40:00.000Z", "agent_id": "spiffe://x/y",
+                 "agent_version": "1", "session_id": aat._uuid4_from("s"), "action_type": "lifecycle",
+                 "action_detail": {"event": "session_start", "risk": 0.000001, "n": 3}, "outcome": "success", "trust_level": "L2",
+                 "parent_record_id": None, "prev_hash": None, "risk_score": 0.75}
+            g2 = dict(g, record_id=aat._uuid4_from("g2"), action_type="decision", action_detail={"risk": 1e-5},
+                      parent_record_id=g["record_id"], prev_hash=aat.record_hash(g, strict=False))
+            self.assertTrue(aat.verify_chain([g, g2])["ok"], aat.verify_chain([g, g2])["problems"])
+            self.assertFalse(aat.verify_chain([g, "junk", dict(g2, parent_record_id=None, prev_hash=None)])["ok"])
 
     def test_signatures_p256(self):
         from omega_evidence.interop import aat
@@ -997,21 +999,19 @@ class TestAATInterop(unittest.TestCase):
         _, pub2 = aat.generate_p256_keypair()
         with tempfile.TemporaryDirectory() as tmp:
             entries = list(self._log(tmp)._ledger.entries())
-            recs = aat.from_omega(entries, "1.0")
-            # firmare DOPO l'export rompe la catena (l'hash copre TUTTI i campi, firma inclusa): Opus, misurato
-            broken = [aat.sign_record(r, priv) for r in recs]
+            recs = next(iter(aat.from_omega(entries, "1.0").values()))
+            broken = [aat.sign_record(r, priv) for r in recs]                   # firmare DOPO l export rompe la catena
             self.assertFalse(aat.verify_chain(broken, pubkey_pem=pub)["ok"])
-            # la firma va DENTRO l'export
-            signed = aat.from_omega(entries, "1.0", private_key_pem=priv)
+            signed = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv).values()))
             v = aat.verify_chain(signed, pubkey_pem=pub)
-            self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["signatures_verified"], 3)
+            self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["signatures_verified"], 4)
             self.assertFalse(aat.verify_chain(signed, pubkey_pem=pub2)["ok"])
             self.assertFalse(aat.verify_chain(recs, pubkey_pem=pub)["ok"])          # non firmati con chiave data
             alt = json.loads(json.dumps(signed)); alt[1]["outcome"] = "failure"
             self.assertFalse(aat.verify_chain(alt, pubkey_pem=pub)["ok"])
-            self.assertEqual(len(aat._b64u_dec(signed[0]["signature"])), 64)      # P1363 r||s
+            self.assertEqual(len(aat._b64u_dec(signed[0]["signature"])), 64)        # P1363 r||s
             padded = json.loads(json.dumps(signed)); padded[0]["signature"] += "=="
-            self.assertFalse(aat.verify_chain(padded, pubkey_pem=pub)["ok"])      # padding rifiutato
+            self.assertFalse(aat.verify_chain(padded, pubkey_pem=pub)["ok"])       # padding rifiutato
 
 
 if __name__ == "__main__":

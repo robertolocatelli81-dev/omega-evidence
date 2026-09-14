@@ -90,12 +90,17 @@ prevents silent key-swap, not the legal identity of the holder.
 
 ## Agent Audit Trail interop (2026-09-14)
 
-Compared with the 2026 field (audit-trail products, OWASP agentic logging, EU AI Act Art. 12 from 2 August 2026):
+Compared with the 2026 field (audit-trail products, OWASP agentic logging, EU AI Act Art. 12 — scheduled for
+2 August 2026, deferral pending in the Digital Omnibus):
 the requirement has converged, the record has not. The first Internet-Draft proposing one is
 `draft-sharif-agent-audit-trail-00` (R. Sharif, 29 March 2026 — an individual draft, not an IETF standard,
-expires 29 September 2026). `omega_evidence.interop.aat` exports an `AgentEvidenceLog` ledger as an AAT chain
-(mandatory fields, controlled vocabularies, `prev_hash` = SHA-256 over the JCS of the previous record) and
-verifies any AAT chain offline, fail-closed, including the optional ECDSA P-256 signatures (IEEE P1363 r||s).
+expires 29 September 2026). `omega_evidence.interop.aat` exports an `AgentEvidenceLog` ledger as AAT chains — one chain per
+session, each opened by a synthesised (and so labelled) `lifecycle` / `session_start` genesis record, as the
+draft requires — with mandatory fields, controlled vocabularies and `prev_hash` = SHA-256 over the JCS of the
+previous record; and verifies any AAT chain offline, fail-closed (chain, vocabularies, lifecycle, UTC and
+monotonic timestamps, canonical UUID v4 identifiers), including the optional ECDSA P-256 signatures (IEEE P1363
+r||s). The draft's author has an IPR disclosure on the datatracker: reading and verifying the format is what
+this module does.
 Declared: the mapping is lossy (omega's policy rule, decision and attestation travel inside `action_detail`)
 but never fabricates (unknown action/outcome, missing agent id or unparsable timestamp raise); identifiers are
 UUID-v4-format values derived deterministically from the omega digests, so the same ledger exports to the same
@@ -106,8 +111,9 @@ its version is pinned in `AAT_DRAFT`.
 
 ```python
 from omega_evidence.interop import aat
-recs = aat.from_omega(list(log._ledger.entries()), agent_version="1.2.3", trust_level="L1")
-aat.verify_chain(recs)                      # {"ok": True, ...}; add pubkey_pem=... to check signatures
+chains = aat.from_omega(list(log._ledger.entries()), agent_version="1.2.3", trust_level="L1")
+for session_id, chain in chains.items():
+    aat.verify_chain(chain)                 # {"ok": True, ...}; add pubkey_pem=... to check signatures
 ```
 
 ## Standards

@@ -4,9 +4,11 @@
 omega_evidence.interop.aat — Agent Audit Trail (IETF draft-sharif-agent-audit-trail-00) interop.
 
 Why (2026-09-14): the field is converging on the REQUIREMENT (tamper-evident logs of what an AI agent did,
-EU AI Act Art. 12 from 2 August 2026) but not yet on the RECORD. The first Internet-Draft that proposes a
+EU AI Act Art. 12 — application scheduled for 2 August 2026, with a deferral pending in the Digital Omnibus
+package) but not yet on the RECORD. The first Internet-Draft that proposes a
 record is "Agent Audit Trail: A Standard Logging Format for Autonomous AI Systems" (R. Sharif, 29 March
-2026, expires 29 September 2026; individual draft, NOT an IETF standard). This module lets an
+2026, expires 29 September 2026; individual draft, NOT an IETF standard; an IPR disclosure by the author is
+on the IETF datatracker — reading/verifying the format is what this module does). This module lets an
 `AgentEvidenceLog` ledger be EXPORTED as an AAT chain and lets an AAT chain (ours or foreign, with ES6-serialisable
 numbers) be VERIFIED offline — so an
 omega evidence pack can be read by tools that adopt that format, and AAT logs from elsewhere can be checked
@@ -17,7 +19,9 @@ What the draft fixes (transcribed): mandatory fields `record_id` (UUID v4), `tim
 decision, delegation, escalation, error, lifecycle}, `action_detail` (object), `outcome` in {success,
 failure, timeout, denied, escalated}, `trust_level` in {L0..L4}, `parent_record_id`, `prev_hash` =
 hex(SHA-256(JCS(previous record, ALL fields))) with null at genesis; optional `signature` = ECDSA P-256 over
-SHA-256(JCS(record without `signature`)), IEEE P1363 r||s, base64url.
+SHA-256(JCS(record without `signature`)), IEEE P1363 r||s, base64url. Lifecycle (§3, §6.1): ONE chain = ONE
+session, and every session MUST begin with a genesis record `action_type = lifecycle`,
+`action_detail.event = session_start`.
 
 Honest scope: JCS (RFC 8785) is implemented for objects, arrays, strings, booleans, null and NUMBERS
 serialised the ES6 way (integral doubles as integers, shortest round-trip mantissa, exponent without leading
@@ -57,21 +61,41 @@ _OUTCOME_MAP = {"executed": "success", "blocked": "denied", "pending_approval": 
 
 # ── JCS (RFC 8785), subset ───────────────────────────────────────────────────────────────────
 def _es6_number(f: float) -> str:
-    """ES6 Number::toString (RFC 8785 §3.2.2.3): integral doubles below 1e21 print as integers; otherwise the
-    shortest round-trip form (Python repr) with the exponent normalised ('1e-07' → '1e-7', '1e+21' kept)."""
+    """ES6 Number::toString (ECMA-262 §6.1.6.1.20, as required by RFC 8785 §3.2.2.3): shortest round-trip
+    digits (Python repr provides them), then ES6 placement rules — fixed notation for 1e-7 <= |x| < 1e21
+    (e.g. 0.000001, 295147905179352830000), exponential outside ('1e+21', '1e-7'), '-0' → '0'.
+    Checked against RFC 8785 Appendix B vectors in the tests (review of 2026-09-14 round 3)."""
     if f == 0:
         return "0"
-    if f.is_integer() and abs(f) < 1e21:
-        return str(int(f))
-    r = repr(f)
+    sign = "-" if f < 0 else ""
+    r = repr(abs(f))                                   # shortest round-trip, e.g. '1e-07', '2.9514790517935283e+20', '0.1'
     if "e" in r:
-        m, e = r.split("e")
-        sign = "-" if e.startswith("-") else "+"
-        e = e.lstrip("+-").lstrip("0") or "0"
-        if m.endswith(".0"):
-            m = m[:-2]
-        return f"{m}e{sign}{e}"
-    return r
+        mant, exp = r.split("e")
+        exp = int(exp)
+    else:
+        mant, exp = r, 0
+    if "." in mant:
+        ip, fp = mant.split(".")
+    else:
+        ip, fp = mant, ""
+    fp = fp.rstrip("0") if fp != "0" else ""
+    digits = (ip + fp).lstrip("0")
+    # n = position of the decimal point relative to the digit string (ES6 "n")
+    n = len(ip.lstrip("0")) + exp if ip.lstrip("0") else exp - (len(fp) - len(fp.lstrip("0")))
+    if not ip.lstrip("0"):
+        digits = fp.lstrip("0")
+    digits = digits.rstrip("0") or "0"
+    k = len(digits)
+    if k <= n <= 21:
+        out = digits + "0" * (n - k)
+    elif 0 < n <= 21:
+        out = digits[:n] + "." + digits[n:]
+    elif -6 < n <= 0:
+        out = "0." + "0" * (-n) + digits
+    else:
+        e = n - 1
+        out = (digits[0] + ("." + digits[1:] if k > 1 else "")) + "e" + ("+" if e >= 0 else "-") + str(abs(e))
+    return sign + out
 
 
 def jcs(obj: Any, strict: bool = True) -> bytes:
@@ -136,18 +160,21 @@ def _uuid4_from(seed: str) -> str:
 
 
 def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: str = "L0",
-               session_ids: Optional[Dict[str, str]] = None, private_key_pem: Optional[bytes] = None) -> List[Dict[str, Any]]:
+               session_ids: Optional[Dict[str, str]] = None, private_key_pem: Optional[bytes] = None) -> Dict[str, List[Dict[str, Any]]]:
     """Map omega `agent_governance_action` entries to an AAT chain. Every omega field that AAT has no
     slot for goes into `action_detail` (policy_rule, decision, resource, reason, attestation, record_sha3).
     `trust_level` is DECLARED by the caller (the draft's L0..L4 are about identity verification, which this
     ledger does not perform by itself). Identifiers: `record_id` = v4-format UUID derived from the omega
     `self_hash`, `session_id` = the omega session id if it is already a v4 UUID, else a v4-format UUID derived
     from it. Unknown action/outcome, missing agent id or unparsable timestamp → ValueError (never guessed).
-    With `private_key_pem` every record is signed BEFORE the next prev_hash is computed (draft: hash over ALL fields)."""
+    With `private_key_pem` every record is signed BEFORE the next prev_hash is computed (draft: hash over ALL fields).
+    Returns {session_id: chain}: ONE chain per session (draft §3), each opened by a synthesised genesis record
+    `lifecycle` / `action_detail.event = session_start` (draft §6.1) stamped with the first action's time and
+    marked `synthesised_by: omega_evidence.interop.aat` — declared, not hidden."""
     if trust_level not in TRUST_LEVELS:
         raise ValueError(f"trust_level must be one of {TRUST_LEVELS}")
-    out: List[Dict[str, Any]] = []
-    prev: Optional[Dict[str, Any]] = None
+    chains: Dict[str, List[Dict[str, Any]]] = {}
+    prevs: Dict[str, Dict[str, Any]] = {}
     sess = dict(session_ids or {})
     for k, v in sess.items():
         try:
@@ -192,17 +219,29 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
                               "omega_self_hash": e.get("self_hash")},
             "outcome": _OUTCOME_MAP[str(e.get("outcome"))],
             "trust_level": trust_level,
-            "parent_record_id": prev["record_id"] if prev else None,
-            "prev_hash": record_hash(prev) if prev else None,
         }
+        if sid not in chains:
+            gen = {"record_id": _uuid4_from(f"omega-genesis:{sid}"), "timestamp": rec["timestamp"],
+                   "agent_id": rec["agent_id"], "agent_version": agent_version, "session_id": sid,
+                   "action_type": "lifecycle",
+                   "action_detail": {"event": "session_start", "synthesised_by": "omega_evidence.interop.aat",
+                                     "note": "omega ledgers have no explicit session start; genesis stamped with the first action's time"},
+                   "outcome": "success", "trust_level": trust_level, "parent_record_id": None, "prev_hash": None}
+            if private_key_pem is not None:
+                gen = sign_record(gen, private_key_pem)
+            chains[sid] = [gen]
+            prevs[sid] = gen
+        prev = prevs[sid]
+        rec["parent_record_id"] = prev["record_id"]
+        rec["prev_hash"] = record_hash(prev)
         if e.get("human_approver"):
             rec["human_override"] = {"operator_id": e["human_approver"], "reason": e.get("reason", ""),
                                      "original_action": e.get("action")}
         if private_key_pem is not None:
             rec = sign_record(rec, private_key_pem)      # BEFORE the next prev_hash: the hash covers all fields
-        out.append(rec)
-        prev = rec
-    return out
+        chains[sid].append(rec)
+        prevs[sid] = rec
+    return chains
 
 
 # ── verification (offline, fail-closed) ──────────────────────────────────────────────────────
@@ -217,6 +256,8 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     seen_ids: set = set()
     if not records:
         problems.append({"i": -1, "why": "empty chain: nothing to verify (not a valid audit trail)"})
+    session0 = None
+    last_ts = None
     for i, r in enumerate(records):
         if not isinstance(r, dict):
             problems.append({"i": i, "why": "record is not an object"}); continue      # prev is NOT reset (no genesis mid-chain)
@@ -244,13 +285,27 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                     problems.append({"i": i, "why": f"{f} is not in canonical 8-4-4-4-12 lowercase form"})
             except ValueError:
                 problems.append({"i": i, "why": f"{f} is not a UUID"})
-        if not _RFC3339.match(str(r.get("timestamp", ""))):
+        ts = str(r.get("timestamp", ""))
+        if not _RFC3339.match(ts):
             problems.append({"i": i, "why": "timestamp is not RFC 3339 (extended format with offset)"})
+        elif not (ts.endswith("Z") or ts.endswith("+00:00")):
+            problems.append({"i": i, "why": "timestamp is not UTC (draft: UTC offset)"})
+        else:
+            d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if last_ts is not None and d < last_ts:
+                problems.append({"i": i, "why": "timestamp earlier than the previous record (not monotonic)"})
+            last_ts = d
+        if session0 is None:
+            session0 = r.get("session_id")
+        elif r.get("session_id") != session0:
+            problems.append({"i": i, "why": "session_id differs: one chain must be one session (draft §3)"})
         if not _URI.match(str(r.get("agent_id", ""))):
             problems.append({"i": i, "why": "agent_id is not a URI (scheme:...)"})
         if i == 0:
             if r.get("parent_record_id") is not None or r.get("prev_hash") is not None:
                 problems.append({"i": i, "why": "genesis record must have null parent_record_id and prev_hash"})
+            if r.get("action_type") != "lifecycle" or (r.get("action_detail") or {}).get("event") != "session_start":
+                problems.append({"i": i, "why": "genesis must be action_type=lifecycle with action_detail.event=session_start (draft §6.1)"})
         else:
             if prev is None:
                 problems.append({"i": i, "why": "previous record unusable"})
@@ -276,8 +331,11 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
         prev = r
     return {"ok": not problems, "records": len(records), "problems": problems, "signatures_verified": signed_ok,
             "draft": AAT_DRAFT,
-            "scope": ("chain + vocabulary + optional ECDSA P-256 signatures, offline; does not prove the truth of "
-                      "the actions, only that the sequence was not altered since the hashes were written")}
+            "scope": ("chain + vocabulary + lifecycle + optional ECDSA P-256 signatures, offline; does not prove the truth "
+                      "of the actions, only that the sequence was not altered since the hashes were written. DECLARED "
+                      "LIMIT: without signatures the LAST record can be altered undetected (nothing hashes it yet) and a "
+                      "whole chain can be regenerated from scratch — signatures or an external anchor of the last hash "
+                      "close that")}
 
 
 # ── optional ECDSA P-256 signatures (needs `cryptography`) ───────────────────────────────────
