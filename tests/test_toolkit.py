@@ -894,5 +894,100 @@ class TestDoctorSelfExamine(unittest.TestCase):
         self.assertIn("host self-check", doctor.render(doctor.examine()))
 
 
+class TestAATInterop(unittest.TestCase):
+    """draft-sharif-agent-audit-trail-00: export of an AgentEvidenceLog, chain verification, signatures.
+    Negatives first; every positive has its tampered twin."""
+
+    def _log(self, tmp):
+        log = agent.AgentEvidenceLog(os.path.join(tmp, "agent.jsonl"), runtime_id="rt-1")
+        log.record("bot-7", "sess-a", "tool_call", "https://api.example/x", "rule-1", agent.Decision.ALLOW, agent.Outcome.EXECUTED)
+        log.record("bot-7", "sess-a", "file_write", "/tmp/out", "rule-2", agent.Decision.DENY, agent.Outcome.BLOCKED)
+        log.record("bot-7", "sess-a", "network", "https://x", "rule-3", agent.Decision.ALLOW_WITH_APPROVAL,
+                   agent.Outcome.PENDING_APPROVAL, human_approver="op-9", reason="needs a human")
+        return log
+
+    def test_jcs_subset(self):
+        from omega_evidence.interop import aat
+        self.assertEqual(aat.jcs({"b": 1, "a": [True, None, "é"]}), b'{"a":[true,null,"\u00e9"],"b":1}'.replace(b"\\u00e9", "é".encode()))
+        self.assertEqual(aat.jcs({"\u20ac": 1, "a": 2}), aat.jcs({"a": 2, "\u20ac": 1}))
+        with self.assertRaises(ValueError):
+            aat.jcs({"x": 1.5})
+        with self.assertRaises(ValueError):
+            aat.jcs({"x": float("nan")})
+        with self.assertRaises(ValueError):
+            aat.jcs({"x": 2 ** 53 + 1})                       # oltre l'esattezza IEEE 754 (Fable, misurato)
+        self.assertEqual(aat.jcs({"x": 2 ** 53}), b'{"x":9007199254740992}')
+        # ordinamento per unità UTF-16: un carattere astrale (surrogati D83D…) viene DOPO U+FFFD? no: prima di U+FFFF, dopo U+D7FF
+        keys = list(json.loads(aat.jcs({"\U0001F600": 1, "\uFFFD": 2, "\uD7FF": 3}).decode()).keys())
+        self.assertEqual(keys, ["\uD7FF", "\U0001F600", "\uFFFD"])
+
+    def test_export_and_verify_then_tamper(self):
+        from omega_evidence.interop import aat
+        with tempfile.TemporaryDirectory() as tmp:
+            log = self._log(tmp)
+            entries = list(log._ledger.entries())
+            recs = aat.from_omega(entries, agent_version="1.2.3", trust_level="L1")
+            self.assertEqual(len(recs), 3)
+            # deterministico: stesso ledger → stessa catena (Opus); id in formato UUID v4 (Opus+Gemini)
+            self.assertEqual(recs, aat.from_omega(entries, agent_version="1.2.3", trust_level="L1"))
+            import uuid as _u
+            self.assertEqual(_u.UUID(recs[0]["record_id"]).version, 4); self.assertEqual(_u.UUID(recs[0]["session_id"]).version, 4)
+            self.assertFalse(aat.verify_chain([])["ok"])
+            # mai inventare: azione ignota, esito ignoto, timestamp rotto, agent_id assente → ValueError
+            for bad in ({"action": "teleport"}, {"outcome": "meh"}, {"timestamp_utc": "garbage"}, {"agent_id": None}):
+                e2 = json.loads(json.dumps(entries)); e2[0].update(bad)
+                with self.assertRaises(ValueError):
+                    aat.from_omega(e2, "1.0")
+            v1 = json.loads(json.dumps(recs)); v1[0]["session_id"] = str(_u.uuid1())
+            self.assertTrue(any("v4" in p["why"] for p in aat.verify_chain(v1)["problems"]))
+            self.assertIsNone(recs[0]["prev_hash"]); self.assertIsNone(recs[0]["parent_record_id"])
+            self.assertEqual(recs[1]["prev_hash"], aat.record_hash(recs[0]))
+            self.assertEqual([r["outcome"] for r in recs], ["success", "denied", "escalated"])
+            self.assertEqual(recs[2]["human_override"]["operator_id"], "op-9")
+            self.assertTrue(recs[0]["agent_id"].startswith("urn:omega:agent:"))
+            self.assertEqual(recs[0]["session_id"], recs[1]["session_id"])
+            v = aat.verify_chain(recs)
+            self.assertTrue(v["ok"], v["problems"])
+            # riordino → prev_hash e parent non corrispondono
+            bad = [recs[0], recs[2], recs[1]]
+            self.assertFalse(aat.verify_chain(bad)["ok"])
+            # alterazione di un campo del record 0 → il record 1 non lo aggancia più
+            alt = json.loads(json.dumps(recs)); alt[0]["outcome"] = "failure"
+            self.assertFalse(aat.verify_chain(alt)["ok"])
+            # vocabolario e genesi
+            alt = json.loads(json.dumps(recs)); alt[1]["action_type"] = "hack"
+            self.assertTrue(any("vocabulary" in p["why"] for p in aat.verify_chain(alt)["problems"]))
+            alt = json.loads(json.dumps(recs)); alt[0]["prev_hash"] = "00" * 32
+            self.assertTrue(any("genesis" in p["why"] for p in aat.verify_chain(alt)["problems"]))
+            with self.assertRaises(ValueError):
+                aat.from_omega(entries, "1.0", trust_level="L9")
+
+    def test_signatures_p256(self):
+        from omega_evidence.interop import aat
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography assente")
+        priv, pub = aat.generate_p256_keypair()
+        _, pub2 = aat.generate_p256_keypair()
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = list(self._log(tmp)._ledger.entries())
+            recs = aat.from_omega(entries, "1.0")
+            # firmare DOPO l'export rompe la catena (l'hash copre TUTTI i campi, firma inclusa): Opus, misurato
+            broken = [aat.sign_record(r, priv) for r in recs]
+            self.assertFalse(aat.verify_chain(broken, pubkey_pem=pub)["ok"])
+            # la firma va DENTRO l'export
+            signed = aat.from_omega(entries, "1.0", private_key_pem=priv)
+            v = aat.verify_chain(signed, pubkey_pem=pub)
+            self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["signatures_verified"], 3)
+            self.assertFalse(aat.verify_chain(signed, pubkey_pem=pub2)["ok"])
+            self.assertFalse(aat.verify_chain(recs, pubkey_pem=pub)["ok"])          # non firmati con chiave data
+            alt = json.loads(json.dumps(signed)); alt[1]["outcome"] = "failure"
+            self.assertFalse(aat.verify_chain(alt, pubkey_pem=pub)["ok"])
+            self.assertEqual(len(aat._b64u_dec(signed[0]["signature"])), 64)      # P1363 r||s
+            padded = json.loads(json.dumps(signed)); padded[0]["signature"] += "=="
+            self.assertFalse(aat.verify_chain(padded, pubkey_pem=pub)["ok"])      # padding rifiutato
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

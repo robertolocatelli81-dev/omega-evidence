@@ -40,6 +40,7 @@ the index links carry `#sha256=` fragments, so pip verifies every download.
 | `timestamp` | RFC 3161 trusted timestamping (a qualified TSA adds legal presumption of time) |
 | `attestation` | PII-free attestation primitive — salted per-record digests, **no linkability** |
 | `verifier` | One offline verifier with **graduated authenticity** |
+| `interop.aat` | Export/verify **Agent Audit Trail** chains (draft-sharif-agent-audit-trail-00): JCS hash chain, vocabularies, optional ECDSA P-256 signatures |
 
 ## Graduated authenticity
 
@@ -86,6 +87,27 @@ is **not** a conformity-assessment body, not a notified body, not a QTSP, not a
 CA/PKI, not the official CSIRT/ENISA or TRACES channel, and not legal advice.
 The trust registry is TOFU: it proves a key was decided to be trusted and
 prevents silent key-swap, not the legal identity of the holder.
+
+## Agent Audit Trail interop (2026-09-14)
+
+Compared with the 2026 field (audit-trail products, OWASP agentic logging, EU AI Act Art. 12 from 2 August 2026):
+the requirement has converged, the record has not. The first Internet-Draft proposing one is
+`draft-sharif-agent-audit-trail-00` (R. Sharif, 29 March 2026 — an individual draft, not an IETF standard,
+expires 29 September 2026). `omega_evidence.interop.aat` exports an `AgentEvidenceLog` ledger as an AAT chain
+(mandatory fields, controlled vocabularies, `prev_hash` = SHA-256 over the JCS of the previous record) and
+verifies any AAT chain offline, fail-closed, including the optional ECDSA P-256 signatures (IEEE P1363 r||s).
+Declared: the mapping is lossy (omega's policy rule, decision and attestation travel inside `action_detail`)
+but never fabricates (unknown action/outcome, missing agent id or unparsable timestamp raise); identifiers are
+UUID-v4-format values derived deterministically from the omega digests, so the same ledger exports to the same
+chain; signing happens inside the export (the draft hashes all fields of the previous record, signature
+included); `trust_level` is what the caller declares; JCS is implemented for the AAT subset (integers within
+2^53); the draft may change — its version is pinned in `AAT_DRAFT`.
+
+```python
+from omega_evidence.interop import aat
+recs = aat.from_omega(list(log._ledger.entries()), agent_version="1.2.3", trust_level="L1")
+aat.verify_chain(recs)                      # {"ok": True, ...}; add pubkey_pem=... to check signatures
+```
 
 ## Standards
 
