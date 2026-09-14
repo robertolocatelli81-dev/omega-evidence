@@ -910,13 +910,16 @@ class TestAATInterop(unittest.TestCase):
         from omega_evidence.interop import aat
         self.assertEqual(aat.jcs({"b": 1, "a": [True, None, "é"]}), b'{"a":[true,null,"\u00e9"],"b":1}'.replace(b"\\u00e9", "é".encode()))
         self.assertEqual(aat.jcs({"\u20ac": 1, "a": 2}), aat.jcs({"a": 2, "\u20ac": 1}))
-        with self.assertRaises(ValueError):
-            aat.jcs({"x": 1.5})
+        self.assertEqual(aat.jcs({"x": 1.5}), b'{"x":1.5}')                          # ES6: i float si serializzano
         with self.assertRaises(ValueError):
             aat.jcs({"x": float("nan")})
         with self.assertRaises(ValueError):
-            aat.jcs({"x": 2 ** 53 + 1})                       # oltre l'esattezza IEEE 754 (Fable, misurato)
-        self.assertEqual(aat.jcs({"x": 2 ** 53}), b'{"x":9007199254740992}')
+            aat.jcs({"x": 2 ** 53 + 1})                       # export: oltre l'esattezza IEEE 754 → rifiutato
+        self.assertEqual(aat.jcs({"x": 2 ** 53 + 1}, strict=False), b'{"x":9007199254740992}')   # verify: come ES6
+        # numeri ES6 (RFC 8785 §3.2.2.3): catene esterne con float devono verificare
+        self.assertEqual(aat.jcs({"a": 1.5, "b": 100.0, "c": 1e21, "d": 1e-7, "e": 0.1, "f": -0.0}), b'{"a":1.5,"b":100,"c":1e+21,"d":1e-7,"e":0.1,"f":0}')
+        with self.assertRaises(ValueError):
+            aat.jcs({"x": float("inf")})
         # ordinamento per unità UTF-16: un carattere astrale (surrogati D83D…) viene DOPO U+FFFD? no: prima di U+FFFF, dopo U+D7FF
         keys = list(json.loads(aat.jcs({"\U0001F600": 1, "\uFFFD": 2, "\uD7FF": 3}).decode()).keys())
         self.assertEqual(keys, ["\uD7FF", "\U0001F600", "\uFFFD"])
@@ -940,6 +943,28 @@ class TestAATInterop(unittest.TestCase):
                     aat.from_omega(e2, "1.0")
             v1 = json.loads(json.dumps(recs)); v1[0]["session_id"] = str(_u.uuid1())
             self.assertTrue(any("v4" in p["why"] for p in aat.verify_chain(v1)["problems"]))
+            # id non canonici (urn:uuid:…, maiuscole) → rifiutati dal verificatore; record senza self_hash → export rifiutato
+            v2 = json.loads(json.dumps(recs)); v2[0]["record_id"] = "urn:uuid:" + v2[0]["record_id"]
+            self.assertTrue(any("canonical" in p["why"] for p in aat.verify_chain(v2)["problems"]))
+            e3 = json.loads(json.dumps(entries)); e3[0].pop("self_hash", None); e3[0].pop("record_sha3", None)
+            with self.assertRaises(ValueError):
+                aat.from_omega(e3, "1.0")
+            with self.assertRaises(ValueError):
+                aat.from_omega(entries, "1.0", session_ids={"sess-a": "not-a-uuid"})
+            # record_id duplicato e timestamp in formato base (vietato da RFC 3339) → problemi
+            v3 = json.loads(json.dumps(recs)); v3[1]["record_id"] = v3[0]["record_id"]
+            self.assertTrue(any("duplicate" in p["why"] for p in aat.verify_chain(v3)["problems"]))
+            with self.assertRaises(ValueError):
+                aat._rfc3339("20260914T134000Z")
+            # catena ESTERNA conforme con float e agent_id spiffe: deve verificare
+            g = {"record_id": aat._uuid4_from("g1"), "timestamp": "2026-09-14T13:40:00.000Z", "agent_id": "spiffe://x/y",
+                 "agent_version": "1", "session_id": aat._uuid4_from("s"), "action_type": "decision",
+                 "action_detail": {"risk": 0.25, "n": 3}, "outcome": "success", "trust_level": "L2",
+                 "parent_record_id": None, "prev_hash": None, "risk_score": 0.75}
+            g2 = dict(g, record_id=aat._uuid4_from("g2"), parent_record_id=g["record_id"], prev_hash=aat.record_hash(g, strict=False))
+            self.assertTrue(aat.verify_chain([g, g2])["ok"], aat.verify_chain([g, g2])["problems"])
+            # un elemento non-oggetto in mezzo non azzera la catena (nessuna genesi a metà log)
+            self.assertFalse(aat.verify_chain([g, "junk", dict(g2, parent_record_id=None, prev_hash=None)])["ok"])
             self.assertIsNone(recs[0]["prev_hash"]); self.assertIsNone(recs[0]["parent_record_id"])
             self.assertEqual(recs[1]["prev_hash"], aat.record_hash(recs[0]))
             self.assertEqual([r["outcome"] for r in recs], ["success", "denied", "escalated"])

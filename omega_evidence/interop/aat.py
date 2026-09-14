@@ -7,7 +7,8 @@ Why (2026-09-14): the field is converging on the REQUIREMENT (tamper-evident log
 EU AI Act Art. 12 from 2 August 2026) but not yet on the RECORD. The first Internet-Draft that proposes a
 record is "Agent Audit Trail: A Standard Logging Format for Autonomous AI Systems" (R. Sharif, 29 March
 2026, expires 29 September 2026; individual draft, NOT an IETF standard). This module lets an
-`AgentEvidenceLog` ledger be EXPORTED as an AAT chain and lets any AAT chain be VERIFIED offline — so an
+`AgentEvidenceLog` ledger be EXPORTED as an AAT chain and lets an AAT chain (ours or foreign, with ES6-serialisable
+numbers) be VERIFIED offline — so an
 omega evidence pack can be read by tools that adopt that format, and AAT logs from elsewhere can be checked
 with the same fail-closed discipline as ours.
 
@@ -18,9 +19,11 @@ failure, timeout, denied, escalated}, `trust_level` in {L0..L4}, `parent_record_
 hex(SHA-256(JCS(previous record, ALL fields))) with null at genesis; optional `signature` = ECDSA P-256 over
 SHA-256(JCS(record without `signature`)), IEEE P1363 r||s, base64url.
 
-Honest scope: JCS (RFC 8785) is implemented for the subset AAT needs — objects, arrays, strings, integers
-within ±2^53 (the IEEE 754 exactness bound RFC 8785 relies on), booleans, null; keys sorted by UTF-16 code
-units; non-integral numbers and integers beyond 2^53 are refused (their ES6 serialisation is out of scope).
+Honest scope: JCS (RFC 8785) is implemented for objects, arrays, strings, booleans, null and NUMBERS
+serialised the ES6 way (integral doubles as integers, shortest round-trip mantissa, exponent without leading
+zeros, 1e21 threshold), keys sorted by UTF-16 code units — so foreign AAT chains containing non-integer
+numbers verify too; integers beyond 2^53 are refused on EXPORT (they would silently lose precision) and
+serialised as doubles on VERIFY, as ES6 does.
 The mapping from omega records is lossy by design (policy_rule, decision, attestation travel in
 `action_detail`) but never FABRICATES: an unknown omega action/outcome, a missing agent id or an unparsable
 timestamp raise instead of being guessed (review of 2026-09-14). Identifiers are UUID v4-FORMAT values derived
@@ -48,13 +51,33 @@ MANDATORY = ("record_id", "timestamp", "agent_id", "agent_version", "session_id"
 _ACTION_MAP = {"tool_call": "tool_call", "tool_response": "tool_response", "decision": "decision",
                "delegation": "delegation", "escalation": "escalation", "error": "error", "lifecycle": "lifecycle",
                "file_write": "tool_call", "file_read": "tool_call", "command_exec": "tool_call", "network": "tool_call"}
-_OUTCOME_MAP = {"executed": "success", "blocked": "denied", "pending_approval": "escalated"}
+_OUTCOME_MAP = {"executed": "success", "blocked": "denied", "pending_approval": "escalated",
+                "success": "success", "failure": "failure", "timeout": "timeout", "denied": "denied", "escalated": "escalated"}
 
 
 # ── JCS (RFC 8785), subset ───────────────────────────────────────────────────────────────────
-def jcs(obj: Any) -> bytes:
-    """JSON Canonicalization Scheme for the AAT subset: keys sorted by UTF-16 code units, no whitespace,
-    strings with the JSON.stringify escapes, integers only (floats refused, NaN/Infinity refused)."""
+def _es6_number(f: float) -> str:
+    """ES6 Number::toString (RFC 8785 §3.2.2.3): integral doubles below 1e21 print as integers; otherwise the
+    shortest round-trip form (Python repr) with the exponent normalised ('1e-07' → '1e-7', '1e+21' kept)."""
+    if f == 0:
+        return "0"
+    if f.is_integer() and abs(f) < 1e21:
+        return str(int(f))
+    r = repr(f)
+    if "e" in r:
+        m, e = r.split("e")
+        sign = "-" if e.startswith("-") else "+"
+        e = e.lstrip("+-").lstrip("0") or "0"
+        if m.endswith(".0"):
+            m = m[:-2]
+        return f"{m}e{sign}{e}"
+    return r
+
+
+def jcs(obj: Any, strict: bool = True) -> bytes:
+    """JSON Canonicalization Scheme (RFC 8785): keys sorted by UTF-16 code units, no whitespace, JSON.stringify
+    string escapes, ES6 number serialisation. `strict=True` (export) refuses integers beyond 2^53; verification
+    uses strict=False and serialises them as doubles, as ES6 would."""
     def enc(x: Any) -> str:
         if x is None:
             return "null"
@@ -64,12 +87,14 @@ def jcs(obj: Any) -> bytes:
             return "false"
         if isinstance(x, int):
             if abs(x) > 2 ** 53:
-                raise ValueError("JCS subset: integers beyond 2^53 are not exactly representable (RFC 8785 relies on IEEE 754)")
+                if strict:
+                    raise ValueError("JCS: integers beyond 2^53 lose precision in ES6 — refused on export")
+                return _es6_number(float(x))
             return str(x)
         if isinstance(x, float):
-            if x != x or x in (float("inf"), float("-inf")) or not x.is_integer() or abs(x) > 2 ** 53:
-                raise ValueError("JCS subset: only integral numbers within 2^53 are supported here")
-            return str(int(x))
+            if x != x or x in (float("inf"), float("-inf")):
+                raise ValueError("JCS: NaN/Infinity are not JSON")
+            return _es6_number(x)
         if isinstance(x, str):
             return json.dumps(x, ensure_ascii=False)
         if isinstance(x, (list, tuple)):
@@ -81,20 +106,23 @@ def jcs(obj: Any) -> bytes:
     return enc(obj).encode("utf-8")
 
 
-def record_hash(rec: Dict[str, Any]) -> str:
+def record_hash(rec: Dict[str, Any], strict: bool = True) -> str:
     """prev_hash of the NEXT record = hex(SHA-256(JCS(this record, all fields)))."""
-    return hashlib.sha256(jcs(rec)).hexdigest()
+    return hashlib.sha256(jcs(rec, strict=strict)).hexdigest()
+
+
+_RFC3339 = __import__("re").compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$")
+_URI = __import__("re").compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:.+")
 
 
 # ── export from an omega AgentEvidenceLog ledger ─────────────────────────────────────────────
 def _rfc3339(ts: str) -> str:
-    try:
-        d = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-    except ValueError:
-        raise ValueError(f"omega record has an unparsable timestamp_utc: {ts!r} — an evidence export never invents a time") from None
-    if d.tzinfo is None:
-        raise ValueError(f"omega record timestamp_utc lacks a UTC offset: {ts!r}")
-    d = d.astimezone(timezone.utc)
+    """Strict RFC 3339 (extended format with 'T', '-' and ':', numeric offset or 'Z'); output normalised to UTC
+    with MILLISECOND precision (finer fractions are truncated — declared)."""
+    t = str(ts)
+    if not _RFC3339.match(t):
+        raise ValueError(f"not RFC 3339 (extended format with offset required): {t!r} — an evidence export never invents a time")
+    d = datetime.fromisoformat(t.replace("Z", "+00:00")).astimezone(timezone.utc)
     return d.strftime("%Y-%m-%dT%H:%M:%S.") + f"{d.microsecond // 1000:03d}Z"
 
 
@@ -121,12 +149,20 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
     out: List[Dict[str, Any]] = []
     prev: Optional[Dict[str, Any]] = None
     sess = dict(session_ids or {})
+    for k, v in sess.items():
+        try:
+            u = uuid.UUID(str(v))
+        except ValueError:
+            raise ValueError(f"session_ids[{k!r}] is not a UUID") from None
+        if u.version != 4 or str(u) != str(v):
+            raise ValueError(f"session_ids[{k!r}] must be a canonical UUID v4")
     for e in entries:
         if e.get("kind") != "agent_governance_action":
             continue
         sid = str(e.get("session_id", ""))
         try:
-            ok_v4 = uuid.UUID(sid).version == 4
+            u = uuid.UUID(sid)
+            ok_v4 = u.version == 4 and str(u) == sid       # canonical 8-4-4-4-12 lowercase only
         except ValueError:
             ok_v4 = False
         if not ok_v4:
@@ -135,14 +171,17 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
         aid = e.get("agent_id")
         if not aid or not isinstance(aid, str):
             raise ValueError("omega record without agent_id: cannot export (never invented)")
+        seed = e.get("self_hash") or e.get("record_sha3")
+        if not seed:
+            raise ValueError("omega record without self_hash/record_sha3: no stable identity, cannot export")
         if str(e.get("action")) not in _ACTION_MAP:
             raise ValueError(f"omega action {e.get('action')!r} has no AAT mapping: refused, not guessed")
         if str(e.get("outcome")) not in _OUTCOME_MAP:
             raise ValueError(f"omega outcome {e.get('outcome')!r} has no AAT mapping: refused, not guessed")
         rec: Dict[str, Any] = {
-            "record_id": _uuid4_from(f"omega-record:{e.get('self_hash') or e.get('record_sha3')}"),
+            "record_id": _uuid4_from(f"omega-record:{seed}"),
             "timestamp": _rfc3339(str(e.get("timestamp_utc", ""))),
-            "agent_id": aid if aid.startswith(("urn:", "http://", "https://", "did:")) else f"urn:omega:agent:{aid}",
+            "agent_id": aid if _URI.match(aid) else f"urn:omega:agent:{aid}",
             "agent_version": agent_version,
             "session_id": sid,
             "action_type": _ACTION_MAP[str(e.get("action"))],
@@ -175,11 +214,16 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     problems: List[Dict[str, Any]] = []
     prev: Optional[Dict[str, Any]] = None
     signed_ok = 0
+    seen_ids: set = set()
     if not records:
         problems.append({"i": -1, "why": "empty chain: nothing to verify (not a valid audit trail)"})
     for i, r in enumerate(records):
         if not isinstance(r, dict):
-            problems.append({"i": i, "why": "record is not an object"}); prev = None; continue
+            problems.append({"i": i, "why": "record is not an object"}); continue      # prev is NOT reset (no genesis mid-chain)
+        rid = str(r.get("record_id"))
+        if rid in seen_ids:
+            problems.append({"i": i, "why": "duplicate record_id"})
+        seen_ids.add(rid)
         for f in MANDATORY:
             if f not in r:
                 problems.append({"i": i, "why": f"missing mandatory field {f}"})
@@ -193,16 +237,17 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
             problems.append({"i": i, "why": "action_detail is not an object"})
         for f in ("record_id", "session_id"):
             try:
-                if uuid.UUID(str(r.get(f))).version != 4:
+                u = uuid.UUID(str(r.get(f)))
+                if u.version != 4:
                     problems.append({"i": i, "why": f"{f} is not a UUID v4 (draft requires v4)"})
+                elif str(u) != str(r.get(f)):
+                    problems.append({"i": i, "why": f"{f} is not in canonical 8-4-4-4-12 lowercase form"})
             except ValueError:
                 problems.append({"i": i, "why": f"{f} is not a UUID"})
-        try:
-            _rfc3339(str(r.get("timestamp", "")))
-        except ValueError:
-            problems.append({"i": i, "why": "timestamp is not RFC 3339 with UTC offset"})
-        if not str(r.get("agent_id", "")).startswith(("urn:", "http://", "https://", "did:")):
-            problems.append({"i": i, "why": "agent_id is not a URI"})
+        if not _RFC3339.match(str(r.get("timestamp", ""))):
+            problems.append({"i": i, "why": "timestamp is not RFC 3339 (extended format with offset)"})
+        if not _URI.match(str(r.get("agent_id", ""))):
+            problems.append({"i": i, "why": "agent_id is not a URI (scheme:...)"})
         if i == 0:
             if r.get("parent_record_id") is not None or r.get("prev_hash") is not None:
                 problems.append({"i": i, "why": "genesis record must have null parent_record_id and prev_hash"})
@@ -213,7 +258,7 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 if r.get("parent_record_id") != prev.get("record_id"):
                     problems.append({"i": i, "why": "parent_record_id does not link to the previous record"})
                 try:
-                    exp = record_hash(prev)
+                    exp = record_hash(prev, strict=False)      # foreign chains: ES6 numbers, never refused
                 except (ValueError, TypeError) as ex:
                     exp = None
                     problems.append({"i": i, "why": f"previous record not canonicalizable: {type(ex).__name__}"})
@@ -247,7 +292,7 @@ def _b64u_dec(s: str) -> bytes:
 
 
 def _signing_input(rec: Dict[str, Any]) -> bytes:
-    return hashlib.sha256(jcs({k: v for k, v in rec.items() if k != "signature"})).digest()
+    return hashlib.sha256(jcs({k: v for k, v in rec.items() if k != "signature"}, strict=False)).digest()
 
 
 def sign_record(rec: Dict[str, Any], private_key_pem: bytes) -> Dict[str, Any]:

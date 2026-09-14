@@ -100,8 +100,9 @@ Declared: the mapping is lossy (omega's policy rule, decision and attestation tr
 but never fabricates (unknown action/outcome, missing agent id or unparsable timestamp raise); identifiers are
 UUID-v4-format values derived deterministically from the omega digests, so the same ledger exports to the same
 chain; signing happens inside the export (the draft hashes all fields of the previous record, signature
-included); `trust_level` is what the caller declares; JCS is implemented for the AAT subset (integers within
-2^53); the draft may change — its version is pinned in `AAT_DRAFT`.
+included); `trust_level` is what the caller declares; JCS follows RFC 8785 with ES6 number serialisation, so foreign
+chains with non-integer numbers verify too (integers beyond 2^53 are refused on export); the draft may change —
+its version is pinned in `AAT_DRAFT`.
 
 ```python
 from omega_evidence.interop import aat
