@@ -1,0 +1,38 @@
+name: Build and test the release distributions
+
+# On a GitHub Release: build sdist + wheel, check metadata, run the tests. Distribution is the GitHub
+# Release itself (and the author's PEP 503 index); publication on PyPI was dropped by decision of the
+# author on 15/09/2026 — no OIDC / trusted-publisher job remains here.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Verify metadata
+        run: |
+          python -m pip install twine
+          python -m twine check dist/*
+      - name: Run tests before publishing
+        run: |
+          python -m pip install .
+          python tests/test_toolkit.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
