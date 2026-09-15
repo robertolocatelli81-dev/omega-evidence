@@ -42,6 +42,12 @@ jobs:
   publish:
     name: Publish to PyPI (trusted publishing)
     needs: build
+    # Runs ONLY once the trusted publisher is registered on PyPI (15/09/2026: every release went red with
+    # `invalid-publisher` because it is not). Set the repository variable PYPI_TRUSTED_PUBLISHER=true in
+    # Settings → Secrets and variables → Actions → Variables after registering the pending publisher
+    # (project omega-evidence, owner robertolocatelli81-dev, repo omega-evidence, workflow publish.yml,
+    # environment pypi). Until then the build+test job still runs and the release stays green.
+    if: ${{ vars.PYPI_TRUSTED_PUBLISHER == 'true' }}
     runs-on: ubuntu-latest
     environment: pypi          # protect this environment in repo settings if desired
     permissions:
