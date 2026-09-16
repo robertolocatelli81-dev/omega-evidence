@@ -105,7 +105,10 @@ def load_kat() -> list:
                 continue
             out.append({"public": base64.b64encode(bytes.fromhex(pk)).decode(),
                         "signature": base64.b64encode(bytes.fromhex(sig)).decode(),
-                        "message_hex": msg, "context_hex": ctx})
+                        "message_hex": msg.lower(), "context_hex": ctx})
+    keys = [(v["public"], v["message_hex"]) for v in out]
+    if len(set(keys)) != len(keys):        # council r2: a hand-grown file must not silently under-test (last-wins)
+        raise ValueError("KAT vector file: duplicate (key, message) pair")
     return out
 
 
@@ -133,8 +136,9 @@ def try_load() -> Dict[str, Any]:
     if not res.get("passed"):
         return {"registered": False, "alg": ALG, "reason": "KAT gate failed (empty context): " + str(res.get("reason"))}
     if ctxed:
-        ctx_by_vec = {(v["public"], v["signature"], v["message_hex"].lower()): v["context_hex"] for v in ctxed}
-        res = gate.run_kat(lambda p, s, m: _kat_verify(p, s, m, ctx_by_vec.get((p, s, m.hex()), "")), ctxed)
+        # bound by (key, message) so the gate's tampered-SIGNATURE negative still runs with the vector's context
+        ctx_by_vec = {(v["public"], v["message_hex"]): v["context_hex"] for v in ctxed}
+        res = gate.run_kat(lambda p, s, m: _kat_verify(p, s, m, ctx_by_vec.get((p, m.hex()), "")), ctxed)
         if not res.get("passed"):
             return {"registered": False, "alg": ALG, "reason": "KAT gate failed (with context): " + str(res.get("reason"))}
     signing.register_sig_alg(ALG, verify_fn, post_quantum=True)

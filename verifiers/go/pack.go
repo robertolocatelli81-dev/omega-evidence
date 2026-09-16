@@ -179,16 +179,20 @@ func trustState(path string) (map[string]*trustEntry, bool) {
 	}
 	for _, e := range entries {
 		d, isObj := e.Vals["data"].(*Object)
-		if !isObj {
-			continue
+		if !isObj { // council r2: a malformed record is a BROKEN store, not a skipped line
+			return st, false
 		}
 		act, _ := str(d, "action")
-		sid, _ := str(d, "signer_id")
-		if sid == "" {
+		if act != "trust" && act != "rotate" && act != "revoke" {
 			continue
 		}
-		pk, _ := str(d, "pubkey")
-		pq, _ := str(d, "pq_pubkey")
+		sid, sidOK := str(d, "signer_id")
+		pk, pkOK := str(d, "pubkey")
+		pq, pqOK := str(d, "pq_pubkey")
+		_, pqPresent := d.Vals["pq_pubkey"]
+		if !sidOK || sid == "" || (act != "revoke" && (!pkOK || pk == "")) || (pqPresent && (!pqOK || pq == "")) {
+			return st, false
+		}
 		switch act {
 		case "trust":
 			if cur := st[sid]; cur != nil && cur.revoked {
@@ -319,7 +323,12 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 				add("producer-signature", "FAIL", "signature invalid or pack changed")
 				sigStatus = "FAIL"
 			} else {
-				sid, _ := str(side, "signer_id")
+				sid, sidOK := str(side, "signer_id")
+				if !sidOK || sid == "" { // council r2: signer_id must be a non-empty string in all four verifiers
+					add("producer-signature", "FAIL", "malformed sidecar fields: signer_id must be a non-empty string")
+					sigStatus = "FAIL"
+					return finish(r, declared, false, false, "", requirePQ || expectedPQ != "")
+				}
 				add("producer-signature", "PASS", "signed by "+sid+" (ed25519)")
 				sigStatus = "PASS"
 				var st map[string]*trustEntry
@@ -444,7 +453,13 @@ func finish(r Receipt, digest string, trusted, signed bool, force string, pqRequ
 		}
 	}
 	r.Valid = checked && valid
-	r.Authenticated = trusted || signed
+	integrity := false // council r2: never authenticated when the body does not match pack_sha3
+	for _, l := range r.Layers {
+		if l.Layer == "pack-sha3" && l.Status == "PASS" {
+			integrity = true
+		}
+	}
+	r.Authenticated = (trusted || signed) && integrity
 	var pq *bool
 	for _, l := range r.Layers {
 		if l.Layer == "pq-signature" {

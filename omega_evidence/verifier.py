@@ -193,7 +193,7 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
         side = loads_strict(open(sig_side, encoding="utf-8").read().strip(" \t\r\n"))
         if not isinstance(side, dict):
             raise ValueError("sidecar is not a JSON object")
-    except ValueError as e:
+    except (OSError, ValueError) as e:              # unreadable (permissions, race) is a FAIL, not a crash (council r2)
         layers.append(_layer("producer-signature", "FAIL", f"malformed sidecar: {e}"))
         return "FAIL", False, False
     pack = json.loads(open(path, encoding="utf-8").read())
@@ -214,6 +214,10 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
     if (b64_strict(side.get("public_key_b64"), 32) is None or b64_strict(side.get("signature_b64"), 64) is None
             or not isinstance(current, str) or not _re.fullmatch(r"[0-9a-f]{64}", current)):
         layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields (strict base64 32/64, lowercase hex digest)"))
+        return "FAIL", False, False
+    if not isinstance(side.get("signer_id"), str) or not side["signer_id"]:
+        # council r2: a list / missing signer_id gave three outcomes in three verifiers (crash, FAIL, JS coercion PASS)
+        layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields: signer_id must be a non-empty string"))
         return "FAIL", False, False
     result = verify_signature(side["public_key_b64"], side["signature_b64"], current.encode())
     if current != side.get("signed_pack_sha3") or not result:
@@ -317,7 +321,11 @@ def verify_pack(path: str, ledger_path: Optional[str] = None,
     auth = next((ly for ly in layers if ly["layer"] == "authenticity"), {})
     # `valid` = integrity + intactness. `authenticated` = a real producer identity signed it
     # (a self-made ledger anchor proves integrity/time, NOT authenticity — read this field).
-    roll["authenticated"] = auth.get("status") == "PASS" and (
+    # council r2 (Sonnet): a body mutated after signing, pack_sha3 and sidecar intact, gave valid=false but
+    # authenticated=true — a single-boolean gate would accept content nobody signed. `authenticated` therefore also
+    # requires the pack-sha3 integrity layer to PASS (same in Go/Java/JS).
+    integrity = next((ly for ly in layers if ly["layer"] == "pack-sha3"), {}).get("status") == "PASS"
+    roll["authenticated"] = integrity and auth.get("status") == "PASS" and (
         "signed" in auth.get("detail", "") or "trusted" in auth.get("detail", ""))
     return roll
 

@@ -177,7 +177,9 @@ registry, and only when the classical key that signed is the registered one) and
 when absent, foreign, malformed or invalid — and also when the layer was required (`require_pq`, or a pinned key)
 and could not be confirmed: a required layer that is stripped, foreign or unverifiable is a FAIL, never null. A
 downgrade to Ed25519-only is refused by the relying party's requirement, not by the file. `authenticated` is
-never true for a revoked or untrusted signer. The PQ private key lives on disk (PKCS#8, 0600) or in **AWS KMS**
+never true for a revoked or untrusted signer, nor when the body no longer matches `pack_sha3` (a signed identity over
+content that was changed afterwards is not authenticated content). Re-establishing a revoked signer with `rotate` must
+decide its post-quantum key explicitly (`pq_pubkey=<new>` or `drop_pq=True`). The PQ private key lives on disk (PKCS#8, 0600) or in **AWS KMS**
 (`KeySpec ML_DSA_65`, `ML_DSA_SHAKE_256`, `MessageType RAW`; the Sign response's KeyId must match the key whose
 public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ key unless a new one is given or
 `drop_pq=True`. Without `cryptography` ≥ 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0; the backend is

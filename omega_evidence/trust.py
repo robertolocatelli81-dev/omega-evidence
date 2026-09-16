@@ -55,10 +55,20 @@ class TrustRegistry:
             raise ValueError(f"{what} must be a non-empty string")
         return v
 
-    def _apply(self, d: Dict[str, Any]) -> None:
+    def _apply(self, d: Any) -> None:
+        # council r2: a record that is not an object, or carries a non-string signer_id / key, is a BROKEN store
+        # (it passed the chain check and crashed here; Go/Java/JS silently skipped it) — never skipped, never a pin
+        if not isinstance(d, dict):
+            raise ValueError("trust store broken: entry data is not an object")
         act, sid = d.get("action"), d.get("signer_id")
-        if not sid:
+        if act not in ("trust", "rotate", "revoke"):
             return
+        if not isinstance(sid, str) or not sid:
+            raise ValueError(f"trust store broken: {act} record without a string signer_id")
+        if act in ("trust", "rotate") and (not isinstance(d.get("pubkey"), str) or not d["pubkey"]):
+            raise ValueError(f"trust store broken: {act} record without a string pubkey")
+        if "pq_pubkey" in d and (not isinstance(d["pq_pubkey"], str) or not d["pq_pubkey"]):
+            raise ValueError(f"trust store broken: {act} record with a malformed pq_pubkey")
         if act == "trust":
             cur = self._state.get(sid)
             if cur and cur.get("revoked"):
@@ -106,8 +116,14 @@ class TrustRegistry:
         self._key(signer_id, "signer_id"); self._key(pubkey, "pubkey")
         if pq_pubkey is not None:
             self._key(pq_pubkey, "pq_pubkey")
+        if pq_pubkey is not None and drop_pq:
+            raise ValueError("rotate: pq_pubkey and drop_pq=True contradict each other")
         with self._lock:
             cur = self._state.get(signer_id) or {}
+            if cur.get("revoked") and cur.get("pq_pubkey") and pq_pubkey is None and not drop_pq:
+                # council r2: a revocation covers the whole identity; re-establishing it must decide the PQ key
+                # explicitly (new key or drop), never resurrect the possibly compromised one by default
+                raise ValueError(f"rotate: {signer_id!r} is revoked and had a pinned post-quantum key — pass pq_pubkey=<new> or drop_pq=True")
             kept = None if drop_pq else (pq_pubkey or cur.get("pq_pubkey"))
             rec = {"action": "rotate", "signer_id": signer_id, "pubkey": pubkey, "ts": _now()}
             if kept:

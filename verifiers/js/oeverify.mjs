@@ -156,8 +156,11 @@ function trustState(path) {
   const { ok, entries } = ledgerEntries(path); const st = {};
   if (!ok) return { ok, st };
   for (const e of entries) {
-    const d = e.data; if (!d || typeof d !== "object") continue;
-    const sid = d.signer_id; if (typeof sid !== "string" || !sid) continue;
+    const d = e.data; if (!d || typeof d !== "object" || Array.isArray(d)) return { ok: false, st };   // council r2: malformed record = broken store
+    if (!["trust", "rotate", "revoke"].includes(d.action)) continue;
+    const sid = d.signer_id;
+    const badKey = (v) => typeof v !== "string" || !v;
+    if (badKey(sid) || (d.action !== "revoke" && badKey(d.pubkey)) || ("pq_pubkey" in d && badKey(d.pq_pubkey))) return { ok: false, st };
     if (d.action === "trust") { if (st[sid] && st[sid].revoked) continue; st[sid] = { pubkey: d.pubkey, pq: d.pq_pubkey, revoked: false }; }
     else if (d.action === "rotate") st[sid] = { pubkey: d.pubkey, pq: d.pq_pubkey, revoked: false };
     else if (d.action === "revoke" && st[sid]) st[sid].revoked = true;
@@ -204,7 +207,10 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
         try { okSig = Boolean(pk && sig && declared && edVerify(null, Buffer.from(declared, "utf-8"), createPublicKey({ key: Buffer.concat([SPKI, pk]), format: "der", type: "spki" }), sig)); } catch { okSig = false; }
         if (!okSig || side.signed_pack_sha3 !== declared) { add("producer-signature", "FAIL", "signature invalid or pack changed"); sigStatus = "FAIL"; }
         else {
-          const sid = side.signer_id; add("producer-signature", "PASS", `signed by ${sid} (ed25519)`); sigStatus = "PASS";
+          const sid = side.signer_id;
+          if (typeof sid !== "string" || !sid) { add("producer-signature", "FAIL", "malformed sidecar fields: signer_id must be a non-empty string"); sigStatus = "FAIL"; }   // council r2
+          else {
+          add("producer-signature", "PASS", `signed by ${sid} (ed25519)`); sigStatus = "PASS";
           let st = null, stOK = true; if (trustStore) { const r = trustState(trustStore); st = r.st; stOK = r.ok; }
           // the registry's PQ pin is borrowed only when the classical key that signed is the registered one (council 16/09 r1)
           let pinned = expectPQ; if (!pinned && st && stOK && st[sid] && !st[sid].revoked && st[sid].pq && st[sid].pubkey === side.public_key_b64) pinned = st[sid].pq;
@@ -213,6 +219,7 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
             const te = st[sid];
             if (stOK && te && !te.revoked && te.pubkey === side.public_key_b64) { add("trusted-signer", "PASS", sid + " in trust registry"); trusted = true; }
             else { add("trusted-signer", "FAIL", !stOK ? "trust store unreadable or broken" : te && te.revoked ? sid + ": key revoked" : te ? sid + ": key differs" : sid + ": not in trust registry"); trustFailed = true; }
+          }
           }
         }
       }
@@ -246,7 +253,8 @@ function finish(layers, trusted, signed, pqRequired) {
   const valid = checked.length > 0 && checked.every((l) => l.status === "PASS");
   const pqL = layers.find((l) => l.layer === "pq-signature");
   const pq = !pqL ? false : pqL.status === "PASS" ? true : pqL.status === "SKIP" ? null : false;
-  return { valid, layers, authenticated: trusted || signed, pq_protected: pq, verdict: valid && (!pqRequired || pq === true) ? "PASS" : "FAIL", verifier: "oeverify.mjs (Node stdlib; ML-DSA not verified)" };
+  const integrity = layers.some((l) => l.layer === "pack-sha3" && l.status === "PASS");   // council r2
+  return { valid, layers, authenticated: (trusted || signed) && integrity, pq_protected: pq, verdict: valid && (!pqRequired || pq === true) ? "PASS" : "FAIL", verifier: "oeverify.mjs (Node stdlib; ML-DSA not verified)" };
 }
 
 function main(argv) {

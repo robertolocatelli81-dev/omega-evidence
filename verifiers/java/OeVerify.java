@@ -290,9 +290,10 @@ public class OeVerify {
     static Map<String, TrustEntry> trustState(String path, boolean[] ok) throws Exception {
         Map<String, TrustEntry> st = new HashMap<>();
         for (Obj e : ledgerEntries(path, ok)) {
-            Object d = e.vals.get("data"); if (!(d instanceof Obj)) continue; Obj dd = (Obj) d;
-            String act = str(dd, "action"), sid = str(dd, "signer_id"); if (sid == null || sid.isEmpty()) continue;
-            String pk = str(dd, "pubkey"), pq = str(dd, "pq_pubkey");
+            Object d = e.vals.get("data"); if (!(d instanceof Obj)) { ok[0] = false; return st; } Obj dd = (Obj) d;   // council r2: malformed record = broken store
+            String act = str(dd, "action"); if (!"trust".equals(act) && !"rotate".equals(act) && !"revoke".equals(act)) continue;
+            String sid = str(dd, "signer_id"), pk = str(dd, "pubkey"), pq = str(dd, "pq_pubkey");
+            if (sid == null || sid.isEmpty() || (!"revoke".equals(act) && (pk == null || pk.isEmpty())) || (dd.vals.containsKey("pq_pubkey") && (pq == null || pq.isEmpty()))) { ok[0] = false; return st; }
             if ("trust".equals(act)) { TrustEntry cur = st.get(sid); if (cur != null && cur.revoked) continue; TrustEntry t = new TrustEntry(); t.pubkey = pk; t.pq = pq; st.put(sid, t); }
             else if ("rotate".equals(act)) { TrustEntry t = new TrustEntry(); t.pubkey = pk; t.pq = pq; st.put(sid, t); }
             else if ("revoke".equals(act)) { TrustEntry cur = st.get(sid); if (cur != null) cur.revoked = true; }
@@ -375,7 +376,10 @@ public class OeVerify {
                     boolean okSig = pk != null && sig != null && !declared.isEmpty() && edVerify(pk, declared.getBytes(StandardCharsets.UTF_8), sig);
                     if (!okSig || !declared.equals(signedDigest)) { add.accept(new String[]{"producer-signature", "FAIL"}, "signature invalid or pack changed"); sigStatus = "FAIL"; }
                     else {
-                        String sid = str(side, "signer_id"); add.accept(new String[]{"producer-signature", "PASS"}, "signed by " + sid + " (ed25519)"); sigStatus = "PASS";
+                        String sid = str(side, "signer_id");
+                        if (sid == null || sid.isEmpty()) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar fields: signer_id must be a non-empty string"); sigStatus = "FAIL"; }   // council r2
+                        else {
+                        add.accept(new String[]{"producer-signature", "PASS"}, "signed by " + sid + " (ed25519)"); sigStatus = "PASS";
                         Map<String, TrustEntry> st = null; boolean[] stOK = new boolean[]{true};
                         if (!trustStore.isEmpty()) { try { st = trustState(trustStore, stOK); } catch (Exception e) { st = new HashMap<>(); stOK[0] = false; } }
                         String pinned = expectedPQ;
@@ -386,6 +390,7 @@ public class OeVerify {
                             TrustEntry te = st.get(sid);
                             if (stOK[0] && te != null && !te.revoked && te.pubkey != null && te.pubkey.equals(pkB64)) { add.accept(new String[]{"trusted-signer", "PASS"}, sid + " in trust registry"); trusted = true; }
                             else { String d = !stOK[0] ? "trust store unreadable or broken" : te != null && te.revoked ? sid + ": key revoked" : te != null ? sid + ": key differs" : sid + ": not in trust registry"; add.accept(new String[]{"trusted-signer", "FAIL"}, d); trustFailed = true; }
+                        }
                         }
                     }
                 }
@@ -426,6 +431,8 @@ public class OeVerify {
             if ("pq-signature".equals(l.get("layer"))) { hasPQ = true; pq = s.equals("PASS") ? Boolean.TRUE : s.equals("SKIP") ? null : Boolean.FALSE; }
         }
         if (!hasPQ) pq = Boolean.FALSE;
+        boolean integrity = false; for (Map<String, Object> l : layers) if ("pack-sha3".equals(l.get("layer")) && "PASS".equals(l.get("status"))) integrity = true;   // council r2
+        signed = signed && integrity; trusted = trusted && integrity;
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("valid", checked && valid); r.put("layers", layers); r.put("authenticated", trusted || signed); r.put("pq_protected", pq);
         r.put("verdict", (checked && valid && (!pqRequired || Boolean.TRUE.equals(pq))) ? "PASS" : "FAIL");

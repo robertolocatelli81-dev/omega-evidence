@@ -71,6 +71,22 @@ def build_cases(d):
     e = json.loads(txt); e2 = {k: v for k, v in e.items() if k != "self_hash"}; import hashlib as _h; e["self_hash"] = _h.sha256(json.dumps(e2, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     txt = txt.replace(json.loads(open(store_d).read())["self_hash"], e["self_hash"]); open(store_d, "w").write(txt.rstrip("\n") + "\n")
     cases["trust-dup-key-line"] = (dk, ["--trust-store", store_d], None)
+    # council r2: signer_id shapes, duplicated sidecar key, malformed trust records, body tampered after signing
+    from omega_evidence.ledger import _hash_entry
+    for nm, mut in (("sig-signer-id-list", lambda sd: dict(sd, signer_id=["acme"])),
+                    ("sig-signer-id-missing", lambda sd: {k: v for k, v in sd.items() if k != "signer_id"})):
+        p = mk(nm); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
+        cases[nm] = (p, ["--trust-store", store], None)
+    sdk = mk("sig-dup-key"); P.sign_pack(sdk, idt); sp = sdk[:-5] + ".sig.json"; txt = open(sp).read().rstrip().rstrip("}")
+    open(sp, "w").write(txt + ', "public_key_b64": "' + other.public_key_b64 + '"}'); cases["sig-dup-key"] = (sdk, [], None)
+    def _store_with(name, edit):
+        pth = mk(name); P.sign_pack(pth, idt); st_ = os.path.join(d, name + "_trust.jsonl"); trust.TrustRegistry(st_).trust("acme", idt.public_key_b64)
+        e = json.loads(open(st_).read().splitlines()[0]); edit(e); e["self_hash"] = _hash_entry(e); open(st_, "w").write(json.dumps(e, separators=(",", ":")) + "\n")
+        return pth, st_
+    p1, s1 = _store_with("trust-data-list", lambda e: e.__setitem__("data", [1])); cases["trust-data-not-object"] = (p1, ["--trust-store", s1], None)
+    p2, s2 = _store_with("trust-sid-list", lambda e: e["data"].__setitem__("signer_id", ["acme"])); cases["trust-signer-id-list"] = (p2, ["--trust-store", s2], None)
+    bt = mk("body-tampered"); P.sign_pack(bt, idt); dd = json.load(open(bt)); dd["claim"] = "y"; json.dump(dd, open(bt, "w"))
+    cases["body-tampered-trusted"] = (bt, ["--trust-store", store], None)
     # honest scope variants
     def mk_scope(name, scope):   # build_pack refuses a bad scope: forge it after, with a consistent pack_sha3
         p = mk(name); dd = json.load(open(p)); dd["honest_scope"] = scope

@@ -1237,6 +1237,81 @@ class TestMlDsaHybrid(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.m._mldsa65_raw_from_spki(spki[:-1])
 
+    # ── council 16/09 r2 (five minds incl. Gemini Pro) ────────────────────────────────────────────────────────
+    def test_authenticated_requires_integrity(self):
+        """Body mutated after signing, pack_sha3 and sidecar intact: valid false AND authenticated false."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp)
+            store = os.path.join(tmp, "trust.jsonl"); trust.TrustRegistry(store).trust("acme", idt.public_key_b64, pq_pubkey=signer.public_key_b64)
+            body = json.load(open(pp)); body["x"] = 2; json.dump(body, open(pp, "w"))
+            v = verify_pack(pp, trust_store=store, require_pq=True)
+            self.assertFalse(v["valid"]); self.assertFalse(v["authenticated"])
+            self.assertEqual(self._layer(v, "trusted-signer")["status"], "PASS")                       # identity held, content did not
+
+    def test_signer_id_must_be_a_non_empty_string(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp)
+            store = os.path.join(tmp, "trust.jsonl"); trust.TrustRegistry(store).trust("acme", idt.public_key_b64)
+            sp = pp[:-5] + ".sig.json"; side = json.load(open(sp))
+            for bad in (["acme"], "", 5, None):
+                sd = dict(side); sd["signer_id"] = bad; json.dump(sd, open(sp, "w"))
+                v = verify_pack(pp, trust_store=store)
+                self.assertEqual(self._layer(v, "producer-signature")["status"], "FAIL"); self.assertFalse(v["authenticated"])
+            json.dump({k: v for k, v in side.items() if k != "signer_id"}, open(sp, "w"))
+            v = verify_pack(pp, trust_store=store); self.assertEqual(self._layer(v, "producer-signature")["status"], "FAIL")
+            os.chmod(sp, 0)                                                                              # unreadable: FAIL, not a crash
+            try:
+                v = verify_pack(pp, trust_store=store); self.assertEqual(self._layer(v, "producer-signature")["status"], "FAIL")
+            finally:
+                os.chmod(sp, 0o600)
+
+    def test_trust_store_malformed_records_are_a_broken_store(self):
+        from omega_evidence.ledger import _hash_entry
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp)
+            store = os.path.join(tmp, "trust.jsonl"); trust.TrustRegistry(store).trust("acme", idt.public_key_b64, pq_pubkey=signer.public_key_b64)
+            good = json.loads(open(store).read().splitlines()[0])
+            for edit in (lambda e: e.__setitem__("data", [1]), lambda e: e["data"].__setitem__("signer_id", ["acme"]),
+                         lambda e: e["data"].__setitem__("pubkey", 5), lambda e: e["data"].__setitem__("pq_pubkey", "")):
+                e = json.loads(json.dumps(good)); edit(e); e["self_hash"] = _hash_entry(e)
+                open(store, "w").write(json.dumps(e, separators=(",", ":")) + "\n")
+                with self.assertRaises(ValueError):
+                    trust.TrustRegistry(store)
+                v = verify_pack(pp, trust_store=store, require_pq=True)
+                self.assertFalse(v["valid"]); self.assertFalse(v["authenticated"]); self.assertIs(v["pq_protected"], False)
+                self.assertIn("trust store", self._layer(v, "trusted-signer")["detail"])
+
+    def test_rotate_after_revocation_decides_the_pq_key_explicitly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp); K = signer.public_key_b64
+            store = os.path.join(tmp, "trust.jsonl"); tr = trust.TrustRegistry(store)
+            tr.trust("acme", idt.public_key_b64, pq_pubkey=K); tr.revoke("acme", "HSM breach")
+            with self.assertRaises(ValueError):                                                          # no silent resurrection
+                tr.rotate("acme", signing.Identity("acme").public_key_b64)
+            self.assertIsNone(tr.pq_pubkey("acme"))
+            with self.assertRaises(ValueError):                                                          # contradictory arguments
+                tr.rotate("acme", idt.public_key_b64, pq_pubkey=K, drop_pq=True)
+            tr.rotate("acme", idt.public_key_b64, drop_pq=True); self.assertIsNone(tr.pq_pubkey("acme"))
+            self.assertIs(verify_pack(pp, trust_store=store, require_pq=True)["pq_protected"], False)
+            K2 = self.m.MlDsaFileSigner.keygen(os.path.join(tmp, "n.key"))["public_key_b64"]
+            tr.rotate("acme", idt.public_key_b64, pq_pubkey=K2); self.assertEqual(trust.TrustRegistry(store).pq_pubkey("acme"), K2)
+
+    def test_kat_context_binding_survives_the_gates_negative(self):
+        """The with-context vectors are bound by (key, message): the gate's tampered-signature negative still runs with
+        the right context; a duplicated (key, message) pair in the vector file is refused."""
+        kat = self.m.load_kat(); ctxed = [v for v in kat if v["context_hex"]]
+        seen = {}
+        def spy(p, s, m):
+            seen[(p, m.hex())] = seen.get((p, m.hex()), 0) + 1
+            return self.m._kat_verify(p, s, m, next(v["context_hex"] for v in ctxed if v["public"] == p and v["message_hex"] == m.hex()))
+        from omega_evidence.pqbackends import gate
+        self.assertTrue(gate.run_kat(spy, ctxed)["passed"]); self.assertTrue(all(n == 2 for n in seen.values()))   # positive + negative, both with ctx
+        with unittest.mock.patch.object(self.m, "KAT_FILE", os.path.join(tempfile.gettempdir(), "dup_kat.txt")):
+            ln = [l for l in open(os.path.join(os.path.dirname(self.m.__file__), "vectors", "acvp_mldsa65_sigver.txt")) if not l.startswith("#") and l.strip()][0]
+            open(self.m.KAT_FILE, "w").write(ln + ln)
+            with self.assertRaises(ValueError):
+                self.m.load_kat()
+
     def test_timestamp_sidecar_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             pp, idt, signer = self._hybrid(tmp)
