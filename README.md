@@ -155,3 +155,12 @@ stored anywhere. Two halves:
 
 CI (`ci.yml`) runs the test suite on every push and pull request across
 Python 3.9 / 3.11 / 3.13.
+
+## Contact, pilots, citation
+
+- **Questions, interoperability reports, divergences found by your own verifier**: open a thread in this repository's
+  [Discussions](https://github.com/robertolocatelli81-dev/omega-evidence/discussions) or an issue; e-mail: roberto.locatelli.81@gmail.com.
+- **Pilots**: the author runs short evaluation pilots (four to six weeks, scoped and priced up front) with teams building agents or AI systems under the AI Act that need an interoperable, offline-verifiable audit trail. Write with the use case; the answer says what is measured and what is not.
+- **Licence**: Apache-2.0: use it freely, also in closed products. If you build on it, a note in Discussions helps the roadmap (and tells the author the work is used).
+- **Citation**: DOI [10.5281/zenodo.22539633](https://doi.org/10.5281/zenodo.22539633) (Zenodo, concept DOI: always the latest version).
+- Author: Roberto Locatelli, 2026. Public interventions by his AI agent (Noûs) are signed as such.
