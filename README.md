@@ -117,15 +117,65 @@ for session_id, chain in chains.items():
     aat.verify_chain(chain)                 # {"ok": True, ...}; add pubkey_pem=... to check signatures
 ```
 
+## Independent verifiers (Go, Java, Node) and the differential oracle
+
+`verifiers/` holds three stdlib-only re-implementations of the pack verifier — Go (`verifiers/go`, `crypto/mldsa`
+for ML-DSA-65 with Go ≥ 1.27), Java (`verifiers/java/OeVerify.java`, JDK 24+ for ML-DSA-65, single file) and Node
+(`verifiers/js/oeverify.mjs`, Ed25519 and SHA3 only: an ML-DSA co-signature is reported present-but-unverified,
+never true) — plus `verifiers/differential_oracle.py`, which builds packs, sidecars, ledgers and trust registries
+with the toolkit and demands the same `(verdict, pq_protected)` from Python, Go and Java on every case (tampered
+packs, lenient base64, uppercase digests, unknown or non-string algorithms, classical algorithm declared as PQ,
+overclaimed or missing `honest_scope`, duplicate keys, floats, nesting beyond 512, lone surrogates, non-UTF-8,
+empty / unrelated / tampered / float ledgers, rotated and revoked signers, stripped / foreign / invalid post-quantum
+layers). Node's two divergences are declared, not hidden. RFC 3161 sidecars are verified by the Python reference
+only (the others report SKIP). The ledger profile is the cryptovalid one, so cryptovalid's five verifiers also
+accept omega-evidence ledgers unchanged (measured 16/09/2026).
+
+```
+go run ./verifiers/go/cmd/oeverify -trust-store trust.jsonl -require-pq pack.json
+java verifiers/java/OeVerify.java pack.json -expect-pq-key <b64>
+node verifiers/js/oeverify.mjs pack.json --ledger pack.ledger.jsonl
+python -m omega_evidence pack.json --trust-store trust.jsonl --require-pq
+```
+
 ## Standards
 
 RFC 3161 (timestamping, optional `openssl`); RFC 4998 / eIDAS LTA renewal *semantics*
 (`preservation`: long-term evidence records renewed across hash and timestamp aging, verifiable
 offline, tested — not the RFC 4998 ASN.1 wire format); Ed25519 with an optional post-quantum
-co-signature (SLH-DSA / FIPS 205 through an external liboqs backend; any PQ scheme is admitted only
-by a known-answer-test gate — no home-grown PQ crypto; a hybrid pack is reported `pq-protected` only
-when a verifying backend is present); SD-JWT (RFC 9901) issue/verify for the eIDAS 2.0 / EUDI wallet
-lane; PII-free by design (salted per-record digests, no linkability).
+co-signature — since 0.7.0 **ML-DSA-65 (FIPS 204)** built in through `cryptography` ≥ 50, SLH-DSA (FIPS 205)
+through an external liboqs backend; any PQ scheme is admitted only by a known-answer-test gate (the built-in
+ML-DSA backend must pass the NIST ACVP sigVer vectors shipped in `pqbackends/vectors/` before it is registered) —
+no home-grown PQ crypto; SD-JWT (RFC 9901) issue/verify for the eIDAS 2.0 / EUDI wallet lane; PII-free by design
+(salted per-record digests, no linkability).
+
+## Hybrid post-quantum packs (0.7.0)
+
+The same profile as cryptovalid 0.13.0, so the same rules and verifiers apply: the ML-DSA-65 co-signature is pure
+ML-DSA with the **empty context string** over the UTF-8 bytes of the pack's `pack_sha3` hex string (the very bytes
+the Ed25519 sidecar signs), 3309-byte signature and 1952-byte key in strict base64. The empty context is a measured
+choice (16/09/2026): the JDK 24-27 built-in ML-DSA provider has no context API and AWS KMS `RAW` signing is the
+empty context — a context would have locked Java verifiers and HSM signing out; the PQ key MUST therefore be
+dedicated to this profile.
+
+```python
+from omega_evidence import pack, signing, trust
+from omega_evidence.pqbackends import mldsa
+pack.sign_pack("p.json", signing.Identity("acme"))          # classical sidecar first (hybrid = both)
+mldsa.MlDsaFileSigner.keygen("acme.pq")                      # or mldsa.AwsKmsMlDsaSigner("<key id>", region=...)
+pack.pq_cosign("p.json", mldsa.MlDsaFileSigner("acme.pq"))   # self-verified against the declared key
+trust.TrustRegistry("trust.jsonl").trust("acme", ed_pub_b64, pq_pubkey=pq_pub_b64)   # pin BOTH keys
+verify_pack("p.json", trust_store="trust.jsonl", require_pq=True)["pq_protected"]     # True
+```
+
+`pq_protected` is a tri-state: **true** only when a registered backend verifies the co-signature AND the key is
+the one the relying party pinned (`expected_pq_public_key_b64`, or the signer's `pq_pubkey` in the trust
+registry) and the classical signature holds; **null** when a layer is present but unpinned or not verifiable on
+this host; **false** when absent, foreign, malformed or invalid. Requiring the layer (`require_pq`, or giving the
+pinned key) makes a stripped, foreign or unverifiable layer a FAIL: a downgrade to Ed25519-only is refused by the
+relying party's requirement, not by the file. The PQ private key lives on disk (PKCS#8, 0600) or in **AWS KMS**
+(`KeySpec ML_DSA_65`, `ML_DSA_SHAKE_256`, `MessageType RAW`; the Sign response's KeyId must match the key whose
+public key was read). Without `cryptography` ≥ 50 the layer is reported present-but-unverifiable (never a pass).
 
 ## Tests
 

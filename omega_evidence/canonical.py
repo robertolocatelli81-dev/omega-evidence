@@ -56,10 +56,20 @@ def _default(o: Any) -> Any:
     raise TypeError(f"canonical_json: type not injectively serialisable: {type(o).__name__!r}")
 
 
+_SAFE_INT = (1 << 53) - 1
+
+
 def _reject_reserved(obj: Any) -> None:
     """Refuse any input dict that carries the reserved type-tag key: it is reserved
     for the toolkit's own injective type-tagging, so a forged tag dict raises rather
-    than silently colliding with a genuine typed value."""
+    than silently colliding with a genuine typed value.
+    0.7.0 (one number profile in the family, so independent verifiers in Go/Java/JS agree byte for byte):
+    floats are refused (use a string or Decimal — Python's repr is not portable) and integers must lie within
+    ±(2^53-1) (exact in every JSON implementation)."""
+    if isinstance(obj, float):
+        raise ValueError("canonical_json: floats are not portable (use a string or Decimal)")
+    if isinstance(obj, int) and not isinstance(obj, bool) and abs(obj) > _SAFE_INT:
+        raise ValueError("canonical_json: integer outside the portable range +/-(2^53-1)")
     if isinstance(obj, dict):
         if _TAG in obj:
             raise ValueError("canonical_json: input uses the reserved type-tag key")

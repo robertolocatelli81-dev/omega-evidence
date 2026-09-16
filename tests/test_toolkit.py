@@ -499,11 +499,17 @@ class TestCryptoAgility(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pp, store = self._signed_pack(tmp)
             pack.add_pq_signature(pp, "test-pq", "PK", "GOOD")
+            # 0.7.0 (pinned contract, as cryptovalid 0.13.0): a valid PQ signature by an UNPINNED key is present,
+            # not protection — anyone can add their own layer. Pinned (caller or trust registry) → pq-protected.
             v = verify_pack(pp, trust_store=store)
+            pq = [l for l in v["layers"] if l["layer"] == "pq-signature"][0]
+            self.assertEqual(pq["status"], "SKIP"); self.assertIn("unpinned", pq["detail"]); self.assertIsNone(v["pq_protected"])
+            v = verify_pack(pp, trust_store=store, expected_pq_public_key_b64="PK")
             pq = [l for l in v["layers"] if l["layer"] == "pq-signature"][0]
             self.assertEqual(pq["status"], "PASS")
             self.assertIn("pq-protected", pq["detail"])
-            self.assertTrue(v["valid"])
+            self.assertTrue(v["valid"]); self.assertIs(v["pq_protected"], True)
+            self.assertFalse(verify_pack(pp, trust_store=store, expected_pq_public_key_b64="OTHER")["valid"])   # foreign key
 
     def test_pq_invalid_with_backend_is_fail_closed(self):
         signing.register_sig_alg("test-pq", lambda pk, sig, msg: sig == "GOOD", post_quantum=True)
@@ -847,8 +853,8 @@ class TestNemesisRegressions(unittest.TestCase):
             pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
             idt = signing.Identity("a"); pack.sign_pack(pp, idt)
             pack.add_pq_signature(pp, "nem-pq", "PK", "GOOD")
-            pq = [l for l in verify_pack(pp)["layers"] if l["layer"] == "pq-signature"][0]
-            self.assertEqual(pq["status"], "PASS")
+            pq = [l for l in verify_pack(pp, expected_pq_public_key_b64="PK")["layers"] if l["layer"] == "pq-signature"][0]
+            self.assertEqual(pq["status"], "PASS")      # 0.7.0: reachable when the key is PINNED (never self-declared)
 
     def test_3_canonical_rejects_forged_type_tag(self):
         from decimal import Decimal
@@ -1013,6 +1019,99 @@ class TestAATInterop(unittest.TestCase):
             padded = json.loads(json.dumps(signed)); padded[0]["signature"] += "=="
             self.assertFalse(aat.verify_chain(padded, pubkey_pem=pub)["ok"])       # padding rifiutato
 
+
+
+class TestMlDsaHybrid(unittest.TestCase):
+    """0.7.0 — ML-DSA-65 (FIPS 204) co-signature, the cryptovalid 0.13.0 rules: KAT-gated backend on NIST vectors,
+    empty context, strict decoders, pinned tri-state (true only against the caller's or the registry's PQ key),
+    a required layer that is missing / foreign / unverifiable is FAIL, self-verify after signing, AWS KMS signer shape."""
+
+    def setUp(self):
+        from omega_evidence.pqbackends import mldsa, autoload
+        self.m = mldsa
+        if not mldsa.available():
+            self.skipTest("cryptography >= 50 (ML-DSA) absent")
+        self.assertTrue(autoload()["mldsa"]["registered"], autoload())
+
+    def _hybrid(self, tmp):
+        pp = os.path.join(tmp, "p.json")
+        pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
+        idt = signing.Identity("acme"); pack.sign_pack(pp, idt)
+        kf = os.path.join(tmp, "pq.key"); kg = self.m.MlDsaFileSigner.keygen(kf)
+        self.assertEqual(oct(os.stat(kf).st_mode & 0o777), "0o600")
+        signer = self.m.MlDsaFileSigner(kf)
+        side = pack.pq_cosign(pp, signer)
+        self.assertEqual(side["pq_sig_alg"], "ml-dsa-65"); self.assertEqual(side["pq_public_key_b64"], kg["public_key_b64"])
+        return pp, idt, signer
+
+    def test_file_signer_pinned_tri_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp)
+            self.assertIsNone(verify_pack(pp)["pq_protected"])                                          # unpinned -> null
+            v = verify_pack(pp, expected_pq_public_key_b64=signer.public_key_b64)
+            self.assertTrue(v["valid"]); self.assertIs(v["pq_protected"], True)
+            store = os.path.join(tmp, "trust.jsonl")
+            trust.TrustRegistry(store).trust("acme", idt.public_key_b64, pq_pubkey=signer.public_key_b64)
+            v = verify_pack(pp, trust_store=store, require_pq=True)
+            self.assertTrue(v["valid"]); self.assertIs(v["pq_protected"], True); self.assertTrue(v["authenticated"])
+            other = self.m.MlDsaFileSigner.keygen(os.path.join(tmp, "o.key"))["public_key_b64"]
+            v = verify_pack(pp, expected_pq_public_key_b64=other)                                       # foreign key
+            self.assertFalse(v["valid"]); self.assertIs(v["pq_protected"], False)
+
+    def test_stripped_and_tampered_layer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp)
+            side_path = pp[:-5] + ".sig.json"; side = json.load(open(side_path)); good = dict(side)
+            for k in ("pq_sig_alg", "pq_public_key_b64", "pq_signature_b64"):
+                side.pop(k)
+            json.dump(side, open(side_path, "w"))
+            self.assertTrue(verify_pack(pp)["valid"])                                                   # classical still fine
+            v = verify_pack(pp, expected_pq_public_key_b64=signer.public_key_b64)                       # required -> stripped = FAIL
+            self.assertFalse(v["valid"]); self.assertIs(v["pq_protected"], False)
+            raw = bytearray(base64.b64decode(good["pq_signature_b64"])); raw[7] ^= 1
+            json.dump(dict(good, pq_signature_b64=base64.b64encode(bytes(raw)).decode()), open(side_path, "w"))
+            self.assertFalse(verify_pack(pp)["valid"])                                                  # present but invalid = FAIL
+            json.dump(dict(good, pq_signature_b64=good["pq_signature_b64"][:10] + " " + good["pq_signature_b64"][10:]), open(side_path, "w"))
+            self.assertFalse(verify_pack(pp)["valid"])                                                  # lenient base64 refused
+
+    def test_kms_signer_shape_with_stub(self):
+        from cryptography.hazmat.primitives import serialization as ser
+        with tempfile.TemporaryDirectory() as tmp:
+            kf = os.path.join(tmp, "pq.key"); self.m.MlDsaFileSigner.keygen(kf); fs = self.m.MlDsaFileSigner(kf)
+            spki = fs._sk.public_key().public_bytes(ser.Encoding.DER, ser.PublicFormat.SubjectPublicKeyInfo)
+            self.assertEqual(len(spki), 1974)
+            class Stub:
+                def get_public_key(self, KeyId): return {"PublicKey": spki, "KeyId": "arn:x"}
+                def sign(self, KeyId, Message, MessageType, SigningAlgorithm):
+                    assert (MessageType, SigningAlgorithm) == ("RAW", "ML_DSA_SHAKE_256"); return {"Signature": fs.sign(Message), "KeyId": "arn:x", "SigningAlgorithm": SigningAlgorithm}
+            ks = self.m.AwsKmsMlDsaSigner("alias/x", client=Stub())
+            self.assertEqual(ks.public_key_b64, fs.public_key_b64); self.assertFalse(ks.describe()["key_in_process_memory"])
+            pp = os.path.join(tmp, "p.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
+            pack.sign_pack(pp, signing.Identity("a")); pack.pq_cosign(pp, ks)
+            self.assertIs(verify_pack(pp, expected_pq_public_key_b64=ks.public_key_b64)["pq_protected"], True)
+            class Repointed(Stub):
+                def sign(self, KeyId, Message, MessageType, SigningAlgorithm):
+                    return {"Signature": fs.sign(Message), "KeyId": "arn:OTHER", "SigningAlgorithm": SigningAlgorithm}
+            with self.assertRaises(RuntimeError):
+                self.m.AwsKmsMlDsaSigner("alias/x", client=Repointed()).sign(b"m")
+            wrong = self.m.MlDsaFileSigner(self.m.MlDsaFileSigner.keygen(os.path.join(tmp, "w.key"))["path"])
+            class WrongKey:
+                public_key_b64 = fs.public_key_b64
+                alg = "ml-dsa-65"
+                def sign(self, m): return wrong.sign(m)
+            with self.assertRaises(RuntimeError):                                                        # self-verify refuses
+                pack.pq_cosign(pp, WrongKey())
+
+    def test_pq_alone_is_not_hybrid_and_classical_alg_never_pq(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pp = os.path.join(tmp, "p.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
+            kf = os.path.join(tmp, "pq.key"); self.m.MlDsaFileSigner.keygen(kf)
+            with self.assertRaises(RuntimeError):                                                        # no classical sidecar
+                pack.pq_cosign(pp, self.m.MlDsaFileSigner(kf))
+            idt = signing.Identity("a"); pack.sign_pack(pp, idt)
+            pack.add_pq_signature(pp, "ed25519", idt.public_key_b64, json.load(open(pp[:-5] + ".sig.json"))["signature_b64"])
+            v = verify_pack(pp, expected_pq_public_key_b64=idt.public_key_b64)
+            self.assertFalse(v["valid"]); self.assertIsNot(v["pq_protected"], True)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

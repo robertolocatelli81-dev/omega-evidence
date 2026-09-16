@@ -120,6 +120,27 @@ def add_pq_signature(pack_path: str, pq_sig_alg: str, pq_public_key_b64: str,
     return side
 
 
+def pq_cosign(pack_path: str, signer) -> Dict[str, Any]:
+    """Attach an ML-DSA-65 co-signature made by `signer` (MlDsaFileSigner / AwsKmsMlDsaSigner) over the SAME bytes
+    the Ed25519 sidecar signs (the pack_sha3 hex string), making the pack HYBRID. The signature is self-verified
+    against the signer's declared public key right after signing (a KMS alias re-pointed between GetPublicKey
+    and Sign, or a wrong backend key, is caught here and not by the relying party). The pack must already carry
+    the classical sidecar (`sign_pack`): hybrid means BOTH, never the PQ layer alone."""
+    import base64 as _b64
+    from .pqbackends import mldsa as _m
+    side_path = _sig_sidecar(pack_path)
+    if not side_path.exists():
+        raise RuntimeError("pq_cosign: sign the pack with the classical identity first (sign_pack)")
+    side = json.loads(side_path.read_text(encoding="utf-8"))
+    digest = side.get("signed_pack_sha3") or json.loads(Path(pack_path).read_text(encoding="utf-8")).get("pack_sha3", "")
+    if not _re.fullmatch(r"[0-9a-f]{64}", digest or ""):
+        raise RuntimeError("pq_cosign: the sidecar carries no valid signed_pack_sha3")
+    sig = signer.sign(digest.encode())
+    if not _m.verify_fn(signer.public_key_b64, _b64.b64encode(sig).decode(), digest.encode()):
+        raise RuntimeError("pq_cosign: the post-quantum signature does not verify against the declared key (refused)")
+    return add_pq_signature(pack_path, _m.ALG, signer.public_key_b64, _b64.b64encode(sig).decode())
+
+
 def stamp_pack(pack_path: str, tsa_url: str, capture_ltv: bool = False,
                fetch_crl: bool = False) -> Dict[str, Any]:
     """Timestamp the pack file bytes via an RFC 3161 TSA and write the sidecar.

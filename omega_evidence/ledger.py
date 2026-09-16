@@ -31,6 +31,75 @@ from typing import Dict, List, Tuple
 GENESIS = "0" * 64
 
 
+_SAFE_INT = (1 << 53) - 1
+_MAX_DEPTH = 512
+
+
+def _no_float(x):
+    raise ValueError("floats are not portable in a ledger entry (use a string)")
+
+
+def _bounded_int(x):
+    v = int(x)
+    if abs(v) > _SAFE_INT:
+        raise ValueError("integer outside the portable range +/-(2^53-1)")
+    return v
+
+
+def _reject_dup(pairs):
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError(f"duplicate key {k!r}")
+        d[k] = v
+    return d
+
+
+def _nesting_depth(text: str) -> int:
+    depth = mx = 0
+    in_str = esc = False
+    for c in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c in "[{":
+            depth += 1
+            mx = max(mx, depth)
+        elif c in "]}":
+            depth -= 1
+    return mx
+
+
+def loads_strict(text: str):
+    """The family's acceptance profile (cryptovalid CONFORMANCE): no duplicate keys, no floats, integers within
+    ±(2^53-1), nesting <= 512 by linear pre-scan, no NaN/Infinity. Same rule as the Go/Java/JS verifiers."""
+    if _nesting_depth(text) > _MAX_DEPTH:
+        raise ValueError(f"json_too_deep: nesting exceeds {_MAX_DEPTH}")
+    return json.loads(text, object_pairs_hook=_reject_dup, parse_float=_no_float, parse_int=_bounded_int,
+                      parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"JSON constant {c}")))
+
+
+def _check_portable(obj) -> None:
+    if isinstance(obj, float):
+        raise ValueError("floats are not portable in a ledger entry (use a string)")
+    if isinstance(obj, int) and not isinstance(obj, bool) and abs(obj) > _SAFE_INT:
+        raise ValueError("integer outside the portable range +/-(2^53-1)")
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if not isinstance(k, str):
+                raise ValueError("non-string key")
+            _check_portable(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            _check_portable(v)
+
+
 def _hash_entry(entry: Dict) -> str:
     d = {k: v for k, v in entry.items() if k != "self_hash"}
     return hashlib.sha256(
@@ -108,6 +177,7 @@ class Ledger:
         self._last = prev
 
     def append(self, data: Dict) -> Dict:
+        _check_portable(data)   # 0.7.0: what cannot be verified byte-for-byte elsewhere is refused at write time
         with self._lock:
             entry = {"idx": self._count,
                      "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -143,19 +213,28 @@ class Ledger:
         prev = GENESIS
         if not os.path.exists(self.path):
             return True, bad
-        with open(self.path, encoding="utf-8") as fh:
+        # 0.7.0: the same acceptance profile as the cryptovalid verifiers (Python/JS/Go/Rust/Java agree):
+        # LF-only lines, blank = ASCII space/tab/CR, strict JSON, sequential idx, content → self_hash → prev link
+        n = 0
+        with open(self.path, encoding="utf-8", errors="surrogateescape", newline="\n") as fh:
             for i, line in enumerate(fh):
-                line = line.strip()
-                if not line:
+                if not line.strip(" \t\r\n"):
                     continue
                 try:
-                    e = json.loads(line)
+                    e = loads_strict(line.strip(" \t\r\n"))
+                    if not isinstance(e, dict):
+                        raise ValueError("entry is not an object")
                 except ValueError:
                     bad.append(i)
+                    n += 1
                     continue
-                if e.get("prev_hash") != prev or e.get("self_hash") != _hash_entry(e):
+                idx = e.get("idx")
+                sh = e.get("self_hash")
+                if (isinstance(idx, bool) or idx != n or e.get("prev_hash") != prev
+                        or not isinstance(sh, str) or sh != _hash_entry(e)):
                     bad.append(i)
-                prev = e.get("self_hash", prev)
+                prev = sh if isinstance(sh, str) else prev
+                n += 1
         return (not bad), bad
 
     @property

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .ledger import Ledger
 
@@ -52,33 +52,47 @@ class TrustRegistry:
                 # a revoked signer is NOT silently re-trusted by a 'trust' entry
                 # (rotate() is the explicit way to re-establish).
                 return
-            self._state[sid] = {"pubkey": d.get("pubkey"), "revoked": False, "since": d.get("ts")}
+            self._state[sid] = {"pubkey": d.get("pubkey"), "pq_pubkey": d.get("pq_pubkey"), "revoked": False, "since": d.get("ts")}
         elif act == "rotate":
-            self._state[sid] = {"pubkey": d.get("pubkey"), "revoked": False, "since": d.get("ts")}
+            self._state[sid] = {"pubkey": d.get("pubkey"), "pq_pubkey": d.get("pq_pubkey"), "revoked": False, "since": d.get("ts")}
         elif act == "revoke" and sid in self._state:
             self._state[sid]["revoked"] = True
             self._state[sid]["reason"] = d.get("reason")
 
-    def trust(self, signer_id: str, pubkey: str) -> Dict[str, Any]:
+    def trust(self, signer_id: str, pubkey: str, pq_pubkey: Optional[str] = None) -> Dict[str, Any]:
+        """Bind signer_id to its Ed25519 key and, optionally (0.7.0), to its ML-DSA-65 key: the pinned PQ key is
+        what lets the verifier report a hybrid pack as pq-protected (a key inside the sidecar proves nothing)."""
         with self._lock:
             cur = self._state.get(signer_id)
             if cur and cur.get("revoked"):
                 raise ValueError(f"signer revoked: {signer_id!r}; use rotate() to re-establish")
             if cur and cur["pubkey"] != pubkey:
                 raise ValueError(f"signer already trusted with a different key: {signer_id!r}")
-            if cur and cur["pubkey"] == pubkey:
+            if cur and cur.get("pq_pubkey") and pq_pubkey and cur["pq_pubkey"] != pq_pubkey:
+                raise ValueError(f"signer already trusted with a different post-quantum key: {signer_id!r}")
+            if cur and cur["pubkey"] == pubkey and (pq_pubkey is None or cur.get("pq_pubkey") == pq_pubkey):
                 return {"trusted": True, "idempotent": True}
-            self._ledger.append({"action": "trust", "signer_id": signer_id,
-                                 "pubkey": pubkey, "ts": _now()})
-            self._state[signer_id] = {"pubkey": pubkey, "revoked": False, "since": _now()}
+            rec = {"action": "trust", "signer_id": signer_id, "pubkey": pubkey, "ts": _now()}
+            if pq_pubkey:
+                rec["pq_pubkey"] = pq_pubkey
+            self._ledger.append(rec)
+            self._state[signer_id] = {"pubkey": pubkey, "pq_pubkey": pq_pubkey or (cur or {}).get("pq_pubkey"),
+                                      "revoked": False, "since": _now()}
             return {"trusted": True}
 
-    def rotate(self, signer_id: str, pubkey: str) -> Dict[str, Any]:
+    def rotate(self, signer_id: str, pubkey: str, pq_pubkey: Optional[str] = None) -> Dict[str, Any]:
         with self._lock:
-            self._ledger.append({"action": "rotate", "signer_id": signer_id,
-                                 "pubkey": pubkey, "ts": _now()})
-            self._state[signer_id] = {"pubkey": pubkey, "revoked": False, "since": _now()}
+            rec = {"action": "rotate", "signer_id": signer_id, "pubkey": pubkey, "ts": _now()}
+            if pq_pubkey:
+                rec["pq_pubkey"] = pq_pubkey
+            self._ledger.append(rec)
+            self._state[signer_id] = {"pubkey": pubkey, "pq_pubkey": pq_pubkey, "revoked": False, "since": _now()}
             return {"rotated": True}
+
+    def pq_pubkey(self, signer_id: str) -> Optional[str]:
+        """The pinned ML-DSA-65 key of a trusted, non-revoked signer, or None."""
+        e = self._state.get(signer_id)
+        return e.get("pq_pubkey") if e and not e.get("revoked") else None
 
     def revoke(self, signer_id: str, reason: str = "") -> Dict[str, Any]:
         with self._lock:

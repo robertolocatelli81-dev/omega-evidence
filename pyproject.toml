@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "omega-evidence"
-version = "0.6.0"
+version = "0.7.0"
 description = "Open, standard toolkit for verifiable, long-term compliance evidence"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -18,3 +18,6 @@ Homepage = "https://github.com/robertolocatelli81-dev"
 
 [tool.setuptools.packages.find]
 include = ["omega_evidence*"]
+
+[project.scripts]
+omega-evidence-verify = "omega_evidence.verifier:main"

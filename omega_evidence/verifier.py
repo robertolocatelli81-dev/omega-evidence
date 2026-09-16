@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re as _re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -136,41 +137,74 @@ def _check_timestamp(path: str, layers: List) -> str:
     return st
 
 
-def _check_pq_cosignature(side: dict, digest: str, layers: List) -> None:
-    """Report a post-quantum co-signature (hybrid pack). Honest states, never a
-    false green: pq-protected only if a real PQ backend verifies it; a present-
-    but-unverifiable PQ signature is SKIP (pq-present-unverified); a present PQ
-    signature that a backend rejects is FAIL (fail-closed — the pack claims hybrid
-    but the PQ part does not hold)."""
+def _check_pq_cosignature(side: dict, digest: str, layers: List, expected_pq: Optional[str] = None,
+                          require_pq: bool = False) -> Optional[bool]:
+    """Report a post-quantum co-signature (hybrid pack) with PINNED semantics (0.7.0, the cryptovalid 0.13.0 rules):
+    - PASS "pq-protected" only when a registered PQ backend verifies it AND the key equals the one the relying
+      party pinned (`expected_pq`: given directly or taken from the trust registry);
+    - a valid signature by an UNPINNED key is SKIP "pq-present-unpinned" (anyone can add their own layer);
+    - present but no backend → SKIP "pq-present-unverified"; a backend that rejects it → FAIL;
+    - with `require_pq` (or a pinned key) a missing / foreign / unverifiable layer is FAIL: a required layer that
+      cannot be confirmed is not a pass. A classical alg declared as pq_sig_alg is never pq-protected.
+    Returns True (protected) / None (present, not confirmed) / False (absent or broken)."""
+    from .pqbackends import autoload
+    autoload()
     palg = side.get("pq_sig_alg")
+    required = bool(require_pq or expected_pq)
+    if "pq_sig_alg" in side and not isinstance(palg, str):   # present but not a string: malformed, never "unregistered"
+        layers.append(_layer("pq-signature", "FAIL", "pq_sig_alg is not a string"))
+        return False
     if not palg:
-        return
-    # resolve ONLY against the post-quantum registry: a classical alg (e.g.
-    # ed25519) declared as pq_sig_alg must NEVER be reported as pq-protected.
-    r = verify_pq_alg(palg, side.get("pq_public_key_b64", ""),
-                      side.get("pq_signature_b64", ""), digest.encode())
+        if required:
+            layers.append(_layer("pq-signature", "FAIL", "post-quantum layer required but absent (stripped or never signed)"))
+        return False
+    pk = side.get("pq_public_key_b64", "")
+    if expected_pq and pk != expected_pq:
+        layers.append(_layer("pq-signature", "FAIL", f"{palg} co-signature by a key other than the pinned one"))
+        return False
+    r = verify_pq_alg(palg, pk, side.get("pq_signature_b64", ""), digest.encode())
     if r is None:
-        layers.append(_layer("pq-signature", "SKIP",
-                             f"{palg} is not a registered PQ backend (pq-present-unverified)"))
-    elif r:
-        layers.append(_layer("pq-signature", "PASS", f"pq-protected ({palg})"))
-    else:
+        layers.append(_layer("pq-signature", "FAIL" if required else "SKIP",
+                             f"{palg} is not a registered PQ backend (pq-present-unverified"
+                             + (": a required layer that cannot be checked is not a pass)" if required else ")")))
+        return None
+    if not r:
         layers.append(_layer("pq-signature", "FAIL", f"{palg} co-signature invalid"))
+        return False
+    if not expected_pq:
+        layers.append(_layer("pq-signature", "FAIL" if required else "SKIP",
+                             f"{palg} co-signature valid against the key INSIDE the sidecar only (pq-present-unpinned): "
+                             "pin the signer's post-quantum key in the trust registry or pass expected_pq_public_key_b64"))
+        return None
+    layers.append(_layer("pq-signature", "PASS", f"pq-protected ({palg}, pinned key)"))
+    return True
 
 
-def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: List):
+def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: List,
+                               expected_pq: Optional[str] = None, require_pq: bool = False):
     sig_side = path[:-5] + ".sig.json" if path.endswith(".json") else path + ".sig.json"
     if not os.path.exists(sig_side):
         layers.append(_layer("producer-signature", "SKIP", "pack not signed"))
         return "SKIP", False, False
     try:
-        side = json.loads(open(sig_side, encoding="utf-8").read())
+        from .ledger import loads_strict
+        side = loads_strict(open(sig_side, encoding="utf-8").read().strip(" \t\r\n"))
+        if not isinstance(side, dict):
+            raise ValueError("sidecar is not a JSON object")
     except ValueError as e:
         layers.append(_layer("producer-signature", "FAIL", f"malformed sidecar: {e}"))
         return "FAIL", False, False
     pack = json.loads(open(path, encoding="utf-8").read())
     current = pack.get("pack_sha3", "")
     alg = side.get("sig_alg", "ed25519")                 # crypto-agility: default legacy
+    if alg == "ed25519":
+        # 0.7.0 (oracle 16/09: Python took a base64 signature with a space that Go/Java/Node refuse): the
+        # sidecar fields are decoded STRICTLY — canonical base64 of exactly 32 / 64 bytes, lowercase hex digest
+        from .pqbackends.mldsa import b64_strict
+        if (b64_strict(side.get("public_key_b64"), 32) is None or b64_strict(side.get("signature_b64"), 64) is None
+                or not isinstance(current, str) or not _re.fullmatch(r"[0-9a-f]{64}", current)):
+            layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields (strict base64 32/64, lowercase hex digest)"))
+            return "FAIL", False, False
     result = verify_with_alg(alg, side.get("public_key_b64", ""),
                              side.get("signature_b64", ""), current.encode())
     if result is None:                                   # unknown alg -> honest SKIP
@@ -181,11 +215,13 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
         return "FAIL", False, False
     layers.append(_layer("producer-signature", "PASS",
                          f"signed by {side.get('signer_id')} ({alg})"))
-    _check_pq_cosignature(side, current, layers)         # hybrid PQ, informational + fail-closed
+    tr = TrustRegistry(trust_store) if trust_store else None
+    sid, pk = side.get("signer_id"), side.get("public_key_b64")
+    # the pinned PQ key: the caller's, else the one the trust registry binds to this signer (0.7.0)
+    pinned_pq = expected_pq or (tr.pq_pubkey(sid) if tr else None)
+    _check_pq_cosignature(side, current, layers, pinned_pq, require_pq)   # hybrid PQ, pinned, fail-closed
     if not trust_store:
         return "PASS", False, False
-    tr = TrustRegistry(trust_store)
-    sid, pk = side.get("signer_id"), side.get("public_key_b64")
     if tr.is_trusted(sid, pk):
         layers.append(_layer("trusted-signer", "PASS", f"{sid} in trust registry"))
         return "PASS", True, False
@@ -214,17 +250,26 @@ def _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, t
 
 
 def verify_pack(path: str, ledger_path: Optional[str] = None,
-                trust_store: Optional[str] = None) -> Dict[str, Any]:
-    """Verify an evidence pack across all layers. Returns {valid, layers, ...}."""
+                trust_store: Optional[str] = None, expected_pq_public_key_b64: Optional[str] = None,
+                require_pq: bool = False) -> Dict[str, Any]:
+    """Verify an evidence pack across all layers. Returns {valid, layers, ...}.
+    `expected_pq_public_key_b64` pins the ML-DSA-65 key (and REQUIRES the layer); `require_pq` alone requires the
+    layer to be present, valid and pinned through the trust registry. `pq_protected` in the result is the tri-state
+    true / null (present, not confirmed) / false (absent or broken) — never true on a self-declared key."""
     layers: List[Dict[str, str]] = []
     try:
-        pack = json.loads(open(path, encoding="utf-8").read(),
-                          parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"JSON constant {c}")))
+        # 0.7.0: the family's strict acceptance profile (no duplicate keys, no floats, bounded integers, nesting
+        # <= 512) — the same rule the Go/Java/JS pack verifiers apply, so an ambiguous encoding is refused, not guessed
+        from .ledger import loads_strict
+        pack = loads_strict(open(path, encoding="utf-8").read().strip(" \t\r\n"))
         if not isinstance(pack, dict):
             raise ValueError("pack is not a JSON object")
         layers.append(_layer("pack-json", "PASS"))
     except (OSError, ValueError, RecursionError) as e:
-        return _rollup([_layer("pack-json", "FAIL", str(e))])
+        roll = _rollup([_layer("pack-json", "FAIL", str(e))])
+        roll["pq_protected"] = False       # no pack, no layer: the tri-state is false, not absent
+        roll["authenticated"] = False
+        return roll
 
     scope = pack.get("honest_scope", "")
     _hs_ok = _honest_scope_declares_limit(scope)
@@ -243,12 +288,39 @@ def verify_pack(path: str, ledger_path: Optional[str] = None,
 
     ledger_ok = _check_ledger(path, ledger_path, layers)
     ts_status = _check_timestamp(path, layers)
-    sig_status, trusted, trust_failed = _check_signature_and_trust(path, trust_store, layers)
+    sig_status, trusted, trust_failed = _check_signature_and_trust(path, trust_store, layers,
+                                                                   expected_pq_public_key_b64, require_pq)
+    if (require_pq or expected_pq_public_key_b64) and sig_status != "PASS":
+        layers.append(_layer("pq-signature", "FAIL", "post-quantum layer required but the pack carries no valid classical signature (hybrid = both)"))
     _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, ts_status)
     roll = _rollup(layers)
+    pq_layer = next((ly for ly in layers if ly["layer"] == "pq-signature"), None)
+    roll["pq_protected"] = (True if pq_layer and pq_layer["status"] == "PASS"
+                            else None if pq_layer and pq_layer["status"] == "SKIP" else False)
     auth = next((ly for ly in layers if ly["layer"] == "authenticity"), {})
     # `valid` = integrity + intactness. `authenticated` = a real producer identity signed it
     # (a self-made ledger anchor proves integrity/time, NOT authenticity — read this field).
     roll["authenticated"] = auth.get("status") == "PASS" and (
         "signed" in auth.get("detail", "") or "trusted" in auth.get("detail", ""))
     return roll
+
+
+def main(argv=None) -> int:
+    """`python -m omega_evidence.verifier <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]`
+    prints the receipt as JSON; exit 0 only when `valid` (and, with a PQ requirement, `pq_protected`)."""
+    import argparse
+    p = argparse.ArgumentParser(prog="omega-evidence-verify")
+    p.add_argument("pack")
+    p.add_argument("--ledger")
+    p.add_argument("--trust-store")
+    p.add_argument("--expect-pq-key", help="pinned ML-DSA-65 public key (base64): requires the hybrid layer")
+    p.add_argument("--require-pq", action="store_true", help="require a pinned, valid post-quantum layer (trust registry)")
+    a = p.parse_args(argv)
+    r = verify_pack(a.pack, a.ledger, a.trust_store, a.expect_pq_key, a.require_pq)
+    r["verdict"] = "PASS" if r.get("valid") and (not (a.require_pq or a.expect_pq_key) or r.get("pq_protected") is True) else "FAIL"
+    print(json.dumps(r, indent=1))
+    return 0 if r["verdict"] == "PASS" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
