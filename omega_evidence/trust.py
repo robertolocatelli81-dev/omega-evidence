@@ -35,11 +35,25 @@ def _now() -> str:
 
 class TrustRegistry:
     def __init__(self, ledger_path: str):
-        self._ledger = Ledger(ledger_path)
+        try:
+            self._ledger = Ledger(ledger_path)
+        except RuntimeError as e:                  # a broken chain is a broken store, one exception type for callers
+            raise ValueError(f"trust store broken: {e}") from e
         self._lock = threading.Lock()
         self._state: Dict[str, Dict[str, Any]] = {}
+        # council 16/09 (r1): the registry is replayed only from a chain that passes the STRICT verifier (duplicate
+        # keys, floats, idx, links) — the loose loader let a line with two "pubkey" keys trust the second one
+        ok, bad = self._ledger.verify()
+        if not ok:
+            raise ValueError(f"trust store broken: bad line(s) {bad[:5]}")
         for d in self._ledger.entries():
             self._apply(d)
+
+    @staticmethod
+    def _key(v: Any, what: str) -> str:
+        if not isinstance(v, str) or not v.strip() or v != v.strip():
+            raise ValueError(f"{what} must be a non-empty string")
+        return v
 
     def _apply(self, d: Dict[str, Any]) -> None:
         act, sid = d.get("action"), d.get("signer_id")
@@ -62,6 +76,9 @@ class TrustRegistry:
     def trust(self, signer_id: str, pubkey: str, pq_pubkey: Optional[str] = None) -> Dict[str, Any]:
         """Bind signer_id to its Ed25519 key and, optionally (0.7.0), to its ML-DSA-65 key: the pinned PQ key is
         what lets the verifier report a hybrid pack as pq-protected (a key inside the sidecar proves nothing)."""
+        self._key(signer_id, "signer_id"); self._key(pubkey, "pubkey")
+        if pq_pubkey is not None:
+            self._key(pq_pubkey, "pq_pubkey")
         with self._lock:
             cur = self._state.get(signer_id)
             if cur and cur.get("revoked"):
@@ -80,14 +97,24 @@ class TrustRegistry:
                                       "revoked": False, "since": _now()}
             return {"trusted": True}
 
-    def rotate(self, signer_id: str, pubkey: str, pq_pubkey: Optional[str] = None) -> Dict[str, Any]:
+    def rotate(self, signer_id: str, pubkey: str, pq_pubkey: Optional[str] = None,
+               drop_pq: bool = False) -> Dict[str, Any]:
+        """Replace the classical key (also re-establishes a revoked signer). The pinned post-quantum key is KEPT
+        unless a new one is given or `drop_pq=True` (council 16/09 r1: a routine Ed25519 rotation silently
+        downgraded every hybrid pack of the signer to unpinned). The kept key is written into the record, so an
+        independent replay (Go/Java/JS) reads the same state."""
+        self._key(signer_id, "signer_id"); self._key(pubkey, "pubkey")
+        if pq_pubkey is not None:
+            self._key(pq_pubkey, "pq_pubkey")
         with self._lock:
+            cur = self._state.get(signer_id) or {}
+            kept = None if drop_pq else (pq_pubkey or cur.get("pq_pubkey"))
             rec = {"action": "rotate", "signer_id": signer_id, "pubkey": pubkey, "ts": _now()}
-            if pq_pubkey:
-                rec["pq_pubkey"] = pq_pubkey
+            if kept:
+                rec["pq_pubkey"] = kept
             self._ledger.append(rec)
-            self._state[signer_id] = {"pubkey": pubkey, "pq_pubkey": pq_pubkey, "revoked": False, "since": _now()}
-            return {"rotated": True}
+            self._state[signer_id] = {"pubkey": pubkey, "pq_pubkey": kept, "revoked": False, "since": _now()}
+            return {"rotated": True, "pq_pubkey_kept": bool(kept and not pq_pubkey)}
 
     def pq_pubkey(self, signer_id: str) -> Optional[str]:
         """The pinned ML-DSA-65 key of a trusted, non-revoked signer, or None."""

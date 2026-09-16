@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Differential oracle over the omega-evidence PACK verifiers: the Python reference (python -m omega_evidence), Go
 (OEVERIFY_GO or built from verifiers/go), Java (OEVERIFY_JAVA or compiled from verifiers/java with a JDK >= 24) and
-Node (verifiers/js/oeverify.mjs) must give the same (verdict, pq_protected) on every case — except the declared
+Node (verifiers/js/oeverify.mjs) must give the same (verdict, pq_protected, authenticated) on every case — except the declared
 Node divergences (Node has no ML-DSA: a REQUIRED post-quantum layer is FAIL there, an INVALID ML-DSA co-signature is
-not detectable there). Cases are generated with the toolkit itself; ML-DSA cases need cryptography >= 50 (skipped
-and SAID otherwise). Exit 1 on any undeclared disagreement."""
+not detectable there). Cases are generated with the toolkit itself; ML-DSA cases need cryptography >= 48 (skipped
+and SAID otherwise). Exit 1 on any undeclared disagreement. Council 16/09 r1: `authenticated` joined the tuple (Go/Java/JS
+said true for a revoked signer) and the trust-store / sig_alg / foreign-classical-key / timestamp-sidecar cases were added."""
 import base64, glob, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +50,27 @@ def build_cases(d):
         p = mk(nm); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
         cases[nm] = (p, [], None)
     cases["pq-alg-classical-required"] = (cases["pq-alg-classical"][0], ["--require-pq"], None)
+    # council 16/09 r1: sig_alg shapes and a classical-layer sidecar that declares a PQ alg only
+    for nm, mut in (("sig-alg-number", lambda sd: dict(sd, sig_alg=5)),
+                    ("sig-alg-list", lambda sd: dict(sd, sig_alg=["x"])),
+                    ("sig-alg-pq-only", lambda sd: {"signer_id": "acme", "sig_alg": "ml-dsa-65", "signed_pack_sha3": sd["signed_pack_sha3"],
+                                                    "public_key_b64": "A" * 2604, "signature_b64": "A" * 4412})):
+        p = mk(nm); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
+        cases[nm] = (p, [], None)
+    un = mk("sig-alg-unknown-sha3-number"); P.sign_pack(un, idt); sp = un[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["sig_alg"] = "rsa-pss"; json.dump(sd, open(sp, "w"))
+    dd = json.load(open(un)); dd["pack_sha3"] = 5; json.dump(dd, open(un, "w")); cases["sig-alg-unknown-sha3-number"] = (un, [], None)
+    # timestamp sidecar shapes (the token itself is verified by the reference only; shape and binding by all)
+    tl = mk("tsr-list"); P.sign_pack(tl, idt); open(tl[:-5] + ".tsr.json", "w").write("[1]"); cases["tsr-list"] = (tl, [], None)
+    tm = mk("tsr-mismatch"); P.sign_pack(tm, idt); json.dump({"digest_sha256": "0" * 64, "tsa": "x", "tsr_b64": "AA=="}, open(tm[:-5] + ".tsr.json", "w")); cases["tsr-digest-mismatch"] = (tm, [], None)
+    # trust store shapes: a broken chain and a line with a duplicated key (strict profile: refused, never a pin)
+    bs = mk("trust-broken"); P.sign_pack(bs, idt); store_b = os.path.join(d, "trust_broken.jsonl"); trust.TrustRegistry(store_b).trust("acme", idt.public_key_b64)
+    ln = json.loads(open(store_b).read().splitlines()[0]); ln["ts"] = "1999-01-01T00:00:00Z"; open(store_b, "w").write(json.dumps(ln, separators=(",", ":")) + "\n")
+    cases["trust-broken-chain"] = (bs, ["--trust-store", store_b], None)
+    dk = mk("trust-dup"); P.sign_pack(dk, other); store_d = os.path.join(d, "trust_dup.jsonl"); trust.TrustRegistry(store_d).trust("acme", idt.public_key_b64)
+    txt = open(store_d).read(); txt = txt.replace('"pubkey":"' + idt.public_key_b64 + '"', '"pubkey":"' + idt.public_key_b64 + '","pubkey":"' + other.public_key_b64 + '"', 1)
+    e = json.loads(txt); e2 = {k: v for k, v in e.items() if k != "self_hash"}; import hashlib as _h; e["self_hash"] = _h.sha256(json.dumps(e2, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    txt = txt.replace(json.loads(open(store_d).read())["self_hash"], e["self_hash"]); open(store_d, "w").write(txt.rstrip("\n") + "\n")
+    cases["trust-dup-key-line"] = (dk, ["--trust-store", store_d], None)
     # honest scope variants
     def mk_scope(name, scope):   # build_pack refuses a bad scope: forge it after, with a consistent pack_sha3
         p = mk(name); dd = json.load(open(p)); dd["honest_scope"] = scope
@@ -76,7 +98,7 @@ def build_cases(d):
         kf = os.path.join(d, "acme.pq"); mldsa.MlDsaFileSigner.keygen(kf); ps = mldsa.MlDsaFileSigner(kf); K = ps.public_key_b64
         store_h = os.path.join(d, "trust_h.jsonl"); trust.TrustRegistry(store_h).trust("acme", idt.public_key_b64, pq_pubkey=K)
         h = mk("hybrid"); P.sign_pack(h, idt); P.pq_cosign(h, ps)
-        JS_NO_PQ = {"js": ("FAIL", False)}
+        JS_NO_PQ = {"js": ("FAIL", False, True)}
         cases["hybrid-unpinned"] = (h, [], None)
         cases["hybrid-registry-required"] = (h, ["--trust-store", store_h, "--require-pq"], JS_NO_PQ)
         cases["hybrid-expected-key"] = (h, ["--expect-pq-key", K], JS_NO_PQ)
@@ -86,12 +108,24 @@ def build_cases(d):
         kf2 = os.path.join(d, "other.pq"); mldsa.MlDsaFileSigner.keygen(kf2); fo = mk("foreign"); P.sign_pack(fo, idt); P.pq_cosign(fo, mldsa.MlDsaFileSigner(kf2))
         cases["hybrid-foreign-key"] = (fo, ["--expect-pq-key", K], None)
         bp = mk("badpq"); P.sign_pack(bp, idt); P.pq_cosign(bp, ps); sp = bp[:-5] + ".sig.json"; sd = json.load(open(sp)); raw = bytearray(base64.b64decode(sd["pq_signature_b64"])); raw[5] ^= 1; sd["pq_signature_b64"] = base64.b64encode(bytes(raw)).decode(); json.dump(sd, open(sp, "w"))
-        cases["hybrid-bad-pq"] = (bp, [], {"js": ("PASS", None)})
+        cases["hybrid-bad-pq"] = (bp, [], {"js": ("PASS", None, True)})
+        # council 16/09 r1: a FOREIGN Ed25519 key under a trusted signer_id must not borrow that signer's PQ pin
+        fe = mk("foreign-ed"); P.sign_pack(fe, signing.Identity("acme")); P.pq_cosign(fe, ps)
+        cases["hybrid-foreign-classical-key"] = (fe, ["--trust-store", store_h], None)
+        cases["hybrid-foreign-classical-key-required"] = (fe, ["--trust-store", store_h, "--require-pq"], None)
+        # a revoked hybrid signer: never authenticated, never pq-protected through the registry
+        store_hr = os.path.join(d, "trust_hr.jsonl"); thr = trust.TrustRegistry(store_hr); thr.trust("acme", idt.public_key_b64, pq_pubkey=K); thr.revoke("acme", "x")
+        cases["hybrid-revoked-required"] = (h, ["--trust-store", store_hr, "--require-pq"], None)
+        # rotation of the classical key KEEPS the PQ pin (recorded in the ledger, so every replay agrees) unless dropped
+        store_rk = os.path.join(d, "trust_rk.jsonl"); trk = trust.TrustRegistry(store_rk); trk.trust("acme", other.public_key_b64, pq_pubkey=K); trk.rotate("acme", idt.public_key_b64)
+        cases["hybrid-rotated-keeps-pq-required"] = (h, ["--trust-store", store_rk, "--require-pq"], JS_NO_PQ)
+        store_rd = os.path.join(d, "trust_rd.jsonl"); trd = trust.TrustRegistry(store_rd); trd.trust("acme", other.public_key_b64, pq_pubkey=K); trd.rotate("acme", idt.public_key_b64, drop_pq=True)
+        cases["hybrid-rotated-dropped-pq-required"] = (h, ["--trust-store", store_rd, "--require-pq"], None)
         cases["hybrid-bad-pq-required"] = (bp, ["--expect-pq-key", K], None)
         sw = mk("pq-space"); P.sign_pack(sw, idt); P.pq_cosign(sw, ps); sp = sw[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["pq_signature_b64"] = sd["pq_signature_b64"][:6] + " " + sd["pq_signature_b64"][6:]; json.dump(sd, open(sp, "w"))
         cases["hybrid-pq-lenient-base64"] = (sw, [], None)
     else:
-        print("  hybrid (ML-DSA-65) cases NOT measured: cryptography >= 50 absent")
+        print("  hybrid (ML-DSA-65) cases NOT measured: cryptography >= 48 absent")
     return cases
 
 
@@ -100,9 +134,9 @@ def run(cmd, path, flags, go_style):
     try:
         out = subprocess.run(args, capture_output=True, text=True, timeout=60)
         r = json.loads(out.stdout)
-        return (r["verdict"], r.get("pq_protected"))
+        return (r["verdict"], r.get("pq_protected"), r.get("authenticated"))
     except Exception:  # noqa: BLE001
-        return ("NONJSON/CRASH", None)
+        return ("NONJSON/CRASH", None, None)
 
 
 def main():

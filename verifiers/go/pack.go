@@ -274,9 +274,18 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 		}
 	}
 	// timestamp sidecar: declared, not verified here
+	// (shape and content-binding ARE checked, like the reference: an object whose digest_sha256 is the pack bytes)
 	tsStatus := "SKIP"
-	if _, e := os.Stat(sidecarPath(packPath, ".tsr.json")); e == nil {
-		add("timestamp", "SKIP", "RFC 3161 token present: not verified by this verifier (use the Python reference)")
+	if tp := sidecarPath(packPath, ".tsr.json"); fileExists(tp) {
+		ts, e := readObject(tp)
+		packBytes, e2 := os.ReadFile(packPath)
+		if e != nil || e2 != nil {
+			add("timestamp", "FAIL", "malformed sidecar")
+		} else if dg, _ := str(ts, "digest_sha256"); dg != sha256Hex(packBytes) {
+			add("timestamp", "FAIL", "pack changed after stamping")
+		} else {
+			add("timestamp", "SKIP", "RFC 3161 token present: not verified by this verifier (use the Python reference)")
+		}
 	} else {
 		add("timestamp", "SKIP", "no timestamp sidecar")
 	}
@@ -291,13 +300,17 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 		sigStatus = "FAIL"
 	} else {
 		alg, hasAlg := str(side, "sig_alg")
-		if !hasAlg {
+		_, algPresent := side.Vals["sig_alg"]
+		if !algPresent {
 			alg = "ed25519"
 		}
 		signedDigest, _ := str(side, "signed_pack_sha3")
 		pkB64, _ := str(side, "public_key_b64")
 		sigB64, _ := str(side, "signature_b64")
-		if alg != "ed25519" {
+		if algPresent && !hasAlg { // present but not a string: malformed (council 16/09 r1), like pq_sig_alg
+			add("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a string")
+			sigStatus = "FAIL"
+		} else if alg != "ed25519" {
 			add("producer-signature", "SKIP", "unsupported sig_alg: "+alg)
 		} else {
 			pk, sig := b64Strict(pkB64, 32), b64Strict(sigB64, 64)
@@ -314,9 +327,11 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 				if trustStore != "" {
 					st, stOK = trustState(trustStore)
 				}
+				// the registry's PQ pin is borrowed ONLY when the classical key that signed is the registered
+				// one (council 16/09 r1: a foreign Ed25519 key under a trusted signer_id must not be pq-protected)
 				pinned := expectedPQ
 				if pinned == "" && trustStore != "" && stOK {
-					if te := st[sid]; te != nil && !te.revoked {
+					if te := st[sid]; te != nil && !te.revoked && te.pubkey == pkB64 {
 						pinned = te.pqPubkey
 					}
 				}
@@ -328,7 +343,9 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 						trusted = true
 					} else {
 						d := sid + ": not in trust registry"
-						if te != nil && te.revoked {
+						if !stOK {
+							d = "trust store unreadable or broken"
+						} else if te != nil && te.revoked {
 							d = sid + ": key revoked"
 						} else if te != nil {
 							d = sid + ": key differs"
@@ -358,7 +375,9 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 	default:
 		add("authenticity", "FAIL", "no anchor and no signature: cannot authenticate")
 	}
-	return finish(r, declared, trusted, sigStatus == "PASS", "", requirePQ || expectedPQ != "")
+	// authenticated = a producer identity signed AND was not refused by the registry (council 16/09 r1: Go said
+	// true for a revoked signer while the authenticity layer was FAIL; Python says false)
+	return finish(r, declared, trusted, sigStatus == "PASS" && !trustFailed, "", requirePQ || expectedPQ != "")
 }
 
 // checkPQ: the pinned tri-state (cryptovalid 0.13.0 / omega-evidence 0.7.0 rules).
@@ -462,6 +481,11 @@ func finish(r Receipt, digest string, trusted, signed bool, force string, pqRequ
 	}
 	_ = sort.Strings
 	return r
+}
+
+func fileExists(p string) bool {
+	_, e := os.Stat(p)
+	return e == nil
 }
 
 func sha256Hex(b []byte) string {

@@ -23,13 +23,13 @@ build with SLH-DSA, or liboqs) is wired in by `slhdsa.try_load()` / `mldsa`.
 """
 
 from .gate import register_pq_backend  # noqa: F401
-from . import mldsa  # noqa: F401  (ML-DSA-65 / FIPS 204 via cryptography >= 50, KAT-gated; 0.7.0)
+from . import mldsa  # noqa: F401  (ML-DSA-65 / FIPS 204 via cryptography >= 48, KAT-gated; 0.7.0)
 
 _AUTO = {}
 
 
 def autoload() -> dict:
-    """Register the built-in ML-DSA-65 backend once (KAT gate on the NIST ACVP vectors) when `cryptography` >= 50
+    """Register the built-in ML-DSA-65 backend once (KAT gate on the NIST ACVP vectors) when `cryptography` >= 48
     is present. Called lazily by the verifier; the result is cached and reported (never a silent failure)."""
     if "mldsa" not in _AUTO:
         _AUTO["mldsa"] = mldsa.try_load()

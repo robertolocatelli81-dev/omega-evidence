@@ -132,9 +132,13 @@ def pq_cosign(pack_path: str, signer) -> Dict[str, Any]:
     if not side_path.exists():
         raise RuntimeError("pq_cosign: sign the pack with the classical identity first (sign_pack)")
     side = json.loads(side_path.read_text(encoding="utf-8"))
-    digest = side.get("signed_pack_sha3") or json.loads(Path(pack_path).read_text(encoding="utf-8")).get("pack_sha3", "")
-    if not _re.fullmatch(r"[0-9a-f]{64}", digest or ""):
-        raise RuntimeError("pq_cosign: the sidecar carries no valid signed_pack_sha3")
+    body = json.loads(Path(pack_path).read_text(encoding="utf-8"))
+    # content-binding (council 16/09 r1): the digest is RECOMPUTED from the pack body; the declared pack_sha3 and
+    # the sidecar's signed_pack_sha3 must both equal it, else a stale sidecar would get a fresh PQ co-signature
+    digest = sha3({k: v for k, v in body.items() if k != "pack_sha3"}) if isinstance(body, dict) else ""
+    if not _re.fullmatch(r"[0-9a-f]{64}", digest or "") or body.get("pack_sha3") != digest \
+            or side.get("signed_pack_sha3") != digest:
+        raise RuntimeError("pq_cosign: pack_sha3 / signed_pack_sha3 do not match the pack body (stale or tampered)")
     sig = signer.sign(digest.encode())
     if not _m.verify_fn(signer.public_key_b64, _b64.b64encode(sig).decode(), digest.encode()):
         raise RuntimeError("pq_cosign: the post-quantum signature does not verify against the declared key (refused)")

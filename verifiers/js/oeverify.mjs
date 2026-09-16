@@ -183,7 +183,12 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
     else if (!entries.length) add("ledger-chain", "FAIL", lp + ": ledger empty — nothing anchored");
     else if (declared && entries.some((e) => anchors(e, declared))) { add("ledger-chain", "PASS", lp + ": pack_sha3 recorded"); ledgerOK = true; }
     else add("ledger-chain", "FAIL", "valid chain but this pack is not anchored (no anchored_pack_sha3 entry)"); }
-  add("timestamp", "SKIP", existsSync(sidecar(packPath, ".tsr.json")) ? "RFC 3161 token present: not verified by this verifier (use the Python reference)" : "no timestamp sidecar");
+  if (existsSync(sidecar(packPath, ".tsr.json"))) {   // shape + content-binding checked like the reference; the token itself is not
+    let ts = null; try { ts = readObject(sidecar(packPath, ".tsr.json")); } catch { ts = null; }
+    if (!ts) add("timestamp", "FAIL", "malformed sidecar");
+    else if (ts.digest_sha256 !== sha256Hex(readFileSync(packPath))) add("timestamp", "FAIL", "pack changed after stamping");
+    else add("timestamp", "SKIP", "RFC 3161 token present: not verified by this verifier (use the Python reference)");
+  } else add("timestamp", "SKIP", "no timestamp sidecar");
   let sigStatus = "SKIP", trusted = false, trustFailed = false;
   const sp = sidecar(packPath, ".sig.json");
   if (!existsSync(sp)) add("producer-signature", "SKIP", "pack not signed");
@@ -191,7 +196,8 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
     let side = null; try { side = readObject(sp); } catch (e) { add("producer-signature", "FAIL", "malformed sidecar: " + e.message); sigStatus = "FAIL"; }
     if (side) {
       const alg = "sig_alg" in side ? side.sig_alg : "ed25519";
-      if (alg !== "ed25519") add("producer-signature", "SKIP", "unsupported sig_alg: " + alg);
+      if ("sig_alg" in side && typeof alg !== "string") { add("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a string"); sigStatus = "FAIL"; }  // council 16/09 r1
+      else if (alg !== "ed25519") add("producer-signature", "SKIP", "unsupported sig_alg: " + alg);
       else {
         const pk = b64Strict(side.public_key_b64, 32), sig = b64Strict(side.signature_b64, 64);
         let okSig = false;
@@ -200,12 +206,13 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
         else {
           const sid = side.signer_id; add("producer-signature", "PASS", `signed by ${sid} (ed25519)`); sigStatus = "PASS";
           let st = null, stOK = true; if (trustStore) { const r = trustState(trustStore); st = r.st; stOK = r.ok; }
-          let pinned = expectPQ; if (!pinned && st && stOK && st[sid] && !st[sid].revoked && st[sid].pq) pinned = st[sid].pq;
+          // the registry's PQ pin is borrowed only when the classical key that signed is the registered one (council 16/09 r1)
+          let pinned = expectPQ; if (!pinned && st && stOK && st[sid] && !st[sid].revoked && st[sid].pq && st[sid].pubkey === side.public_key_b64) pinned = st[sid].pq;
           checkPQ(layers, side, pinned, requirePQ);
           if (trustStore) {
             const te = st[sid];
             if (stOK && te && !te.revoked && te.pubkey === side.public_key_b64) { add("trusted-signer", "PASS", sid + " in trust registry"); trusted = true; }
-            else { add("trusted-signer", "FAIL", te && te.revoked ? sid + ": key revoked" : te ? sid + ": key differs" : sid + ": not in trust registry"); trustFailed = true; }
+            else { add("trusted-signer", "FAIL", !stOK ? "trust store unreadable or broken" : te && te.revoked ? sid + ": key revoked" : te ? sid + ": key differs" : sid + ": not in trust registry"); trustFailed = true; }
           }
         }
       }
@@ -218,7 +225,7 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
   else if (sigStatus === "PASS") add("authenticity", "PASS", "signed (identity not checked against a registry)");
   else if (ledgerOK) add("authenticity", "PASS", "anchored (integrity/time, not identity)");
   else add("authenticity", "FAIL", "no anchor and no signature: cannot authenticate");
-  return finish(layers, trusted, sigStatus === "PASS", required);
+  return finish(layers, trusted, sigStatus === "PASS" && !trustFailed, required);   // council 16/09 r1: never authenticated for a revoked/untrusted signer
 }
 
 // No ML-DSA in Node: the layer is reported as Python does without a backend (SKIP unverified; FAIL when required),

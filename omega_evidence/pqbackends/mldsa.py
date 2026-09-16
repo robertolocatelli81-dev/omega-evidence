@@ -18,11 +18,13 @@ Profile (the same as cryptovalid 0.13.0, so the same verifiers apply): pure ML-D
 string (the JDK 24-27 built-in provider has no context API; AWS KMS RAW signing is the empty context); message =
 the UTF-8 bytes of the pack's `pack_sha3` hex string (the same bytes the Ed25519 sidecar signs); signature 3309
 bytes and public key 1952 bytes, both standard base64 with padding, decoded STRICTLY. Verification needs
-`cryptography` >= 50; without it the layer is reported present-but-unverifiable, never a pass.
+`cryptography` >= 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0, 2026-05-04; 47.0.0 only on AWS-LC/BoringSSL
+builds — measured on 48.0.0 and 50.0.1, 16/09/2026); without it the layer is reported present-but-unverifiable, never a pass.
 
 The backend is registered only after the KAT gate (`gate.run_kat`) passes on the NIST ACVP ML-DSA-65 sigVer
-vectors shipped next to this file (`vectors/acvp_mldsa65_sigver.txt`, FIPS 204 external/pure, contexts as given
-by NIST) — a backend that accepts a tampered signature is never wired in.
+vectors shipped next to this file (`vectors/acvp_mldsa65_sigver.txt`: sigVer PASS vectors with the contexts NIST
+gives, plus two sigGen known-answer signatures with the EMPTY context — the path this profile actually uses — that
+are checked through the very function registered) — a backend that accepts a tampered signature is never wired in.
 
 Signers: `MlDsaFileSigner` (PKCS#8 DER base64 on disk, 0600) and `AwsKmsMlDsaSigner` (KeySpec ML_DSA_65,
 ML_DSA_SHAKE_256, MessageType RAW; the private key never enters process memory; the Sign response's KeyId must
@@ -49,7 +51,7 @@ MLDSA65_SPKI_LEN = 1974
 
 def _mldsa():
     try:
-        from cryptography.hazmat.primitives.asymmetric import mldsa  # cryptography >= 50
+        from cryptography.hazmat.primitives.asymmetric import mldsa  # cryptography >= 48 (wheels) / 47 (AWS-LC)
         return mldsa
     except Exception:  # noqa: BLE001 — absent or too old: the layer is unverifiable, declared
         return None
@@ -73,7 +75,7 @@ def b64_strict(s: Any, n: int) -> Optional[bytes]:
 def verify_raw(pk_raw: bytes, message: bytes, sig_raw: bytes, context: bytes = b"") -> bool:
     m = _mldsa()
     if m is None:
-        raise RuntimeError("ML-DSA-65 needs cryptography >= 50")
+        raise RuntimeError("ML-DSA-65 needs cryptography >= 48")
     try:
         m.MLDSA65PublicKey.from_public_bytes(pk_raw).verify(sig_raw, message, context=context or None)
         return True
@@ -115,18 +117,29 @@ def _kat_verify(public_key_b64: str, signature_b64: str, message: bytes, context
 
 
 def try_load() -> Dict[str, Any]:
-    """Register ml-dsa-65 as a post-quantum algorithm if cryptography >= 50 is present AND the KAT gate passes.
+    """Register ml-dsa-65 as a post-quantum algorithm if cryptography >= 48 is present AND the KAT gate passes.
     Returns {registered, alg, reason}. Idempotent."""
     if not available():
-        return {"registered": False, "alg": ALG, "reason": "cryptography >= 50 (ML-DSA) not available"}
+        return {"registered": False, "alg": ALG, "reason": "cryptography >= 48 (ML-DSA) not available"}
     kat = load_kat()
-    # the gate calls verify_fn(public, signature, message): bind each vector's context through a closure
-    ctx_by_msg = {v["message_hex"].lower(): v.get("context_hex", "") for v in kat}   # bytes.hex() is lowercase
-    res = gate.run_kat(lambda p, s, m: _kat_verify(p, s, m, ctx_by_msg.get(m.hex(), "")), kat)
+    # council 16/09 (r1): the function that gets REGISTERED (empty context) must itself pass a NIST known answer —
+    # the empty-context vectors go through verify_fn as is; the sigVer vectors with a context go through the same
+    # decoder with their context bound by (key, signature, message), never by message alone
+    empty = [v for v in kat if not v.get("context_hex")]
+    ctxed = [v for v in kat if v.get("context_hex")]
+    if not empty:
+        return {"registered": False, "alg": ALG, "reason": "KAT gate: no empty-context vector for the registered function"}
+    res = gate.run_kat(verify_fn, empty)
     if not res.get("passed"):
-        return {"registered": False, "alg": ALG, "reason": "KAT gate failed: " + str(res.get("reason"))}
+        return {"registered": False, "alg": ALG, "reason": "KAT gate failed (empty context): " + str(res.get("reason"))}
+    if ctxed:
+        ctx_by_vec = {(v["public"], v["signature"], v["message_hex"].lower()): v["context_hex"] for v in ctxed}
+        res = gate.run_kat(lambda p, s, m: _kat_verify(p, s, m, ctx_by_vec.get((p, s, m.hex()), "")), ctxed)
+        if not res.get("passed"):
+            return {"registered": False, "alg": ALG, "reason": "KAT gate failed (with context): " + str(res.get("reason"))}
     signing.register_sig_alg(ALG, verify_fn, post_quantum=True)
-    return {"registered": True, "alg": ALG, "reason": f"KAT gate passed on {len(kat)} NIST ACVP vectors"}
+    return {"registered": True, "alg": ALG,
+            "reason": f"KAT gate passed on {len(kat)} NIST ACVP vectors ({len(empty)} with the empty context)"}
 
 
 # ── signers ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -137,7 +150,7 @@ class MlDsaFileSigner:
     def __init__(self, path: str):
         m = _mldsa()
         if m is None:
-            raise RuntimeError("ML-DSA-65 needs cryptography >= 50")
+            raise RuntimeError("ML-DSA-65 needs cryptography >= 48")
         from cryptography.hazmat.primitives import serialization as ser
         with open(path, encoding="utf-8") as f:
             sk = ser.load_der_private_key(base64.b64decode(f.read().strip()), password=None)
@@ -150,7 +163,7 @@ class MlDsaFileSigner:
     def keygen(path: str) -> Dict[str, Any]:
         m = _mldsa()
         if m is None:
-            raise RuntimeError("ML-DSA-65 needs cryptography >= 50")
+            raise RuntimeError("ML-DSA-65 needs cryptography >= 48")
         from cryptography.hazmat.primitives import serialization as ser
         sk = m.MLDSA65PrivateKey.generate()
         der = sk.private_bytes(ser.Encoding.DER, ser.PrivateFormat.PKCS8, ser.NoEncryption())
@@ -167,9 +180,25 @@ class MlDsaFileSigner:
 
 
 def _mldsa65_raw_from_spki(der: bytes) -> bytes:
-    if len(der) != MLDSA65_SPKI_LEN or MLDSA65_SPKI_OID not in der[:32] or der[-PK_LEN - 1] != 0:
+    """Raw 1952-byte key out of a SubjectPublicKeyInfo — parsed as ASN.1 by cryptography and type-checked
+    (council 16/09 r1: the previous byte-offset check was fail-closed but not a structural parse); the fixed
+    length and OID (RFC 9881) are still required as a belt."""
+    m = _mldsa()
+    if m is None:
+        raise RuntimeError("ML-DSA-65 needs cryptography >= 48")
+    from cryptography.hazmat.primitives import serialization as ser
+    if len(der) != MLDSA65_SPKI_LEN or MLDSA65_SPKI_OID not in der[:32]:
         raise RuntimeError("the AWS KMS key is not an ML-DSA-65 SubjectPublicKeyInfo (use KeySpec ML_DSA_65)")
-    return der[-PK_LEN:]
+    try:
+        pk = ser.load_der_public_key(bytes(der))
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"the AWS KMS public key is not a valid SubjectPublicKeyInfo: {type(e).__name__}") from e
+    if not isinstance(pk, m.MLDSA65PublicKey):
+        raise RuntimeError("the AWS KMS key is not ML-DSA-65 (use KeySpec ML_DSA_65)")
+    raw = pk.public_bytes_raw()
+    if len(raw) != PK_LEN:
+        raise RuntimeError(f"unexpected ML-DSA-65 public key length {len(raw)}")
+    return raw
 
 
 class AwsKmsMlDsaSigner:
@@ -203,7 +232,7 @@ class AwsKmsMlDsaSigner:
             r = self._client.sign(KeyId=self._key_id, Message=bytes(message), MessageType="RAW", SigningAlgorithm="ML_DSA_SHAKE_256")
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"AWS KMS Sign failed for {self._key_id}: {type(e).__name__}: {str(e)[:200]}") from e
-        if r.get("SigningAlgorithm", "ML_DSA_SHAKE_256") != "ML_DSA_SHAKE_256":
+        if r.get("SigningAlgorithm", "") != "ML_DSA_SHAKE_256":      # a response without the field is refused
             raise RuntimeError(f"AWS KMS signed with {r.get('SigningAlgorithm')}, not ML_DSA_SHAKE_256")
         if r.get("KeyId") and r["KeyId"] != self.key_arn:
             raise RuntimeError("AWS KMS signed with a different key than the one whose public key was read (alias re-pointed?)")

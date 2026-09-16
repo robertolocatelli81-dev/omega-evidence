@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1030,7 +1031,7 @@ class TestMlDsaHybrid(unittest.TestCase):
         from omega_evidence.pqbackends import mldsa, autoload
         self.m = mldsa
         if not mldsa.available():
-            self.skipTest("cryptography >= 50 (ML-DSA) absent")
+            self.skipTest("cryptography >= 48 (ML-DSA) absent")
         self.assertTrue(autoload()["mldsa"]["registered"], autoload())
 
     def _hybrid(self, tmp):
@@ -1112,6 +1113,135 @@ class TestMlDsaHybrid(unittest.TestCase):
             pack.add_pq_signature(pp, "ed25519", idt.public_key_b64, json.load(open(pp[:-5] + ".sig.json"))["signature_b64"])
             v = verify_pack(pp, expected_pq_public_key_b64=idt.public_key_b64)
             self.assertFalse(v["valid"]); self.assertIsNot(v["pq_protected"], True)
+
+    # ── council 16/09 r1 (Fable 5.1 + Opus + Sonnet + Haiku on the real files) ─────────────────────────────────
+    def _layer(self, v, name):
+        return next(ly for ly in v["layers"] if ly["layer"] == name)
+
+    def test_pq_alg_never_accepted_as_classical_layer_even_when_loaded(self):
+        """A sidecar declaring sig_alg ml-dsa-65 and no Ed25519 at all was PASSing 'producer-signature' once the
+        backend had been autoloaded (register_sig_alg put it in SIG_ALGS). Now: unsupported → SKIP, never signed."""
+        self.assertNotIn("ml-dsa-65", signing.SIG_ALGS); self.assertIn("ml-dsa-65", signing.PQ_SIG_ALGS)
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp)
+            sp = pp[:-5] + ".sig.json"; side = json.load(open(sp))
+            digest = side["signed_pack_sha3"]
+            pq_only = {"signer_id": "acme", "sig_alg": "ml-dsa-65", "signed_pack_sha3": digest,
+                       "public_key_b64": side["pq_public_key_b64"], "signature_b64": side["pq_signature_b64"]}
+            json.dump(pq_only, open(sp, "w"))
+            v = verify_pack(pp)
+            self.assertEqual(self._layer(v, "producer-signature")["status"], "SKIP")
+            self.assertFalse(v["authenticated"]); self.assertFalse(v["valid"])
+            for bad in (5, ["x"], None, {"a": 1}):                                                        # not a string → malformed
+                json.dump(dict(side, sig_alg=bad), open(sp, "w"))
+                v = verify_pack(pp)
+                self.assertEqual(self._layer(v, "producer-signature")["status"], "FAIL"); self.assertFalse(v["authenticated"])
+            json.dump(dict(side, sig_alg="rsa-pss"), open(sp, "w"))                                      # unknown string + odd pack_sha3: no crash
+            body = json.load(open(pp)); body["pack_sha3"] = 5; json.dump(body, open(pp, "w"))
+            v = verify_pack(pp); self.assertFalse(v["valid"]); self.assertIs(v["pq_protected"], False)
+
+    def test_foreign_classical_key_under_trusted_id_is_not_pq_protected(self):
+        """Mallory's Ed25519 key with signer_id 'acme' + acme's real ML-DSA co-signature: the registry's PQ pin is
+        NOT borrowed; pq_protected is null (unpinned) / false when required, never true; never authenticated."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp)
+            store = os.path.join(tmp, "trust.jsonl")
+            trust.TrustRegistry(store).trust("acme", idt.public_key_b64, pq_pubkey=signer.public_key_b64)
+            mallory = signing.Identity("acme"); pack.sign_pack(pp, mallory); pack.pq_cosign(pp, signer)
+            v = verify_pack(pp, trust_store=store)
+            self.assertFalse(v["valid"]); self.assertIsNone(v["pq_protected"]); self.assertFalse(v["authenticated"])
+            self.assertEqual(self._layer(v, "trusted-signer")["status"], "FAIL")
+            v = verify_pack(pp, trust_store=store, require_pq=True)
+            self.assertIs(v["pq_protected"], False); self.assertFalse(v["authenticated"])
+            # a revoked hybrid signer: never pq-protected through the registry, never authenticated
+            pack.sign_pack(pp, idt); pack.pq_cosign(pp, signer)
+            trust.TrustRegistry(store).revoke("acme", "compromised")
+            v = verify_pack(pp, trust_store=store, require_pq=True)
+            self.assertFalse(v["valid"]); self.assertIs(v["pq_protected"], False); self.assertFalse(v["authenticated"])
+
+    def test_trust_store_replayed_only_from_a_strict_verified_chain(self):
+        """A broken chain is 'trusted-signer FAIL', not a crash; a line with a duplicated 'pubkey' key (last-wins
+        for a lenient parser, self_hash made consistent) is refused, never a pin."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp)
+            store = os.path.join(tmp, "trust.jsonl"); trust.TrustRegistry(store).trust("acme", idt.public_key_b64, pq_pubkey=signer.public_key_b64)
+            good = open(store).read()
+            ln = json.loads(good.splitlines()[0]); ln["ts"] = "1999-01-01T00:00:00Z"; open(store, "w").write(json.dumps(ln, separators=(",", ":")) + "\n")
+            v = verify_pack(pp, trust_store=store, require_pq=True)
+            self.assertFalse(v["valid"]); self.assertFalse(v["authenticated"]); self.assertIs(v["pq_protected"], False)
+            self.assertIn("trust store", self._layer(v, "trusted-signer")["detail"])
+            with self.assertRaises(ValueError):
+                trust.TrustRegistry(store)
+            mallory = signing.Identity("acme")
+            txt = good.replace('"pubkey":"' + idt.public_key_b64 + '"', '"pubkey":"' + idt.public_key_b64 + '","pubkey":"' + mallory.public_key_b64 + '"', 1)
+            e = json.loads(txt); e2 = {k: v for k, v in e.items() if k != "self_hash"}
+            import hashlib as _h; fixed = _h.sha256(json.dumps(e2, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            open(store, "w").write(txt.replace(json.loads(good)["self_hash"], fixed))
+            pack.sign_pack(pp, mallory); pack.pq_cosign(pp, signer)
+            v = verify_pack(pp, trust_store=store)
+            self.assertFalse(v["authenticated"]); self.assertEqual(self._layer(v, "trusted-signer")["status"], "FAIL")
+
+    def test_rotation_keeps_the_pq_pin_unless_dropped_and_keys_are_validated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp); K = signer.public_key_b64
+            store = os.path.join(tmp, "trust.jsonl"); tr = trust.TrustRegistry(store)
+            old = signing.Identity("acme"); tr.trust("acme", old.public_key_b64, pq_pubkey=K)
+            r = tr.rotate("acme", idt.public_key_b64)                                                    # classical-only rotation
+            self.assertTrue(r["pq_pubkey_kept"]); self.assertEqual(tr.pq_pubkey("acme"), K)
+            self.assertEqual(trust.TrustRegistry(store).pq_pubkey("acme"), K)                            # and on replay (recorded)
+            self.assertEqual(json.loads(open(store).read().splitlines()[-1])["data"]["pq_pubkey"], K)
+            self.assertIs(verify_pack(pp, trust_store=store, require_pq=True)["pq_protected"], True)
+            tr.rotate("acme", idt.public_key_b64, drop_pq=True)
+            self.assertIsNone(tr.pq_pubkey("acme")); self.assertIsNone(trust.TrustRegistry(store).pq_pubkey("acme"))
+            self.assertIs(verify_pack(pp, trust_store=store, require_pq=True)["pq_protected"], False)
+            for bad in ("", " x", 5, b"k"):
+                with self.assertRaises(ValueError):
+                    tr.trust("bob", idt.public_key_b64, pq_pubkey=bad)
+            with self.assertRaises(ValueError):
+                tr.trust("bob", "")
+
+    def test_kat_gate_covers_the_registered_empty_context_function(self):
+        """The registered verifier (empty context) must itself pass a NIST known answer: two ACVP sigGen ML-DSA-65
+        external/pure signatures with the EMPTY context ship in the vector file; the with-context sigVer vectors are
+        bound by (key, signature, message). A gate without an empty-context vector refuses to register."""
+        kat = self.m.load_kat()
+        empty = [v for v in kat if not v["context_hex"]]
+        self.assertGreaterEqual(len(empty), 2); self.assertGreaterEqual(len(kat) - len(empty), 3)
+        from omega_evidence.pqbackends import gate
+        self.assertTrue(gate.run_kat(self.m.verify_fn, empty)["passed"])
+        for v in empty:                                                                                   # and a context breaks them
+            self.assertFalse(self.m._kat_verify(v["public"], v["signature"], bytes.fromhex(v["message_hex"]), "00"))
+        r = self.m.try_load(); self.assertTrue(r["registered"]); self.assertIn("2 with the empty context", r["reason"])
+        with unittest.mock.patch.object(self.m, "load_kat", lambda: [v for v in kat if v["context_hex"]]):
+            self.assertFalse(self.m.try_load()["registered"])
+
+    def test_pq_cosign_recomputes_the_digest_from_the_pack_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp)
+            body = json.load(open(pp)); body["x"] = 2; json.dump(body, open(pp, "w"))                      # stale pack_sha3 + sidecar
+            with self.assertRaises(RuntimeError):
+                pack.pq_cosign(pp, signer)
+
+    def test_spki_parse_is_structural(self):
+        from cryptography.hazmat.primitives import serialization as ser
+        sk = self.m._mldsa().MLDSA65PrivateKey.generate(); pk = sk.public_key()
+        spki = pk.public_bytes(ser.Encoding.DER, ser.PublicFormat.SubjectPublicKeyInfo)
+        self.assertEqual(self.m._mldsa65_raw_from_spki(spki), pk.public_bytes_raw())
+        # the key bytes themselves are opaque (any 1952 bytes are a well-formed ML-DSA-65 public key): what the
+        # structural parse adds over the old byte-offset check is the FRAMING — same length, OID still in the first
+        # 32 bytes, unused-bits byte still 0, but the BIT STRING tag (offset 17) replaced: refused now, accepted before
+        bad = bytearray(spki); bad[17] = 0x04                                                             # OCTET STRING, not BIT STRING
+        self.assertEqual(len(bad), self.m.MLDSA65_SPKI_LEN); self.assertIn(self.m.MLDSA65_SPKI_OID, bytes(bad[:32])); self.assertEqual(bad[-1953], 0)
+        with self.assertRaises(RuntimeError):
+            self.m._mldsa65_raw_from_spki(bytes(bad))
+        with self.assertRaises(RuntimeError):
+            self.m._mldsa65_raw_from_spki(spki[:-1])
+
+    def test_timestamp_sidecar_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pp, idt, signer = self._hybrid(tmp)
+            open(pp[:-5] + ".tsr.json", "w").write("[1]")
+            v = verify_pack(pp); self.assertEqual(self._layer(v, "rfc3161")["status"], "FAIL"); self.assertFalse(v["valid"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

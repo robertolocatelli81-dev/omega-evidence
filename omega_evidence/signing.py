@@ -118,9 +118,13 @@ def register_sig_alg(alg: str, verifier, post_quantum: bool = False) -> None:
     """Register a signature-verification backend for `alg`. `post_quantum=True`
     marks it as PQ so a hybrid pack can be reported as pq-protected once it
     actually verifies. Never registers unvalidated home-grown crypto."""
-    SIG_ALGS[alg] = verifier
     if post_quantum:
+        # council 16/09 (r1): a PQ backend is NEVER a classical producer-signature algorithm — with it in SIG_ALGS a
+        # sidecar declaring sig_alg "ml-dsa-65" and no Ed25519 at all passed "producer-signature" once the backend
+        # had been autoloaded (hybrid = both; the PQ layer alone is not a producer signature)
         PQ_SIG_ALGS[alg] = verifier
+    else:
+        SIG_ALGS[alg] = verifier
 
 
 def verify_with_alg(alg: str, public_key_b64: str, signature_b64: str,

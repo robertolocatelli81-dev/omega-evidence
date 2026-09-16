@@ -95,7 +95,7 @@ def _check_portable(obj) -> None:
             if not isinstance(k, str):
                 raise ValueError("non-string key")
             _check_portable(v)
-    elif isinstance(obj, (list, tuple)):
+    elif isinstance(obj, (list, tuple, set, frozenset)):
         for v in obj:
             _check_portable(v)
 
@@ -244,8 +244,11 @@ class Ledger:
     def entries(self):
         if not os.path.exists(self.path):
             return
-        with open(self.path, encoding="utf-8") as fh:
+        with open(self.path, encoding="utf-8", newline="\n") as fh:
             for line in fh:
-                line = line.strip()
+                line = line.strip(" \t\r\n")
                 if line:
-                    yield json.loads(line).get("data", {})
+                    e = loads_strict(line)          # 0.7.0: the strict profile also on replay (no duplicate keys)
+                    if not isinstance(e, dict):
+                        raise ValueError("ledger line is not a JSON object")
+                    yield e.get("data", {})

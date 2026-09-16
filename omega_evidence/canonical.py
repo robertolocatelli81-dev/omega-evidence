@@ -80,7 +80,7 @@ def _reject_reserved(obj: Any) -> None:
             if not isinstance(k, str):
                 raise ValueError(f"canonical_json: non-string key {k!r} is not injective")
             _reject_reserved(v)
-    elif isinstance(obj, (list, tuple)):
+    elif isinstance(obj, (list, tuple, set, frozenset)):
         for v in obj:
             _reject_reserved(v)
 

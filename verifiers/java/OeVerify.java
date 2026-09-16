@@ -350,7 +350,12 @@ public class OeVerify {
                 if (anch) { add.accept(new String[]{"ledger-chain", "PASS"}, lp + ": pack_sha3 recorded"); ledgerOK = true; }
                 else add.accept(new String[]{"ledger-chain", "FAIL"}, "valid chain but this pack is not anchored (no anchored_pack_sha3 entry)"); }
         }
-        if (Files.exists(Path.of(sidecar(packPath, ".tsr.json")))) add.accept(new String[]{"timestamp", "SKIP"}, "RFC 3161 token present: not verified by this verifier (use the Python reference)");
+        if (Files.exists(Path.of(sidecar(packPath, ".tsr.json")))) {   // shape + content-binding checked like the reference; the token itself is not
+            Obj ts = null; try { ts = readObject(sidecar(packPath, ".tsr.json")); } catch (Exception e) { ts = null; }
+            if (ts == null) add.accept(new String[]{"timestamp", "FAIL"}, "malformed sidecar");
+            else if (!sha("SHA-256", Files.readAllBytes(Path.of(packPath))).equals(str(ts, "digest_sha256"))) add.accept(new String[]{"timestamp", "FAIL"}, "pack changed after stamping");
+            else add.accept(new String[]{"timestamp", "SKIP"}, "RFC 3161 token present: not verified by this verifier (use the Python reference)");
+        }
         else add.accept(new String[]{"timestamp", "SKIP"}, "no timestamp sidecar");
         // producer signature
         String sigStatus = "SKIP"; boolean trusted = false, trustFailed = false;
@@ -360,9 +365,11 @@ public class OeVerify {
             Obj side = null;
             try { side = readObject(sp); } catch (Exception e) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar: " + e.getMessage()); sigStatus = "FAIL"; }
             if (side != null) {
-                String alg = side.vals.containsKey("sig_alg") ? str(side, "sig_alg") : "ed25519";
+                boolean algPresent = side.vals.containsKey("sig_alg");
+                String alg = algPresent ? str(side, "sig_alg") : "ed25519";
                 String signedDigest = str(side, "signed_pack_sha3"), pkB64 = str(side, "public_key_b64"), sigB64 = str(side, "signature_b64");
-                if (!"ed25519".equals(alg)) add.accept(new String[]{"producer-signature", "SKIP"}, "unsupported sig_alg: " + alg);
+                if (algPresent && alg == null) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar fields: sig_alg is not a string"); sigStatus = "FAIL"; }  // council 16/09 r1
+                else if (!"ed25519".equals(alg)) add.accept(new String[]{"producer-signature", "SKIP"}, "unsupported sig_alg: " + alg);
                 else {
                     byte[] pk = b64Strict(pkB64, 32), sig = b64Strict(sigB64, 64);
                     boolean okSig = pk != null && sig != null && !declared.isEmpty() && edVerify(pk, declared.getBytes(StandardCharsets.UTF_8), sig);
@@ -372,12 +379,13 @@ public class OeVerify {
                         Map<String, TrustEntry> st = null; boolean[] stOK = new boolean[]{true};
                         if (!trustStore.isEmpty()) { try { st = trustState(trustStore, stOK); } catch (Exception e) { st = new HashMap<>(); stOK[0] = false; } }
                         String pinned = expectedPQ;
-                        if (pinned.isEmpty() && st != null && stOK[0]) { TrustEntry te = st.get(sid); if (te != null && !te.revoked && te.pq != null) pinned = te.pq; }
+                        // the registry's PQ pin is borrowed only when the classical key that signed is the registered one (council 16/09 r1)
+                        if (pinned.isEmpty() && st != null && stOK[0]) { TrustEntry te = st.get(sid); if (te != null && !te.revoked && te.pq != null && te.pubkey != null && te.pubkey.equals(pkB64)) pinned = te.pq; }
                         checkPQ(layers, side, declared, pinned, requirePQ);
                         if (!trustStore.isEmpty()) {
                             TrustEntry te = st.get(sid);
                             if (stOK[0] && te != null && !te.revoked && te.pubkey != null && te.pubkey.equals(pkB64)) { add.accept(new String[]{"trusted-signer", "PASS"}, sid + " in trust registry"); trusted = true; }
-                            else { String d = te != null && te.revoked ? sid + ": key revoked" : te != null ? sid + ": key differs" : sid + ": not in trust registry"; add.accept(new String[]{"trusted-signer", "FAIL"}, d); trustFailed = true; }
+                            else { String d = !stOK[0] ? "trust store unreadable or broken" : te != null && te.revoked ? sid + ": key revoked" : te != null ? sid + ": key differs" : sid + ": not in trust registry"; add.accept(new String[]{"trusted-signer", "FAIL"}, d); trustFailed = true; }
                         }
                     }
                 }
@@ -390,7 +398,7 @@ public class OeVerify {
         else if ("PASS".equals(sigStatus)) add.accept(new String[]{"authenticity", "PASS"}, "signed (identity not checked against a registry)");
         else if (ledgerOK) add.accept(new String[]{"authenticity", "PASS"}, "anchored (integrity/time, not identity)");
         else add.accept(new String[]{"authenticity", "FAIL"}, "no anchor and no signature: cannot authenticate");
-        return finish(layers, trusted, "PASS".equals(sigStatus), required);
+        return finish(layers, trusted, "PASS".equals(sigStatus) && !trustFailed, required);   // council 16/09 r1: never authenticated for a revoked/untrusted signer
     }
 
     static void checkPQ(List<Map<String, Object>> layers, Obj side, String digest, String expectedPQ, boolean requirePQ) {

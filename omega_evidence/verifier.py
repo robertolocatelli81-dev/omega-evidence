@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional
 from .canonical import sha3, sha256_bytes
 from .pack import _honest_scope_declares_limit
 from .ledger import Ledger
-from .signing import verify_pq_alg, verify_with_alg
+from .signing import verify_pq_alg, verify_signature
 from .trust import TrustRegistry
 
 
@@ -117,7 +117,9 @@ def _check_timestamp(path: str, layers: List) -> str:
         return "SKIP"
     try:
         side = json.loads(open(ts_side, encoding="utf-8").read())
-    except ValueError as e:
+        if not isinstance(side, dict):
+            raise ValueError("sidecar is not a JSON object")
+    except (OSError, ValueError) as e:
         layers.append(_layer("rfc3161", "FAIL", f"malformed sidecar: {e}"))
         return "FAIL"
     current = sha256_bytes(open(path, "rb").read())
@@ -196,33 +198,48 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
         return "FAIL", False, False
     pack = json.loads(open(path, encoding="utf-8").read())
     current = pack.get("pack_sha3", "")
-    alg = side.get("sig_alg", "ed25519")                 # crypto-agility: default legacy
-    if alg == "ed25519":
-        # 0.7.0 (oracle 16/09: Python took a base64 signature with a space that Go/Java/Node refuse): the
-        # sidecar fields are decoded STRICTLY — canonical base64 of exactly 32 / 64 bytes, lowercase hex digest
-        from .pqbackends.mldsa import b64_strict
-        if (b64_strict(side.get("public_key_b64"), 32) is None or b64_strict(side.get("signature_b64"), 64) is None
-                or not isinstance(current, str) or not _re.fullmatch(r"[0-9a-f]{64}", current)):
-            layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields (strict base64 32/64, lowercase hex digest)"))
-            return "FAIL", False, False
-    result = verify_with_alg(alg, side.get("public_key_b64", ""),
-                             side.get("signature_b64", ""), current.encode())
-    if result is None:                                   # unknown alg -> honest SKIP
+    # The classical layer is Ed25519 ONLY — the same rule as the Go/Java/JS verifiers (council 16/09 r1: a
+    # registered PQ backend must never be accepted here as the producer signature; a sig_alg that is not a
+    # string is a malformed sidecar, an unknown string is an honest SKIP, never a crash)
+    alg = side.get("sig_alg", "ed25519")
+    if not isinstance(alg, str):
+        layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a string"))
+        return "FAIL", False, False
+    if alg != "ed25519":
         layers.append(_layer("producer-signature", "SKIP", f"unsupported sig_alg: {alg}"))
         return "SKIP", False, False
+    # 0.7.0 (oracle 16/09: Python took a base64 signature with a space that Go/Java/Node refuse): the
+    # sidecar fields are decoded STRICTLY — canonical base64 of exactly 32 / 64 bytes, lowercase hex digest
+    from .pqbackends.mldsa import b64_strict
+    if (b64_strict(side.get("public_key_b64"), 32) is None or b64_strict(side.get("signature_b64"), 64) is None
+            or not isinstance(current, str) or not _re.fullmatch(r"[0-9a-f]{64}", current)):
+        layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields (strict base64 32/64, lowercase hex digest)"))
+        return "FAIL", False, False
+    result = verify_signature(side["public_key_b64"], side["signature_b64"], current.encode())
     if current != side.get("signed_pack_sha3") or not result:
         layers.append(_layer("producer-signature", "FAIL", "signature invalid or pack changed"))
         return "FAIL", False, False
     layers.append(_layer("producer-signature", "PASS",
                          f"signed by {side.get('signer_id')} ({alg})"))
-    tr = TrustRegistry(trust_store) if trust_store else None
     sid, pk = side.get("signer_id"), side.get("public_key_b64")
-    # the pinned PQ key: the caller's, else the one the trust registry binds to this signer (0.7.0)
-    pinned_pq = expected_pq or (tr.pq_pubkey(sid) if tr else None)
+    tr, tr_broken = None, None
+    if trust_store:
+        try:                                  # the registry replays a STRICT, verified chain (council r1: a broken or
+            tr = TrustRegistry(trust_store)   # duplicate-key store must be a FAIL of this layer, never a crash or a pin)
+        except (OSError, ValueError, RuntimeError) as e:
+            tr_broken = f"{type(e).__name__}: {str(e)[:120]}"
+    trusted_now = bool(tr is not None and tr.is_trusted(sid, pk))
+    # the pinned PQ key: the caller's, else the one the registry binds to this signer — but ONLY when the classical
+    # key that signed is the registered one (council r1: a foreign Ed25519 key under a trusted signer_id must not
+    # borrow that signer's PQ pin and be reported pq-protected)
+    pinned_pq = expected_pq or (tr.pq_pubkey(sid) if trusted_now else None)
     _check_pq_cosignature(side, current, layers, pinned_pq, require_pq)   # hybrid PQ, pinned, fail-closed
     if not trust_store:
         return "PASS", False, False
-    if tr.is_trusted(sid, pk):
+    if tr_broken:
+        layers.append(_layer("trusted-signer", "FAIL", f"trust store unreadable or broken ({tr_broken})"))
+        return "PASS", False, True
+    if trusted_now:
         layers.append(_layer("trusted-signer", "PASS", f"{sid} in trust registry"))
         return "PASS", True, False
     st = tr.status(sid)

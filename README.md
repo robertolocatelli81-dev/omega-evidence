@@ -143,7 +143,7 @@ python -m omega_evidence pack.json --trust-store trust.jsonl --require-pq
 RFC 3161 (timestamping, optional `openssl`); RFC 4998 / eIDAS LTA renewal *semantics*
 (`preservation`: long-term evidence records renewed across hash and timestamp aging, verifiable
 offline, tested — not the RFC 4998 ASN.1 wire format); Ed25519 with an optional post-quantum
-co-signature — since 0.7.0 **ML-DSA-65 (FIPS 204)** built in through `cryptography` ≥ 50, SLH-DSA (FIPS 205)
+co-signature — since 0.7.0 **ML-DSA-65 (FIPS 204)** built in through `cryptography` ≥ 48, SLH-DSA (FIPS 205)
 through an external liboqs backend; any PQ scheme is admitted only by a known-answer-test gate (the built-in
 ML-DSA backend must pass the NIST ACVP sigVer vectors shipped in `pqbackends/vectors/` before it is registered) —
 no home-grown PQ crypto; SD-JWT (RFC 9901) issue/verify for the eIDAS 2.0 / EUDI wallet lane; PII-free by design
@@ -154,28 +154,47 @@ no home-grown PQ crypto; SD-JWT (RFC 9901) issue/verify for the eIDAS 2.0 / EUDI
 The same profile as cryptovalid 0.13.0, so the same rules and verifiers apply: the ML-DSA-65 co-signature is pure
 ML-DSA with the **empty context string** over the UTF-8 bytes of the pack's `pack_sha3` hex string (the very bytes
 the Ed25519 sidecar signs), 3309-byte signature and 1952-byte key in strict base64. The empty context is a measured
-choice (16/09/2026): the JDK 24-27 built-in ML-DSA provider has no context API and AWS KMS `RAW` signing is the
-empty context — a context would have locked Java verifiers and HSM signing out; the PQ key MUST therefore be
-dedicated to this profile.
+choice (16/09/2026): the JDK 24-27 built-in ML-DSA provider has no context API (JDK 27 GA 2026-09-15) and an AWS
+KMS `ML_DSA_SHAKE_256` / `MessageType RAW` signature verifies with the empty context (measured against a real
+KMS key; the Sign API has no context parameter) — a context would have locked Java verifiers and HSM signing
+out; the PQ key MUST therefore be dedicated to this profile.
 
 ```python
-from omega_evidence import pack, signing, trust
+from omega_evidence import pack, signing, trust, verify_pack
 from omega_evidence.pqbackends import mldsa
-pack.sign_pack("p.json", signing.Identity("acme"))          # classical sidecar first (hybrid = both)
-mldsa.MlDsaFileSigner.keygen("acme.pq")                      # or mldsa.AwsKmsMlDsaSigner("<key id>", region=...)
+idt = signing.Identity("acme")
+pack.sign_pack("p.json", idt)                                # classical sidecar first (hybrid = both)
+pq = mldsa.MlDsaFileSigner.keygen("acme.pq")                 # or mldsa.AwsKmsMlDsaSigner("<key id>", region=...)
 pack.pq_cosign("p.json", mldsa.MlDsaFileSigner("acme.pq"))   # self-verified against the declared key
-trust.TrustRegistry("trust.jsonl").trust("acme", ed_pub_b64, pq_pubkey=pq_pub_b64)   # pin BOTH keys
+trust.TrustRegistry("trust.jsonl").trust("acme", idt.public_key_b64, pq_pubkey=pq["public_key_b64"])  # pin BOTH
 verify_pack("p.json", trust_store="trust.jsonl", require_pq=True)["pq_protected"]     # True
 ```
 
 `pq_protected` is a tri-state: **true** only when a registered backend verifies the co-signature AND the key is
 the one the relying party pinned (`expected_pq_public_key_b64`, or the signer's `pq_pubkey` in the trust
-registry) and the classical signature holds; **null** when a layer is present but unpinned or not verifiable on
-this host; **false** when absent, foreign, malformed or invalid. Requiring the layer (`require_pq`, or giving the
-pinned key) makes a stripped, foreign or unverifiable layer a FAIL: a downgrade to Ed25519-only is refused by the
-relying party's requirement, not by the file. The PQ private key lives on disk (PKCS#8, 0600) or in **AWS KMS**
+registry, and only when the classical key that signed is the registered one) and the classical signature holds;
+**null** when a layer is present but unpinned or not verifiable on this host and nothing required it; **false**
+when absent, foreign, malformed or invalid — and also when the layer was required (`require_pq`, or a pinned key)
+and could not be confirmed: a required layer that is stripped, foreign or unverifiable is a FAIL, never null. A
+downgrade to Ed25519-only is refused by the relying party's requirement, not by the file. `authenticated` is
+never true for a revoked or untrusted signer. The PQ private key lives on disk (PKCS#8, 0600) or in **AWS KMS**
 (`KeySpec ML_DSA_65`, `ML_DSA_SHAKE_256`, `MessageType RAW`; the Sign response's KeyId must match the key whose
-public key was read). Without `cryptography` ≥ 50 the layer is reported present-but-unverifiable (never a pass).
+public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ key unless a new one is given or
+`drop_pq=True`. Without `cryptography` ≥ 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0; the backend is
+registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
+very function registered) the layer is reported present-but-unverifiable (never a pass).
+
+### Breaking changes in 0.7.0
+
+- **Strict acceptance profile** (shared with the Go/Java/JS verifiers and cryptovalid 0.13.0): packs, ledgers,
+  sidecars and trust stores with **floats**, duplicate keys, integers beyond ±(2^53−1), nesting deeper than 512,
+  NaN/Infinity, CR line endings or non-sequential `idx` are refused. A 0.6.x ledger or pack holding a float
+  (e.g. `{"amount": 10.5}`) no longer verifies: store such values as strings (`"10.5"`) or `Decimal`.
+- The producer-signature layer accepts **`sig_alg: "ed25519"` only** (missing = ed25519); any other string is an
+  honest SKIP, a non-string is a malformed sidecar. A post-quantum backend is never a classical producer signature.
+- A trust store that fails the strict chain verification raises `ValueError` on load and is a `trusted-signer`
+  FAIL in the verifier (it used to crash, or trust the last of two duplicated keys).
+- `TrustRegistry.rotate()` keeps the pinned post-quantum key unless `drop_pq=True` (it used to drop it silently).
 
 ## Tests
 
