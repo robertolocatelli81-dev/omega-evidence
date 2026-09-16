@@ -1312,6 +1312,10 @@ class TestMlDsaHybrid(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.m.load_kat()
 
+    def test_try_load_never_crashes_on_a_broken_vector_file(self):
+        with unittest.mock.patch.object(self.m, "KAT_FILE", os.path.join(tempfile.gettempdir(), "no_such_kat.txt")):
+            r = self.m.try_load(); self.assertFalse(r["registered"]); self.assertIn("unusable", r["reason"])
+
     def test_timestamp_sidecar_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             pp, idt, signer = self._hybrid(tmp)

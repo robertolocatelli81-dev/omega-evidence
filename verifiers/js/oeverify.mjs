@@ -204,7 +204,9 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
       else {
         const pk = b64Strict(side.public_key_b64, 32), sig = b64Strict(side.signature_b64, 64);
         let okSig = false;
-        try { okSig = Boolean(pk && sig && declared && edVerify(null, Buffer.from(declared, "utf-8"), createPublicKey({ key: Buffer.concat([SPKI, pk]), format: "der", type: "spki" }), sig)); } catch { okSig = false; }
+        if (!pk || !sig || typeof declared !== "string" || !/^[0-9a-f]{64}$/.test(declared)) { add("producer-signature", "FAIL", "malformed sidecar fields (strict base64 32/64, lowercase hex digest)"); sigStatus = "FAIL"; }   // council r3
+        else {
+        try { okSig = Boolean(edVerify(null, Buffer.from(declared, "utf-8"), createPublicKey({ key: Buffer.concat([SPKI, pk]), format: "der", type: "spki" }), sig)); } catch { okSig = false; }
         if (!okSig || side.signed_pack_sha3 !== declared) { add("producer-signature", "FAIL", "signature invalid or pack changed"); sigStatus = "FAIL"; }
         else {
           const sid = side.signer_id;
@@ -221,6 +223,7 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
             else { add("trusted-signer", "FAIL", !stOK ? "trust store unreadable or broken" : te && te.revoked ? sid + ": key revoked" : te ? sid + ": key differs" : sid + ": not in trust registry"); trustFailed = true; }
           }
           }
+        }
         }
       }
     }

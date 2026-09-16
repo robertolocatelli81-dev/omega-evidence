@@ -198,6 +198,10 @@ very function registered) the layer is reported present-but-unverifiable (never 
   FAIL in the verifier (it used to crash, or trust the last of two duplicated keys).
 - `TrustRegistry.rotate()` keeps the pinned post-quantum key unless `drop_pq=True` (it used to drop it silently).
 
+The normative output of every verifier is the tuple `(verdict, pq_protected, authenticated)` plus each layer's
+status; layer `detail` strings are human-readable and non-normative (their wording and the order in which two
+malformations are reported may differ between implementations).
+
 ## Tests
 
 ```bash

@@ -196,8 +196,12 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
     except (OSError, ValueError) as e:              # unreadable (permissions, race) is a FAIL, not a crash (council r2)
         layers.append(_layer("producer-signature", "FAIL", f"malformed sidecar: {e}"))
         return "FAIL", False, False
-    pack = json.loads(open(path, encoding="utf-8").read())
-    current = pack.get("pack_sha3", "")
+    try:
+        pack = json.loads(open(path, encoding="utf-8").read())
+        current = pack.get("pack_sha3", "") if isinstance(pack, dict) else ""
+    except (OSError, ValueError):            # verify_pack returns before this on a bad pack; belt for direct callers
+        layers.append(_layer("producer-signature", "FAIL", "pack unreadable"))
+        return "FAIL", False, False
     # The classical layer is Ed25519 ONLY — the same rule as the Go/Java/JS verifiers (council 16/09 r1: a
     # registered PQ backend must never be accepted here as the producer signature; a sig_alg that is not a
     # string is a malformed sidecar, an unknown string is an honest SKIP, never a crash)

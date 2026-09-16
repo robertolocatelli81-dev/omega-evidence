@@ -373,7 +373,9 @@ public class OeVerify {
                 else if (!"ed25519".equals(alg)) add.accept(new String[]{"producer-signature", "SKIP"}, "unsupported sig_alg: " + alg);
                 else {
                     byte[] pk = b64Strict(pkB64, 32), sig = b64Strict(sigB64, 64);
-                    boolean okSig = pk != null && sig != null && !declared.isEmpty() && edVerify(pk, declared.getBytes(StandardCharsets.UTF_8), sig);
+                    if (pk == null || sig == null || !declared.matches("[0-9a-f]{64}")) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar fields (strict base64 32/64, lowercase hex digest)"); sigStatus = "FAIL"; }   // council r3
+                    else {
+                    boolean okSig = edVerify(pk, declared.getBytes(StandardCharsets.UTF_8), sig);
                     if (!okSig || !declared.equals(signedDigest)) { add.accept(new String[]{"producer-signature", "FAIL"}, "signature invalid or pack changed"); sigStatus = "FAIL"; }
                     else {
                         String sid = str(side, "signer_id");
@@ -392,6 +394,7 @@ public class OeVerify {
                             else { String d = !stOK[0] ? "trust store unreadable or broken" : te != null && te.revoked ? sid + ": key revoked" : te != null ? sid + ": key differs" : sid + ": not in trust registry"; add.accept(new String[]{"trusted-signer", "FAIL"}, d); trustFailed = true; }
                         }
                         }
+                    }
                     }
                 }
             }

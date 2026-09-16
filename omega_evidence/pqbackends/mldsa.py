@@ -124,7 +124,10 @@ def try_load() -> Dict[str, Any]:
     Returns {registered, alg, reason}. Idempotent."""
     if not available():
         return {"registered": False, "alg": ALG, "reason": "cryptography >= 48 (ML-DSA) not available"}
-    kat = load_kat()
+    try:
+        kat = load_kat()
+    except (OSError, ValueError) as e:      # council r3: a broken vector file is {registered: False, reason}, never a crash
+        return {"registered": False, "alg": ALG, "reason": f"KAT vector file unusable: {type(e).__name__}: {e}"}
     # council 16/09 (r1): the function that gets REGISTERED (empty context) must itself pass a NIST known answer —
     # the empty-context vectors go through verify_fn as is; the sigVer vectors with a context go through the same
     # decoder with their context bound by (key, signature, message), never by message alone

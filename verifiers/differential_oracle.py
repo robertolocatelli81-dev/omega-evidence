@@ -87,6 +87,12 @@ def build_cases(d):
     p2, s2 = _store_with("trust-sid-list", lambda e: e["data"].__setitem__("signer_id", ["acme"])); cases["trust-signer-id-list"] = (p2, ["--trust-store", s2], None)
     bt = mk("body-tampered"); P.sign_pack(bt, idt); dd = json.load(open(bt)); dd["claim"] = "y"; json.dump(dd, open(bt, "w"))
     cases["body-tampered-trusted"] = (bt, ["--trust-store", store], None)
+    # council r3: a REALLY signed uppercase digest + PQ fields of the right length (Python refused the sidecar before
+    # the PQ layer -> false; Go/Java/JS reached it -> null); and an unsigned pack with the PQ layer required
+    up = mk("upper-signed"); dd = json.load(open(up)); dd["pack_sha3"] = dd["pack_sha3"].upper(); json.dump(dd, open(up, "w")); P.sign_pack(up, idt)
+    P.add_pq_signature(up, "ml-dsa-65", base64.b64encode(b"\x01" * 1952).decode(), base64.b64encode(b"\x02" * 3309).decode())
+    cases["sig-digest-upper-signed-with-pq"] = (up, [], None)
+    cases["unsigned-required-pq"] = (cases["bare"][0], ["--require-pq"], None)
     # honest scope variants
     def mk_scope(name, scope):   # build_pack refuses a bad scope: forge it after, with a consistent pack_sha3
         p = mk(name); dd = json.load(open(p)); dd["honest_scope"] = scope

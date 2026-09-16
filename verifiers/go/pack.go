@@ -316,9 +316,13 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 			sigStatus = "FAIL"
 		} else if alg != "ed25519" {
 			add("producer-signature", "SKIP", "unsupported sig_alg: "+alg)
+		} else if pk, sig := b64Strict(pkB64, 32), b64Strict(sigB64, 64); pk == nil || sig == nil || !hex64.MatchString(declared) {
+			// council r3 (Fable): the reference refuses malformed fields BEFORE any signature check, so a really-signed
+			// uppercase digest must not reach the PQ layer here either (it gave pq_protected null vs false)
+			add("producer-signature", "FAIL", "malformed sidecar fields (strict base64 32/64, lowercase hex digest)")
+			sigStatus = "FAIL"
 		} else {
-			pk, sig := b64Strict(pkB64, 32), b64Strict(sigB64, 64)
-			okSig := pk != nil && sig != nil && declared != "" && ed25519.Verify(ed25519.PublicKey(pk), []byte(declared), sig)
+			okSig := ed25519.Verify(ed25519.PublicKey(pk), []byte(declared), sig)
 			if !okSig || signedDigest != declared {
 				add("producer-signature", "FAIL", "signature invalid or pack changed")
 				sigStatus = "FAIL"
