@@ -5,6 +5,7 @@ Self-contained: imports only omega_evidence + stdlib. Positive and negative
 controls for every property; a fabricated pack must not pass."""
 
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -902,7 +903,7 @@ class TestDoctorSelfExamine(unittest.TestCase):
 
 
 class TestAATInterop(unittest.TestCase):
-    """draft-sharif-agent-audit-trail-00: export of an AgentEvidenceLog (one chain per session, genesis lifecycle
+    """draft-sharif-agent-audit-trail-04: export of an AgentEvidenceLog (one chain per session, genesis lifecycle
     record), chain verification, ES6/JCS numbers, signatures. Negatives first; every positive has its tampered twin."""
 
     def _log(self, tmp):
@@ -960,11 +961,11 @@ class TestAATInterop(unittest.TestCase):
             self.assertFalse(aat.verify_chain([recs[0], recs[2], recs[1], recs[3]])["ok"])
             alt = json.loads(json.dumps(recs)); alt[1]["outcome"] = "failure"
             self.assertFalse(aat.verify_chain(alt)["ok"])
-            self.assertTrue(any("6.1" in p["why"] for p in aat.verify_chain(recs[1:])["problems"]))
+            self.assertTrue(any("8.1" in p["why"] for p in aat.verify_chain(recs[1:])["problems"]))
             mix = json.loads(json.dumps(recs)); mix[2]["session_id"] = aat._uuid4_from("other")
             self.assertTrue(any("one session" in p["why"] for p in aat.verify_chain(mix)["problems"]))
             tz = json.loads(json.dumps(recs)); tz[1]["timestamp"] = tz[1]["timestamp"].replace("Z", "+02:00")
-            self.assertTrue(any("UTC" in p["why"] for p in aat.verify_chain(tz)["problems"]))
+            self.assertTrue(any("UTC" in w["why"] for w in aat.verify_chain(tz)["warnings"]))      # §3.1 SHOULD → warning (round 1)
             back = json.loads(json.dumps(recs)); back[2]["timestamp"] = "2000-01-01T00:00:00.000Z"
             self.assertTrue(any("monotonic" in p["why"] for p in aat.verify_chain(back)["problems"]))
             dup = json.loads(json.dumps(recs)); dup[2]["record_id"] = dup[1]["record_id"]
@@ -990,8 +991,9 @@ class TestAATInterop(unittest.TestCase):
             g = {"record_id": aat._uuid4_from("g1"), "timestamp": "2026-09-14T13:40:00.000Z", "agent_id": "spiffe://x/y",
                  "agent_version": "1", "session_id": aat._uuid4_from("s"), "action_type": "lifecycle",
                  "action_detail": {"event": "session_start", "risk": 0.000001, "n": 3}, "outcome": "success", "trust_level": "L2",
-                 "parent_record_id": None, "prev_hash": None, "risk_score": 0.75}
-            g2 = dict(g, record_id=aat._uuid4_from("g2"), action_type="decision", action_detail={"risk": 1e-5},
+                 "record_phase": "concurrent", "parent_record_id": None, "prev_hash": None, "risk_score": 0.75}
+            g2 = dict(g, record_id=aat._uuid4_from("g2"), action_type="decision", record_phase="post_execution",
+                      action_detail={"decision_type": "route", "risk": 1e-5},
                       parent_record_id=g["record_id"], prev_hash=aat.record_hash(g, strict=False))
             self.assertTrue(aat.verify_chain([g, g2])["ok"], aat.verify_chain([g, g2])["problems"])
             self.assertFalse(aat.verify_chain([g, "junk", dict(g2, parent_record_id=None, prev_hash=None)])["ok"])
@@ -1020,6 +1022,338 @@ class TestAATInterop(unittest.TestCase):
             padded = json.loads(json.dumps(signed)); padded[0]["signature"] += "=="
             self.assertFalse(aat.verify_chain(padded, pubkey_pem=pub)["ok"])       # padding rifiutato
 
+
+
+class TestAAT04(unittest.TestCase):
+    """draft -04 (2026-09-15): record_phase and the §4.2 rules, §7 REQUIRED action_detail fields (0.7.0 exports
+    violated them), signer_kid (RFC 7638 / AKP thumbprints, KAT from draft-ietf-cose-dilithium-11), ML-DSA-65 and
+    hybrid signatures, §5 recording independence, §5.3 fail-safe, nonces, tombstones (§9.3), session close (§8.3),
+    §13 closure, Merkle epochs (§6.4) against cryptovalid's RFC 6962 implementation, JSONL/CSV (§10)."""
+
+    def _log(self, tmp):
+        log = agent.AgentEvidenceLog(os.path.join(tmp, "agent.jsonl"), runtime_id="rt-1")
+        log.record("bot-7", "sess-a", "tool_call", "https://api.example/x", "rule-1", agent.Decision.ALLOW, agent.Outcome.EXECUTED)
+        log.record("bot-7", "sess-a", "file_write", "/tmp/out", "rule-2", agent.Decision.DENY, agent.Outcome.BLOCKED)
+        log.record("bot-7", "sess-a", "decision", "route", "rule-3", agent.Decision.ALLOW_WITH_APPROVAL,
+                   agent.Outcome.PENDING_APPROVAL, human_approver="op-9", reason="needs a human")
+        return list(log._ledger.entries())
+
+    def _chain(self, tmp, **kw):
+        from omega_evidence.interop import aat
+        return next(iter(aat.from_omega(self._log(tmp), "1.0", **kw).values()))
+
+    def test_phases_and_section7_fields(self):
+        from omega_evidence.interop import aat
+        with tempfile.TemporaryDirectory() as tmp:
+            recs = self._chain(tmp, close=True)
+            v = aat.verify_chain(recs)
+            self.assertTrue(v["ok"], v["problems"])
+            self.assertEqual([r["record_phase"] for r in recs], ["concurrent", "post_execution", "pre_execution", "pre_execution", "post_execution"])
+            self.assertEqual(recs[1]["action_detail"]["tool_name"], "tool_call")
+            self.assertEqual(recs[1]["action_detail"]["parameters_hash"], hashlib.sha256(b'{"resource":"https://api.example/x"}').hexdigest())
+            self.assertEqual(recs[3]["action_detail"]["decision_type"], "allow_with_approval")
+            self.assertEqual(recs[3]["outcome"], "escalated")
+            # §4.2: decision/escalated MUST be pre_execution
+            bad = json.loads(json.dumps(recs)); bad[3]["record_phase"] = "post_execution"
+            self.assertTrue(any("4.2" in p["why"] for p in aat.verify_chain(bad)["problems"]))
+            # -00 chain (no record_phase) refused with the explicit reason
+            legacy = json.loads(json.dumps(recs)); [r.pop("record_phase") for r in legacy]
+            self.assertTrue(any("re-exported" in p["why"] for p in aat.verify_chain(legacy)["problems"]))
+            # §7: a tool_call without parameters_hash; a reserved aat_ key; empty detail
+            for mut in (lambda r: r[1]["action_detail"].pop("parameters_hash"), lambda r: r[1]["action_detail"].update({"aat_x": 1}),
+                        lambda r: r[1]["action_detail"].clear()):
+                m = json.loads(json.dumps(recs)); mut(m)
+                self.assertFalse(aat.verify_chain(m)["ok"])
+            # §8.3 close: session_hash checked, tampering of an earlier record breaks it even if prev_hashes are recomputed
+            self.assertEqual(recs[-1]["action_detail"]["record_count"], 5)
+            forged = json.loads(json.dumps(recs)); forged[1]["outcome"] = "failure"
+            for k in range(2, 5):
+                forged[k]["prev_hash"] = aat.record_hash(forged[k - 1], strict=False)
+            self.assertTrue(any("session_hash" in p["why"] for p in aat.verify_chain(forged)["problems"]))
+            notlast = json.loads(json.dumps(recs)); notlast.insert(2, notlast.pop())
+            self.assertFalse(aat.verify_chain(notlast)["ok"])
+            # actions whose §7 fields are not derivable are refused, never guessed
+            e = self._log(tmp); e[0]["action"] = "delegation"
+            with self.assertRaises(ValueError):
+                aat.from_omega(e, "1.0")
+
+    def test_thumbprints_kat(self):
+        from omega_evidence.interop import aat
+        # draft-ietf-cose-dilithium-11 appendix: ML-DSA-65 JWK with kid = AKP thumbprint (KAT on the pub prefix hash)
+        pub = base64.urlsafe_b64decode("QksvJn5Y1bO0TXGs_Gpla7JpUNV8YdsciAvPof6rRD8JQquL2619cIq7w1YHj22ZolInH-YsdAkeuUr7m5JkxQqIjg3-2AzV-yy9NmfmDVOevkSTAhnNT67RXbs0VaJkgCufSbzkLudVD-_91GQqVa3mk4aKRgy-wD9PyZpOMLzP-opHXlOVOWZ067galJN1h4gPbb0nvxxPWp7kPN2LDlOzt_tJxzrfvC1PjFQwNSDCm_l-Ju5X2zQtlXyJOTZSLQlCtB2C7jdyoAVwrftUXBFDkisElvgmoKlwBks23fU0tfjhwc0LVWXqhGtFQx8GGBQ-zol3e7P2EXmtIClf4KbgYq5u7Lwu848qwaItyTt7EmM2IjxVth64wHlVQruy3GXnIurcaGb_qWg764qZmteoPl5uAWwuTDX292Sa071S7GfsHFxue5lydxIYvpVUu6dyfwuExEubCovYMfz_LJd5zNTKMMatdbBJg-Qd6JPuXznqc1UYC3CccEXCLTOgg_auB6EUdG0b_cy-5bkEOHm7Wi4SDipGNig_ShzUkkot5qSqPZnd2I9IqqToi_0ep2nYLBB3ny3teW21Qpccoom3aGPt5Zl7fpzhg7Q8zsJ4sQ2SuHRCzgQ1uxYlFx21VUtHAjnFDSoMOkGyo4gH2wcLR7-z59EPPNl51pljyNefgCnMSkjrBPyz1wiET-uqi23f8Bq2TVk1jmUFxOwdfLsU7SIS30WOzvwD_gMDexUFpMlEQyL1-Y36kaTLjEWGCi2tx1FTULttQx5JpryPW6lW5oKw5RMyGpfRliYCiRyQePYqipZGoxOHpvCWhCZIN4meDY7H0RxWWQEpiyCzRQgWkOtMViwao6Jb7wZWbLNMebwLJeQJXWunk-gTEeQaMykVJobwDUiX-E_E7fSybVRTZXherY1jrvZKh8C5Gi5VADg5Vs319uN8-dVILRyOOlvjjxclmsRcn6HEvTvxd9MS7lKm2gI8BXIqhzgnTdqNGwTpmDHPV8hygqJWxWXCltBSSgY6OkGkioMAmXjZjYq_Ya9o6AE7WU_hUdm-wZmQLExwtJWEIBdDxrUxA9L9JL3weNyQtaGItPjXcheZiNBBbJTUxXwIYLnXtT1M0mHzMqGFFWXVKsN_AIdHyv4yDzY9m-tuQRfbQ_2K7r5eDOL1Tj8DZ-s8yXG74MMBqOUvlglJNgNcbuPKLRPbSDoN0E3BYkfeDgiUrXy34a5-vU-PkAWCsgAh539wJUUBxqw90V1Du7eTHFKDJEMSFYwusbPhEX4ZTwoeTHg--8Ysn4HCFWLQ00pfBCteqvMvMflcWwVfTnogcPsJb1bEFVSc3nTzhk6Ln8J-MplyS0Y5mGBEtVko_WlyeFsoDCWj4hqrgU7L-ww8vsCRSQfskH8lodiLzj0xmugiKjWUXbYq98x1zSnB9dmPy5P3UNwwMQdpebtR38N9I-jup4Bzok0-JsaOe7EORZ8ld7kAgDWa4K7BAxjc2eD540Apwxs-VLGFVkXbQgYYeDNG2tW1Xt20-XezJqZVUl6-IZXsqc7DijwNInO3fT5o8ZAcLKUUlzSlEXe8sIlHaxjLoJ-oubRtlKKUbzWOHeyxmYZSxYqQhSQj4sheedGXJEYWJ-Y5DRqB-xpy-cftxL10fdXIUhe1hWFBAoQU3b5xRY8KCytYnfLhsFF4O49xhnax3vuumLpJbCqTXpLureoKg5PvWfnpFPB0P-ZWQN35mBzqbb3ZV6U0rU55DvyXTuiZOK2Z1TxbaAd1OZMmg0cpuzewgueV-Nh_UubIqNto5RXCd7vqgqdXDUKAiWyYegYIkD4wbGMqIjxV8Oo2ggOcSj9UQPS1rD5u0rLckAzsxyty9Q5JsmKa0w8Eh7Jwe4Yob4xPVWWbJfm916avRgzDxXo5gmY7txdGFYHhlolJKdhBU9h6f0gtKEtbiUzhp4IWsqAR8riHQs7lLVEz6P537a4kL1r5FjfDf_yjJDBQmy_kdWMDqaNln-MlKK8eENjUO-qZGy0Ql4bMZtNbHXjfJUuSzapA-RqYfkqSLKgQUOW8NTDKhUk73yqCU3TQqDEKaGAoTsPscyMm7u_8QrvUK8kbc-XnxrWZ0BZJBjdinzh2w-QvjbWQ5mqFp4OMgY94__tIU8vvCUNJiYA1RdyodlfPfH5-avpxOCvBD6C7ZIDyQ-6huGEQEAb6DP8ydWIZQ8xY603DoEKKXkJWcP6CJo3nHFEdj_vcEbDQ-WESDpcQFa1fRIiGuALj-sEWcjGdSHyE8QATOcuWl4TLVzRPKAf4tCXx1zyvhJbXQu0jf0yfzVpOhPun4n-xqK4SxPBCeuJOkQ2VG9jDXWH4pnjbAcrqjveJqVti7huMXTLGuqU2uoihBw6mGqu_WSlOP2-XTEyRyvxbv2t-z9V6GPt1V9ceBukA0oGwtJqgD-q7NXFK8zhw7desI5PZMXf3nuVgbJ3xdvAlzkmm5f9RoqQS6_hqwPQEcclq1MEZ3yML5hc99TDtZWy9gGkhR0Hs3QJxxgP7bEqGFP-HjTPnJsrGaT6TjKP7qCxJlcFKLUr5AU_kxMULeUysWWtSGJ9mpxBvsyW1Juo" + "=")
+        self.assertEqual(len(pub), 1952)
+        self.assertEqual(aat.mldsa65_thumbprint(pub), "Suiu29qbfuaBaR4Ats-c6XQBePB_OpAxAwcTR_0KXVM")
+        with self.assertRaises(ValueError):
+            aat.mldsa65_thumbprint(pub[:-1])
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography assente")
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        x = int.from_bytes(base64.urlsafe_b64decode("f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU="), "big")
+        y = int.from_bytes(base64.urlsafe_b64decode("x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0="), "big")
+        pem = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+        # RFC 7517 Appendix A.1 EC key; thumbprint computed independently with jwcrypto 1.6.1 on 2026-09-19
+        self.assertEqual(aat.p256_thumbprint(pem), "oKIywvGUpTVTyxMQ3bwIIeQUudfr_CkLMjCE19ECD-U")
+
+    def test_signatures_es256_mldsa_hybrid(self):
+        from omega_evidence.interop import aat
+        from omega_evidence.pqbackends import mldsa
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography assente")
+        priv, pub = aat.generate_p256_keypair()
+        priv2, pub2 = aat.generate_p256_keypair()
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = self._log(tmp)
+            es = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv, close=True).values()))
+            kid = aat.p256_thumbprint(pub)
+            self.assertTrue(all(r["sig_alg"] == "ES256" and r["signer_kid"] == kid for r in es))
+            v = aat.verify_chain(es, keys={kid: pub})
+            self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["signatures_verified"], 5)
+            self.assertTrue(aat.verify_chain(es, pubkey_pem=pub)["ok"])                       # fallback resolves by thumbprint
+            self.assertFalse(aat.verify_chain(es, keys={kid: pub2})["ok"])                    # wrong key under the right kid
+            self.assertFalse(aat.verify_chain(es, keys={"other": pub})["ok"])                 # kid unknown → problem
+            self.assertTrue(aat.verify_chain(es, keys={kid: pub}, agent_kid=kid)["ok"])       # self-recording: the agent's key is fine
+            swapped = json.loads(json.dumps(es)); swapped[1]["signer_kid"] = aat.p256_thumbprint(pub2)
+            self.assertFalse(aat.verify_chain(swapped, keys={kid: pub, aat.p256_thumbprint(pub2): pub2})["ok"])   # kid is signed
+            unsigned = next(iter(aat.from_omega(entries, "1.0").values()))
+            self.assertFalse(aat.verify_chain(unsigned, require_signatures=True)["ok"])
+            self.assertTrue(aat.verify_chain(unsigned, keys={kid: pub})["ok"])                # keys given, nothing signed: no claim
+            # -03 legacy: signature without sig_alg/signer_kid, verified through the fallback key (warning), not through `keys`
+            legacy = []
+            for r in unsigned:
+                body = {k: v for k, v in r.items()}
+                if legacy:
+                    body["parent_record_id"] = legacy[-1]["record_id"]; body["prev_hash"] = aat.record_hash(legacy[-1])
+                body["signature"], _ = aat._es256_sign(aat._signing_input(body), priv)
+                legacy.append(body)
+            self.assertFalse(aat.verify_chain(legacy, pubkey_pem=pub)["ok"])                  # §3.3 MUST: a problem by default
+            v = aat.verify_chain(legacy, pubkey_pem=pub, allow_legacy_03=True)
+            self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["signatures_verified"], 4)
+            self.assertFalse(aat.verify_chain(legacy, keys={kid: pub}, allow_legacy_03=True)["ok"])   # no fallback key → unresolved
+            if not mldsa.available():
+                self.skipTest("ML-DSA-65 assente (cryptography >= 48)")
+            kp = mldsa.MlDsaFileSigner.keygen(os.path.join(tmp, "pq.key")); signer = mldsa.MlDsaFileSigner(os.path.join(tmp, "pq.key"))
+            pq_raw = base64.b64decode(kp["public_key_b64"]); pkid = aat.mldsa65_thumbprint(pq_raw)
+            pq = next(iter(aat.from_omega(entries, "1.0", pq_signer=signer).values()))
+            self.assertTrue(all(r["sig_alg"] == "ML-DSA-65" and r["signer_kid"] == pkid and len(aat._b64u_dec(r["signature"])) == 3309 for r in pq))
+            v = aat.verify_chain(pq, keys={pkid: kp["public_key_b64"]})
+            self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["signatures_verified"], 4)
+            self.assertFalse(aat.verify_chain(pq, keys={pkid: pub})["ok"])                     # ES256 key under an ML-DSA kid
+            alt = json.loads(json.dumps(pq)); alt[2]["outcome"] = "failure"
+            self.assertFalse(aat.verify_chain(alt, keys={pkid: pq_raw})["ok"])
+            hy = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv, pq_signer=signer).values()))
+            self.assertTrue(all("signature_classical" in r and r["signer_kid_classical"] == kid for r in hy))
+            v = aat.verify_chain(hy, keys={pkid: pq_raw, kid: pub})
+            self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["hybrid_verified"], 4)
+            self.assertFalse(aat.verify_chain(hy, keys={pkid: pq_raw})["ok"])                 # classical key missing → not hybrid-verified → problem
+            bc = json.loads(json.dumps(hy)); bc[1]["signature_classical"] = hy[2]["signature_classical"]
+            self.assertFalse(aat.verify_chain(bc, keys={pkid: pq_raw, kid: pub})["ok"])
+            # independent recording: recorder's key must differ from the agent's
+            ind = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv2, recording_component="urn:gw:1").values()))
+            self.assertEqual(ind[0]["action_detail"]["recording_mode"], "independent")
+            self.assertTrue(aat.verify_chain(ind, keys={aat.p256_thumbprint(pub2): pub2}, agent_kid=kid)["ok"])
+            self.assertFalse(aat.verify_chain(ind, keys={aat.p256_thumbprint(pub2): pub2}, agent_kid=aat.p256_thumbprint(pub2))["ok"])
+            noc = json.loads(json.dumps(ind)); noc[1].pop("recording_component")
+            self.assertFalse(aat.verify_chain(noc, keys={aat.p256_thumbprint(pub2): pub2})["ok"])
+
+    def test_tombstone_nonce_failsafe_closure(self):
+        from omega_evidence.interop import aat
+        with tempfile.TemporaryDirectory() as tmp:
+            recs = self._chain(tmp, close=True)
+            t = json.loads(json.dumps(recs)); t[1] = aat.tombstone(t[1], "gdpr_art17", "2026-09-19T20:00:00Z")
+            v = aat.verify_chain(t)
+            self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["tombstones"], 1)
+            self.assertEqual(t[2]["prev_hash"], t[1]["tombstone_hash"])
+            th = json.loads(json.dumps(t)); th[1]["tombstone_hash"] = "0" * 64
+            self.assertFalse(aat.verify_chain(th)["ok"])
+            fake = json.loads(json.dumps(recs)); fake[1]["tombstone_hash"] = aat.record_hash(recs[1])       # not a tombstone
+            self.assertFalse(aat.verify_chain(fake)["ok"])
+            # nonces: unique within the session
+            n = json.loads(json.dumps(recs)); n[1]["nonce"] = "a" * 32; n[2]["nonce"] = "a" * 32
+            for k in range(2, 5):
+                n[k]["prev_hash"] = aat.record_hash(n[k - 1], strict=False)
+            n[-1]["action_detail"]["session_hash"] = hashlib.sha256(b"".join(bytes.fromhex(r["prev_hash"]) for r in n[1:])).hexdigest()
+            self.assertTrue(any("nonce" in p["why"] for p in aat.verify_chain(n)["problems"]))
+            short = json.loads(json.dumps(recs)); short[1]["nonce"] = "abc"
+            self.assertTrue(any("nonce" in p["why"] for p in aat.verify_chain(short)["problems"]))
+            # §5.3: delegation below L2 without an attributable downgrade
+            g = json.loads(json.dumps(recs[:2])); g[1].update({"action_type": "delegation", "outcome": "success", "trust_level": "L1",
+                                                             "action_detail": {"delegate_agent_id": "urn:a:2", "delegate_trust_level": "L1",
+                                                                               "task_description_hash": "0" * 64}})
+            self.assertTrue(any("5.3" in p["why"] for p in aat.verify_chain(g)["problems"]))
+            g[1]["trust_assignment"] = {"classifier_id": "urn:cls:1", "policy_version": "3", "downgraded": True}
+            self.assertFalse(any("5.3" in p["why"] for p in aat.verify_chain(g)["problems"]))
+            pay = json.loads(json.dumps(recs)); pay[1]["trust_level"] = "L1"
+            self.assertTrue(any("5.3" in p["why"] for p in aat.verify_chain(pay, consequential=lambda r: "api.example" in str(r["action_detail"]))["problems"]))
+            # §13: reproducible only with a closed attestation
+            d = json.loads(json.dumps(recs)); d[3]["reproducibility_class"] = "reproducible"
+            self.assertTrue(any("OPEN attestation" in p["why"] for p in aat.verify_chain(d)["problems"]))
+            d[3].update({k: "sha256:" + "1" * 64 for k in aat.CLOSURE_DIGESTS})
+            d[3]["inference_config"] = {"temperature": 0, "top_k": 1, "top_p": 1, "seed": None, "max_tokens": 10}
+            d[3]["environment"] = {"engine": "x", "engine_version": "1", "hardware": "cpu", "batch_size": 1, "num_threads": 1}
+            d[3]["content_fingerprint"] = "2" * 64
+            self.assertFalse(any("OPEN attestation" in p["why"] for p in aat.verify_chain(d)["problems"]))
+            d[3]["margin_reproducible"] = True; d[3]["decision_margin"] = 1.0; d[3]["margin_epsilon"] = 0.6
+            self.assertTrue(any("13.8" in p["why"] for p in aat.verify_chain(d)["problems"]))
+            # size bound: > 256 KB MUST be rejected
+            big = json.loads(json.dumps(recs)); big[1]["action_detail"]["blob"] = "x" * (257 * 1024)
+            self.assertTrue(any("256 KB" in p["why"] for p in aat.verify_chain(big)["problems"]))
+
+    def test_round1_tombstone_forgery_crashes_independent(self):
+        """Review round 1 (Gemini Pro, Opus, Sonnet, Haiku, 2026-09-19): a forged tombstone in a SIGNED chain must not
+        verify; hostile inputs must be problems, never crashes; independent recording must be signed."""
+        from omega_evidence.interop import aat
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography assente")
+        priv, pub = aat.generate_p256_keypair(); kid = aat.p256_thumbprint(pub)
+        priv2, pub2 = aat.generate_p256_keypair(); kid2 = aat.p256_thumbprint(pub2)
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = self._log(tmp)
+            es = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv, close=True).values()))
+            # attacker with write access: record 2 → tombstone with tombstone_hash := record 3's public prev_hash, stale signature kept
+            forged = json.loads(json.dumps(es))
+            forged[2] = {**{k: forged[2][k] for k in ("record_id", "timestamp", "agent_id", "agent_version", "session_id", "parent_record_id",
+                                                     "prev_hash", "trust_level", "record_phase", "signature", "sig_alg", "signer_kid")},
+                         "action_type": "lifecycle", "outcome": "success", "tombstone_hash": forged[3]["prev_hash"],
+                         "action_detail": {"event": "record_deleted", "deletion_reason": "attacker", "deleted_at": "2026-09-19T20:00:00Z",
+                                           "original_action_type": "tool_call"}}
+            for kw in ({"keys": {kid: pub}}, {"keys": {kid: pub}, "require_signatures": True}, {"pubkey_pem": pub}):
+                v = aat.verify_chain(forged, **kw)
+                self.assertFalse(v["ok"], kw); self.assertTrue(any("signature" in p["why"] for p in v["problems"]))
+            unsigned_tomb = json.loads(json.dumps(forged)); [unsigned_tomb[2].pop(k) for k in ("signature", "sig_alg", "signer_kid")]
+            self.assertFalse(aat.verify_chain(unsigned_tomb, keys={kid: pub})["ok"])
+            self.assertFalse(aat.verify_chain(unsigned_tomb, require_signatures=True)["ok"])
+            # legitimate deletion: tombstone signed anew by the deleting authority
+            good = json.loads(json.dumps(es)); good[2] = aat.tombstone(good[2], "gdpr_art17", "2026-09-19T20:00:00Z", key=priv2)
+            self.assertEqual(good[2]["signer_kid"], kid2); self.assertIn("original_signature", good[2]["action_detail"])
+            v = aat.verify_chain(good, keys={kid: pub, kid2: pub2}, require_signatures=True)
+            self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["tombstones"], 1); self.assertEqual(v["signatures_verified"], 5)
+            self.assertFalse(aat.verify_chain(good, keys={kid: pub})["ok"])                       # deleting key unknown → problem
+            edited = json.loads(json.dumps(good)); edited[2]["action_detail"]["deletion_reason"] = "other"
+            self.assertFalse(aat.verify_chain(edited, keys={kid: pub, kid2: pub2})["ok"])       # tombstone content is signed
+            # unsigned chain: tombstone accepted with the §9.3 warning
+            plain = next(iter(aat.from_omega(entries, "1.0", close=True).values()))
+            plain[2] = aat.tombstone(plain[2], "gdpr_art17", "2026-09-19T20:00:00Z")
+            v = aat.verify_chain(plain); self.assertTrue(v["ok"], v["problems"]); self.assertTrue(any("unsigned tombstone" in w["why"] for w in v["warnings"]))
+            # hostile inputs: problems, never exceptions (also through the CLI path from_jsonl)
+            for mut in (lambda r: r[1].update({"action_type": ["tool_call"]}), lambda r: r[1].update({"timestamp": "2026-13-45T25:61:61Z"}),
+                        lambda r: r[1].update({"agent_version": "\ud800"}), lambda r: r[1]["action_detail"].update({"deep": json.loads("[" * 600 + "]" * 600)}),
+                        lambda r: r[1].update({"decision_margin": True, "margin_epsilon": False, "margin_reproducible": True}),
+                        lambda r: r[1].update({"trust_assignment": "x"}), lambda r: r[1].update({"batch": 5}),
+                        lambda r: r[1].update({"signer_kid": 5}), lambda r: r[1].update({"external_timestamp": {"tsa_url": 1}})):
+                h = json.loads(json.dumps(es)); mut(h)
+                v = aat.verify_chain(h, keys={kid: pub}); self.assertFalse(v["ok"])
+            with self.assertRaises(ValueError):
+                aat.from_jsonl('{"a": NaN}\n')
+            with self.assertRaises(ValueError):
+                aat.from_jsonl('{"agent_version":"EVIL","agent_version":"1.0"}\n')
+            with self.assertRaises(ValueError):
+                aat.jcs(json.loads("[" * 600 + "]" * 600))
+            # independent recording MUST be signed (§5.2); the agent's key in the classical slot is caught too
+            ind = next(iter(aat.from_omega(entries, "1.0", recording_component="urn:gw:1").values()))
+            self.assertTrue(any("5.2" in p["why"] for p in aat.verify_chain(ind)["problems"]))
+            from omega_evidence.pqbackends import mldsa
+            if mldsa.available():
+                kp = mldsa.MlDsaFileSigner.keygen(os.path.join(tmp, "pq.key")); signer = mldsa.MlDsaFileSigner(os.path.join(tmp, "pq.key"))
+                pkid = aat.mldsa65_thumbprint(base64.b64decode(kp["public_key_b64"]))
+                hy = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv, pq_signer=signer, recording_component="urn:gw:1").values()))
+                ks = {pkid: kp["public_key_b64"], kid: pub}
+                self.assertTrue(aat.verify_chain(hy, keys=ks, agent_kid=kid2)["ok"])
+                self.assertFalse(aat.verify_chain(hy, keys=ks, agent_kid=kid)["ok"])              # agent's key used for signature_classical
+            # epoch anchor: leaf_count, the index proven by the path, incomplete epochs, TSA never green without a CA
+            an = aat.anchor_epoch(es, epoch_id=aat._uuid4_from("e"))
+            self.assertFalse(aat.verify_epochs(es, [dict(an, leaf_count=2)])["ok"])
+            ve = aat.verify_epochs(es, [an]); self.assertTrue(ve["ok"]); self.assertEqual(ve["incomplete"], {}); self.assertFalse(ve["time_verified"])
+            for n in range(1, 21):
+                leaves = [hashlib.sha256(bytes([k])).digest() for k in range(n)]
+                self.assertEqual([aat.index_from_path(aat.audit_path(leaves, k), n) for k in range(n)], list(range(n)))
+            swapped = json.loads(json.dumps(es)); swapped[1]["batch"]["leaf_index"] = 3           # proof still leads to the root
+            self.assertTrue(any("proves leaf index" in p["why"] for p in aat.verify_epochs(swapped, [an])["problems"]))
+            partial = json.loads(json.dumps(es))[:3]
+            ve = aat.verify_epochs(partial, [an]); self.assertTrue(ve["ok"]); self.assertEqual(ve["incomplete"][an["epoch_id"]]["seen"], 3)
+            self.assertFalse(aat.verify_epochs(partial, [an], require_complete=True)["ok"])
+            stripped = json.loads(json.dumps(es)); stripped[2].pop("batch")
+            ve = aat.verify_epochs(stripped, [an]); self.assertIn(an["epoch_id"], ve["incomplete"]); self.assertTrue(any("outside every epoch" in w["why"] for w in ve["warnings"]))
+            with_tsa = [dict(an, tsa={"tsa_url": "https://tsa.example", "token": "AAAA", "message_imprint_sha256": hashlib.sha256(bytes.fromhex(an["merkle_root"])).hexdigest()})]
+            ve = aat.verify_epochs(es, with_tsa); self.assertFalse(ve["time_verified"]); self.assertTrue(any("NOT verified" in w["why"] for w in ve["warnings"]))
+            # truncation of a signed chain is a warning; a hybrid record missing its classical half is a problem
+            v = aat.verify_chain(es[:-2], keys={kid: pub}, require_signatures=True)
+            self.assertTrue(v["ok"]); self.assertTrue(any("truncated" in w["why"] for w in v["warnings"]))
+            self.assertFalse(any("truncated" in w["why"] for w in aat.verify_chain(es, keys={kid: pub})["warnings"]))
+            half = json.loads(json.dumps(es)); half[-1]["signer_kid_classical"] = kid2
+            self.assertTrue(any("classical half" in p["why"] for p in aat.verify_chain(half, keys={kid: pub})["problems"]))
+            v = aat.verify_chain(es, keys={kid: pub, "junk": b"nope"}); self.assertFalse(v["ok"]); self.assertEqual(v["keys_rejected"], ["junk"])
+            # RFC 3339 §5.6: lowercase t/z accepted; non-UTC offsets compared as instants
+            low = json.loads(json.dumps(es)); low[1]["timestamp"] = low[1]["timestamp"].replace("T", "t").replace("Z", "z")
+            self.assertFalse(any("RFC 3339" in p["why"] or "calendar" in p["why"] for p in aat.verify_chain(low)["problems"]))
+            self.assertEqual(aat._rfc3339("2026-09-19t20:00:00.5+02:00"), "2026-09-19T18:00:00.500Z")
+            # per-record independence: a foreign recording_component without recording_mode still needs the recorder's signature
+            sneaky = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv).values()))
+            sneaky = json.loads(json.dumps(sneaky))
+            for r in sneaky:
+                r["recording_component"] = "urn:gw:evil"
+            self.assertTrue(any("5.2" in p["why"] for p in aat.verify_chain(sneaky, keys={kid: pub}, agent_kid=kid)["problems"]))
+            # export: time order and size are enforced, never silently produce a red chain
+            e2 = json.loads(json.dumps(entries)); e2[1]["timestamp_utc"] = "2000-01-01T00:00:00Z"
+            with self.assertRaises(ValueError):
+                aat.from_omega(e2, "1.0")
+            e3 = json.loads(json.dumps(entries)); e3[1]["reason"] = "x" * (260 * 1024)
+            with self.assertRaises(ValueError):
+                aat.from_omega(e3, "1.0")
+
+    def test_merkle_epochs_against_cryptovalid_and_exports(self):
+        from omega_evidence.interop import aat
+        with tempfile.TemporaryDirectory() as tmp:
+            recs = self._chain(tmp, close=True)
+            plain = json.loads(json.dumps(recs))
+            anchor = aat.anchor_epoch(recs, epoch_id=aat._uuid4_from("epoch-1"))
+            self.assertEqual(anchor["leaf_count"], 5)
+            self.assertTrue(all(r["batch"]["merkle_root"] == anchor["merkle_root"] for r in recs))
+            self.assertTrue(aat.verify_chain(recs)["ok"])                                  # batch is detached: chain hashes unchanged
+            self.assertEqual([aat.record_hash(r) for r in recs], [aat.record_hash(r) for r in plain])
+            ve = aat.verify_epochs(recs, [anchor]); self.assertTrue(ve["ok"], ve["problems"])
+            # oracle: cryptovalid's RFC 6962 implementation on the same leaves, for 1..9 leaves
+            import importlib.util, sys as _sys
+            cv = os.path.join(os.path.expanduser("~"), "omega", "omega_package", "opencore", "cryptovalid_merkle.py")
+            if os.path.exists(cv):
+                spec = importlib.util.spec_from_file_location("cryptovalid_merkle", cv); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+                self.assertTrue(hasattr(m, "mth") and hasattr(m, "inclusion_proof"))
+                for n in range(1, 21):
+                    datas = [bytes([i]) * 3 for i in range(n)]
+                    leaves = [hashlib.sha256(b"\x00" + d).digest() for d in datas]
+                    self.assertEqual(aat.merkle_root(leaves).hex(), m.mth(datas).hex(), n)                 # RFC 6962 MTH
+                    for i in range(n):
+                        self.assertEqual([st["hash"] for st in aat.audit_path(leaves, i)], [h.hex() for h in m.inclusion_proof(i, datas)], (n, i))
+                        self.assertEqual(aat.root_from_path(leaves[i], aat.audit_path(leaves, i)), aat.merkle_root(leaves))
+                    # the draft's wording ("odd last node promoted unchanged") gives the same root as RFC 6962's MTH
+                    level = list(leaves)
+                    while len(level) > 1:
+                        level = [aat._node(level[j], level[j + 1]) if j + 1 < len(level) else level[j] for j in range(0, len(level), 2)]
+                    self.assertEqual(level[0], aat.merkle_root(leaves), n)
+            else:
+                self.skipTest("cryptovalid_merkle oracle not on this host")
+            bad = json.loads(json.dumps(recs)); bad[2]["batch"]["inclusion_proof"][0]["hash"] = "0" * 64
+            self.assertFalse(aat.verify_epochs(bad, [anchor])["ok"])
+            dupidx = json.loads(json.dumps(recs)); dupidx[2]["batch"]["leaf_index"] = 1
+            self.assertFalse(aat.verify_epochs(dupidx, [anchor])["ok"])
+            self.assertFalse(aat.verify_epochs(recs, [dict(anchor, merkle_root="0" * 64)])["ok"])
+            self.assertFalse(aat.verify_epochs(recs, [])["ok"])
+            # JSONL round trip keeps the hashes; CSV is the draft's header, lossy and declared
+            back = aat.from_jsonl(aat.to_jsonl(recs))
+            self.assertEqual([aat.record_hash(r) for r in back], [aat.record_hash(r) for r in recs])
+            self.assertTrue(aat.verify_chain(back)["ok"])
+            csv_text = aat.to_csv(recs)
+            self.assertTrue(csv_text.startswith("record_id,timestamp,agent_id,agent_version,session_id,action_type,outcome,trust_level,record_phase,parent_record_id,prev_hash,action_detail\r\n"))
+            self.assertEqual(csv_text.count("\r\n"), 6)
+            with self.assertRaises(ValueError):
+                aat.from_jsonl('{"a":1}\n[1,2]\n')
 
 
 class TestMlDsaHybrid(unittest.TestCase):

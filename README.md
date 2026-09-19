@@ -40,7 +40,7 @@ the index links carry `#sha256=` fragments, so pip verifies every download.
 | `timestamp` | RFC 3161 trusted timestamping (a qualified TSA adds legal presumption of time) |
 | `attestation` | PII-free attestation primitive — salted per-record digests, **no linkability** |
 | `verifier` | One offline verifier with **graduated authenticity** |
-| `interop.aat` | Export/verify **Agent Audit Trail** chains (draft-sharif-agent-audit-trail-00): JCS hash chain, vocabularies, optional ECDSA P-256 signatures |
+| `interop.aat` | Export/verify **Agent Audit Trail** chains (draft-sharif-agent-audit-trail-**04**): JCS hash chain, record phases, §7 detail fields, ES256 / ML-DSA-65 / hybrid signatures resolved by RFC 7638 thumbprint, Merkle epochs (RFC 6962), tombstones, session close, JSONL/CSV |
 
 ## Graduated authenticity
 
@@ -88,46 +88,86 @@ CA/PKI, not the official CSIRT/ENISA or TRACES channel, and not legal advice.
 The trust registry is TOFU: it proves a key was decided to be trusted and
 prevents silent key-swap, not the legal identity of the holder.
 
-## Agent Audit Trail interop (2026-09-14)
+## Agent Audit Trail interop (draft -04, 2026-09-19)
 
-Compared with the 2026 field (audit-trail products, OWASP agentic logging, EU AI Act Art. 12 — scheduled for
-2 August 2026, deferral pending in the Digital Omnibus):
-the requirement has converged, the record has not. The first Internet-Draft proposing one is
-`draft-sharif-agent-audit-trail-00` (R. Sharif, 29 March 2026 — an individual draft, not an IETF standard,
-expires 29 September 2026). `omega_evidence.interop.aat` exports an `AgentEvidenceLog` ledger as AAT chains — one chain per
-session, each opened by a synthesised (and so labelled) `lifecycle` / `session_start` genesis record, as the
-draft requires — with mandatory fields, controlled vocabularies and `prev_hash` = SHA-256 over the JCS of the
-previous record; and verifies any AAT chain offline, fail-closed (chain, vocabularies, lifecycle, UTC and
-monotonic timestamps, canonical UUID v4 identifiers), including the optional ECDSA P-256 signatures (IEEE P1363
-r||s). The draft's author has an IPR disclosure on the datatracker: reading and verifying the format is what
-this module does.
-Declared: the mapping is lossy (omega's policy rule, decision and attestation travel inside `action_detail`)
-but never fabricates (unknown action/outcome, missing agent id or unparsable timestamp raise); identifiers carry the
-UUID version-4 bits but are derived deterministically from the omega digests (RFC 9562 reserves v4 for random
-generation: a strict reader may object — the draft mandates the v4 format, reproducibility of evidence mandates
-determinism; both stated), so the same ledger exports to the same chain; signing happens inside the export (the draft hashes all fields of the previous record, signature
-included); `trust_level` is what the caller declares; JCS follows RFC 8785 with ES6 number serialisation, so foreign
-chains with non-integer numbers verify too (integers beyond 2^53 are refused on export); the draft may change —
-its version is pinned in `AAT_DRAFT`.
+Compared with the 2026 field (observability schemas, security-event schemas, EU AI Act Art. 12): the requirement has
+converged, the record has not. The Internet-Draft that proposes one is `draft-sharif-agent-audit-trail` (R. Sharif; an
+individual draft, not an IETF standard; -00 of 29 March 2026, **-04 of 15 September 2026, expires 19 March 2027**;
+the author has an IPR disclosure on the datatracker: reading, writing and verifying the format is what this module does).
+`omega_evidence.interop.aat` implements **-04**: it exports an `AgentEvidenceLog` ledger as AAT chains — one chain per
+session, opened by a synthesised (and so labelled) genesis record and, on request, closed by a `session_end` record with
+the draft's `session_hash` — and verifies any AAT chain offline, fail-closed: chain (`prev_hash` = SHA-256 over the JCS
+of the previous record), vocabularies, UUID v4 identifiers, UTC monotonic timestamps, **`record_phase`** and the §4.2
+pre-execution rules, the §7 REQUIRED `action_detail` fields per action type, recording independence (§5), the §5.3
+fail-safe trust level, nonces, tombstones (§9.3), size bounds, the §13 rule that a decision may be called `reproducible`
+only with a closed attestation, and every signature present: **ES256** (P-256, IEEE P1363), **ML-DSA-65** (FIPS 204,
+empty context, through `cryptography` ≥ 48) and the **hybrid** mode, each key resolved by its `signer_kid` — the RFC 7638
+JWK thumbprint for P-256 (checked against jwcrypto 1.6.1) and the AKP thumbprint of draft-ietf-cose-dilithium-11 for
+ML-DSA-65 (reproduces the draft's own example `kid`). Optional §6.4 **Merkle batch anchoring** builds RFC 6962 epochs with
+audit paths (roots and paths identical to cryptovalid's implementation for 1…20 leaves) and anchors the root with an
+RFC 3161 token (verified only against a trust anchor, never green without one). Exports: JSONL (§10.1, the JCS form, so
+the file re-reads to the same hashes) and CSV (§10.3, lossy, declared).
+
+Review round 1 (Gemini 3.1 Pro, Claude Opus 5, Sonnet 5, Haiku 4.5, 19 September 2026) found and we fixed, each
+re-measured: a **forged tombstone** (`tombstone_hash` := the next record's public `prev_hash`, stale signature kept)
+made any signed record disappear with `ok: true` — the draft's §9.3 "retains the signature field" is exactly that hole,
+so this module DEVIATES: a tombstone is signed anew by the deleting authority (`tombstone(..., key=)`) and verified like
+any record, an unsigned tombstone passes only in an unsigned chain and is reported; hostile inputs crashed the verifier
+(invalid calendar dates that match the RFC 3339 regex, lone surrogates and NaN in signed records, 600-deep nesting,
+list-valued `action_type`) — all problems now, never exceptions; independent recording was not required to be signed
+(§5.2 MUST) and was keyed on the genesis SHOULD field rather than on `recording_component` itself; a signed record without
+`signer_kid` (§3.3 MUST) was accepted through the -03 fallback — now `allow_legacy_03=True` is explicit; `verify_epochs`
+claimed a `leaf_count` check it did not do (now: index bound, index proven by the audit path, incomplete epochs
+reported, complete epochs rebuilt); non-UTC offsets (a SHOULD) were refused; booleans passed as numbers in the §13.8
+margin rule; truncation of a signed chain to a valid prefix was silent (now a warning, and stated as undetectable
+without the close or an anchor).
+
+Corrections to 0.7.0 (measured, not softened): 0.7.0 implemented -00 and its exports **violated the draft's REQUIRED
+per-action `action_detail` fields** (`tool_name`, `parameters_hash`, `decision_type` were not emitted; the verifier did
+not check them) — fixed and enforced; -00 chains have no `record_phase` and are refused with an explicit reason
+(re-export them). Declared choices where the draft is silent (also reported to the author): §13 fields accepted at the
+record top level or in `action_detail`; a record's `external_timestamp` token is checked over
+SHA-256(JCS(record without external_timestamp, signature-value fields and batch)); epoch tokens live in a separate
+epoch anchor (a token computed after the epoch is built cannot sit inside an already-chained record — only `batch` is
+detached); a hybrid record whose classical signature fails is a problem. Declared limits: the mapping from omega
+records is lossy and derives only what the record carries (`tool_call` and `decision`; other action types raise);
+identifiers are UUID v4-format values derived deterministically from the omega digests (RFC 9562 reserves v4 for random
+generation); `trust_level` is what the caller declares; AAT chains are verified by the Python module only (the Go/Java/JS
+verifiers cover packs); the draft may change again.
 
 ```python
 from omega_evidence.interop import aat
-chains = aat.from_omega(list(log._ledger.entries()), agent_version="1.2.3", trust_level="L1")
+chains = aat.from_omega(list(log._ledger.entries()), agent_version="1.2.3", trust_level="L1",
+                        private_key_pem=p256_priv, pq_signer=mldsa_signer, close=True)     # hybrid-signed, closed
 for session_id, chain in chains.items():
-    aat.verify_chain(chain)                 # {"ok": True, ...}; add pubkey_pem=... to check signatures
+    kid = aat.p256_thumbprint(p256_pub); pkid = aat.mldsa65_thumbprint(pq_pub_raw)
+    aat.verify_chain(chain, keys={kid: p256_pub, pkid: pq_pub_raw})          # {"ok": True, "hybrid_verified": N, ...}
+    anchor = aat.anchor_epoch(chain, tsa_url="https://freetsa.org/tsr")        # RFC 6962 epoch + RFC 3161 over the root
+    aat.verify_epochs(chain, [anchor], tsa_ca_file="freetsa-cacert.pem")
 ```
+
+```
+python -m omega_evidence.interop.aat verify chain.jsonl --key <kid>=agent.pem --key <pkid>=agent.pq.pub --epochs epochs.json --require-signatures
+```
+
+The competitor table with the primary sources of 19 September 2026 (OpenTelemetry GenAI semantic conventions, OCSF
+1.9.0, RFC 5848) is in the 0.8.0 release dossier: none of them carries a hash chain, a signature or a pre-execution
+phase for agent records — they are observability and security-event schemas, not evidence formats.
 
 ## Independent verifiers (Go, Java, Node) and the differential oracle
 
 `verifiers/` holds three stdlib-only re-implementations of the pack verifier — Go (`verifiers/go`, `crypto/mldsa`
 for ML-DSA-65 with Go ≥ 1.27), Java (`verifiers/java/OeVerify.java`, JDK 24+ for ML-DSA-65, single file) and Node
-(`verifiers/js/oeverify.mjs`, Ed25519 and SHA3 only: an ML-DSA co-signature is reported present-but-unverified,
-never true) — plus `verifiers/differential_oracle.py`, which builds packs, sidecars, ledgers and trust registries
-with the toolkit and demands the same `(verdict, pq_protected)` from Python, Go and Java on every case (tampered
+(`verifiers/js/oeverify.mjs`: Ed25519, SHA3 and — since 0.8.0 — **ML-DSA-65 through the Node build's OpenSSL ≥ 3.5**,
+feature-detected: the raw key is wrapped in a SubjectPublicKeyInfo and checked with `crypto.verify`, measured on Node
+24.21.0 and 22.23.2; on an older OpenSSL the layer is reported present-but-unverified, never true) — plus
+`verifiers/differential_oracle.py`, which builds packs, sidecars, ledgers and trust registries with the toolkit and
+demands the same `(verdict, pq_protected, authenticated)` from Python, Go, Java and Node on every case (tampered
 packs, lenient base64, uppercase digests, unknown or non-string algorithms, classical algorithm declared as PQ,
 overclaimed or missing `honest_scope`, duplicate keys, floats, nesting beyond 512, lone surrogates, non-UTF-8,
 empty / unrelated / tampered / float ledgers, rotated and revoked signers, stripped / foreign / invalid post-quantum
-layers). Node's two divergences are declared, not hidden. RFC 3161 sidecars are verified by the Python reference
+layers): 0 disagreements on 57 cases with 4 verifiers (19 September 2026); on a Node without ML-DSA the two Node
+divergences are declared, not hidden. RFC 3161 sidecars are verified by the Python reference
 only (the others report SKIP). The ledger profile is the cryptovalid one, so cryptovalid's five verifiers also
 accept omega-evidence ledgers unchanged (measured 16/09/2026).
 
@@ -185,6 +225,15 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 `drop_pq=True`. Without `cryptography` ≥ 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0; the backend is
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
+
+### Breaking changes in 0.8.0
+
+- `interop.aat` now implements draft **-04**: `record_phase` is mandatory, the §7 per-action `action_detail` fields
+  are required, `signer_kid`/`sig_alg` accompany every signature, and `verify_chain` takes `keys={kid: key}`
+  (`pubkey_pem` resolves signed records without `signer_kid` only with `allow_legacy_03=True`). Chains exported by 0.7.0 (-00) do
+  not verify any more (no `record_phase`, missing §7 fields): re-export them from the ledger — the export is
+  deterministic, so the new chain is the same evidence in the new format. `sign_record(rec, key)` accepts a P-256
+  private PEM (ES256) or an ML-DSA-65 signer; `sign_record_hybrid` produces the hybrid record.
 
 ### Breaking changes in 0.7.0
 

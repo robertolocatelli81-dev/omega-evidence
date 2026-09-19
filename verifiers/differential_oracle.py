@@ -3,8 +3,9 @@
 """Differential oracle over the omega-evidence PACK verifiers: the Python reference (python -m omega_evidence), Go
 (OEVERIFY_GO or built from verifiers/go), Java (OEVERIFY_JAVA or compiled from verifiers/java with a JDK >= 24) and
 Node (verifiers/js/oeverify.mjs) must give the same (verdict, pq_protected, authenticated) on every case — except the declared
-Node divergences (Node has no ML-DSA: a REQUIRED post-quantum layer is FAIL there, an INVALID ML-DSA co-signature is
-not detectable there). Cases are generated with the toolkit itself; ML-DSA cases need cryptography >= 48 (skipped
+Node divergences on a Node whose OpenSSL is < 3.5 (no ML-DSA there: a REQUIRED post-quantum layer is FAIL, an INVALID
+ML-DSA co-signature is not detectable); with OpenSSL >= 3.5 (Node >= 24.6, measured also on 22.23) Node verifies ML-DSA-65
+and the declared count is 0. Cases are generated with the toolkit itself; ML-DSA cases need cryptography >= 48 (skipped
 and SAID otherwise). Exit 1 on any undeclared disagreement. Council 16/09 r1: `authenticated` joined the tuple (Go/Java/JS
 said true for a revoked signer) and the trust-store / sig_alg / foreign-classical-key / timestamp-sidecar cases were added."""
 import base64, glob, json, os, shutil, subprocess, sys, tempfile
@@ -205,7 +206,7 @@ def main():
         bad = {k: v for k, v in res.items() if v != ref}
         if bad and decl and all(k in decl and decl[k] == v for k, v in bad.items()):
             declared += 1
-            print(f"  [DECL] {name:34} {res}  <- declared: Node has no ML-DSA")
+            print(f"  [DECL] {name:34} {res}  <- declared: this Node has no ML-DSA (OpenSSL < 3.5)")
             continue
         if bad:
             diffs += 1

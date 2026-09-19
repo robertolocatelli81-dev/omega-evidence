@@ -4,8 +4,11 @@
 // oeverify.mjs — independent Node (stdlib) verifier of omega-evidence packs (0.7.0): the same layers as the
 // Python reference and the Go/Java verifiers — strict JSON acceptance profile, honest-scope, pack-sha3 (canonical
 // JSON without pack_sha3, SHA3-256), ledger-chain with the dedicated anchored_pack_sha3 entry, Ed25519 producer
-// signature over the pack_sha3 hex bytes, trust registry replay, authenticity. The ML-DSA-65 co-signature is NOT
-// verified here (Node/OpenSSL 3.5 has no ML-DSA): a present layer is reported null (unverified), never true.
+// signature over the pack_sha3 hex bytes, trust registry replay, authenticity. The ML-DSA-65 co-signature IS
+// verified when the Node build's OpenSSL is >= 3.5 (Node >= 24.6 documents ML-DSA keys; the raw key is wrapped in a
+// SubjectPublicKeyInfo with OID 2.16.840.1.101.3.4.3.18 and checked with crypto.verify, empty context — measured
+// 2026-09-19 on Node 24.21.0/OpenSSL 3.5.8 and 22.23.2/OpenSSL 3.5.7 against cryptography-produced signatures);
+// on an older OpenSSL the layer is reported as before: present-but-unverified (null), never true.
 // Usage: node oeverify.mjs <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]
 import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -216,7 +219,7 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
           let st = null, stOK = true; if (trustStore) { const r = trustState(trustStore); st = r.st; stOK = r.ok; }
           // the registry's PQ pin is borrowed only when the classical key that signed is the registered one (council 16/09 r1)
           let pinned = expectPQ; if (!pinned && st && stOK && st[sid] && !st[sid].revoked && st[sid].pq && st[sid].pubkey === side.public_key_b64) pinned = st[sid].pq;
-          checkPQ(layers, side, pinned, requirePQ);
+          checkPQ(layers, side, pinned, requirePQ, declared);
           if (trustStore) {
             const te = st[sid];
             if (stOK && te && !te.revoked && te.pubkey === side.public_key_b64) { add("trusted-signer", "PASS", sid + " in trust registry"); trusted = true; }
@@ -238,17 +241,33 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
   return finish(layers, trusted, sigStatus === "PASS" && !trustFailed, required);   // council 16/09 r1: never authenticated for a revoked/untrusted signer
 }
 
-// No ML-DSA in Node: the layer is reported as Python does without a backend (SKIP unverified; FAIL when required),
-// plus the pinned-key and shape checks this verifier CAN do — never true.
-function checkPQ(layers, side, expectPQ, requirePQ) {
+// ML-DSA-65 (FIPS 204) through OpenSSL >= 3.5 when the runtime has it; otherwise the layer is reported as Python does
+// without a backend (SKIP unverified; FAIL when required) plus the pinned-key and shape checks — never true unverified.
+const MLDSA65_SPKI_PREFIX = Buffer.from("308207b2300b0609608648016503040312038207a100", "hex");   // SEQ{ SEQ{OID 2.16.840.1.101.3.4.3.18}, BIT STRING(0x00||1952 bytes) }
+function mldsa65Verify(pk, msg, sig) {
+  // returns true/false, or null when this Node/OpenSSL cannot load ML-DSA keys (feature-detected, never guessed)
+  let key;
+  try { key = createPublicKey({ key: Buffer.concat([MLDSA65_SPKI_PREFIX, pk]), format: "der", type: "spki" }); } catch { return null; }
+  try { return Boolean(edVerify(null, msg, key, sig)); } catch { return null; }
+}
+export const MLDSA_SUPPORTED = (() => {
+  try { createPublicKey({ key: Buffer.concat([MLDSA65_SPKI_PREFIX, Buffer.alloc(1952)]), format: "der", type: "spki" }); return true; } catch { return false; }
+})();
+function checkPQ(layers, side, expectPQ, requirePQ, digest) {
   const add = (s, d) => layers.push({ layer: "pq-signature", status: s, detail: d });
   const required = requirePQ || Boolean(expectPQ);
   if ("pq_sig_alg" in side && typeof side.pq_sig_alg !== "string") { add("FAIL", "pq_sig_alg is not a string"); return; }
   const palg = side.pq_sig_alg;
   if (!palg) { if (required) add("FAIL", "post-quantum layer required but absent (stripped or never signed)"); return; }
   if (expectPQ && side.pq_public_key_b64 !== expectPQ) { add("FAIL", palg + " co-signature by a key other than the pinned one"); return; }
-  if (palg === "ml-dsa-65" && (!b64Strict(side.pq_public_key_b64, 1952) || !b64Strict(side.pq_signature_b64, 3309))) { add("FAIL", "ml-dsa-65 co-signature invalid"); return; }
-  add(required ? "FAIL" : "SKIP", palg + " present but NOT verified by this verifier (no ML-DSA in Node): use the Python, Go or Java verifier" + (required ? " — a required layer that cannot be checked is not a pass" : ""));
+  if (palg !== "ml-dsa-65") { add(required ? "FAIL" : "SKIP", palg + " is not a registered PQ backend (pq-present-unverified" + (required ? ": a required layer that cannot be checked is not a pass)" : ")")); return; }
+  const pk = b64Strict(side.pq_public_key_b64, 1952), sig = b64Strict(side.pq_signature_b64, 3309);
+  if (!pk || !sig) { add("FAIL", "ml-dsa-65 co-signature invalid"); return; }
+  const ok = mldsa65Verify(pk, Buffer.from(digest, "utf-8"), sig);
+  if (ok === null) { add(required ? "FAIL" : "SKIP", "ml-dsa-65 present but NOT verified by this Node (OpenSSL < 3.5): use the Python, Go or Java verifier" + (required ? " — a required layer that cannot be checked is not a pass" : "")); return; }
+  if (!ok) { add("FAIL", "ml-dsa-65 co-signature invalid"); return; }
+  if (!expectPQ) { add(required ? "FAIL" : "SKIP", "ml-dsa-65 co-signature valid against the key INSIDE the sidecar only (pq-present-unpinned)" + (required ? "" : ": pin the signer's post-quantum key")); return; }
+  add("PASS", "pq-protected (ml-dsa-65, pinned key)");
 }
 
 function finish(layers, trusted, signed, pqRequired) {
@@ -257,7 +276,7 @@ function finish(layers, trusted, signed, pqRequired) {
   const pqL = layers.find((l) => l.layer === "pq-signature");
   const pq = !pqL ? false : pqL.status === "PASS" ? true : pqL.status === "SKIP" ? null : false;
   const integrity = layers.some((l) => l.layer === "pack-sha3" && l.status === "PASS");   // council r2
-  return { valid, layers, authenticated: (trusted || signed) && integrity, pq_protected: pq, verdict: valid && (!pqRequired || pq === true) ? "PASS" : "FAIL", verifier: "oeverify.mjs (Node stdlib; ML-DSA not verified)" };
+  return { valid, layers, authenticated: (trusted || signed) && integrity, pq_protected: pq, verdict: valid && (!pqRequired || pq === true) ? "PASS" : "FAIL", verifier: "oeverify.mjs (Node stdlib; ML-DSA-65 " + (MLDSA_SUPPORTED ? "verified through OpenSSL >= 3.5" : "not verifiable on this Node") + ")" };
 }
 
 function main(argv) {
