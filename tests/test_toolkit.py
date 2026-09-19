@@ -1531,6 +1531,19 @@ class TestAAT04(unittest.TestCase):
             self.assertFalse(aat.verify_chain(plain, keys={})["ok"]); self.assertTrue(aat.verify_chain(plain)["ok"])
             early = json.loads(json.dumps(plain)); early[1] = aat.tombstone(early[1], "x", "2020-01-01T00:00:00Z")
             self.assertTrue(any("deleted_at earlier" in p["why"] for p in aat.verify_chain(early)["problems"]))
+            # inclusion_proof is OPTIONAL: a complete epoch rebuilds without them (warning); an incomplete one cannot (problem)
+            np_ = json.loads(json.dumps(es)); a_all = aat.anchor_epoch(np_, epoch_id=aat._uuid4_from("all"))
+            for r in np_:
+                r["batch"].pop("inclusion_proof")
+            ve = aat.verify_epochs(np_, [a_all]); self.assertTrue(ve["ok"], ve["problems"]); self.assertTrue(any("rebuilding" in w["why"] for w in ve["warnings"]))
+            self.assertFalse(aat.verify_epochs(np_[:3], [a_all])["ok"])
+            with self.assertRaises(ValueError):
+                aat.from_omega(entries, "")
+            e_leap = json.loads(json.dumps(entries)); e_leap[0]["timestamp_utc"] = "2026-09-19T23:59:60Z"
+            with self.assertRaises(ValueError):
+                aat.from_omega(e_leap, "1.0")
+            neg = json.loads(json.dumps(plain)); neg[3].update({"margin_reproducible": True, "decision_margin": 0.001, "margin_epsilon": -1000})
+            self.assertTrue(any("cannot be negative" in p["why"] for p in aat.verify_chain(neg)["problems"]))
 
     def test_merkle_epochs_against_cryptovalid_and_exports(self):
         from omega_evidence.interop import aat

@@ -324,6 +324,8 @@ def _rfc3339(ts: str) -> str:
     t = str(ts)
     if not _RFC3339.match(t):
         raise ValueError(f"not RFC 3339 (extended format with offset required): {t!r} — an evidence export never invents a time")
+    if t[17:19] == "60":
+        raise ValueError(f"leap second {t!r} cannot be exported without moving the instant: refused")
     try:
         d = _parse_ts(t).astimezone(timezone.utc)
     except (OverflowError, ValueError):
@@ -398,6 +400,8 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
     be derived → ValueError (never guessed)."""
     if trust_level not in TRUST_LEVELS:
         raise ValueError(f"trust_level must be one of {TRUST_LEVELS}")
+    if not isinstance(agent_version, str) or not agent_version:
+        raise ValueError("agent_version must be a non-empty string (§3.1)")
     if recording_component is not None and not _URI.match(str(recording_component)):
         raise ValueError("recording_component must be a URI (scheme:...)")
     if recording_component is not None and private_key_pem is None and pq_signer is None:
@@ -604,7 +608,8 @@ def anchor_epoch(records: List[Dict[str, Any]], epoch_id: Optional[str] = None,
 
 def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
                   tsa_ca_file: Optional[str] = None, require_complete: bool = False) -> Dict[str, Any]:
-    """Check every `batch` object against its epoch anchor: root equality, inclusion proof, leaf_index consistency
+    """Check every `batch` object against its epoch anchor: root equality, inclusion proof (OPTIONAL in the draft: a
+    record without one is fine when the whole epoch is present and rebuilds the root, a problem otherwise), leaf_index consistency
     (no two records at one index, every index below the anchor's leaf_count, never more distinct leaves than
     leaf_count) and, when every leaf of an epoch is in `records`, the tree rebuilt from them must give the anchored
     root; with `tsa_ca_file` the RFC 3161 token over the root is verified with openssl (without it: recorded, NOT
@@ -630,6 +635,7 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
         by_id[a["epoch_id"]] = a
     seen: Dict[str, Dict[int, str]] = {}
     leaves_by_epoch: Dict[str, Dict[int, bytes]] = {}
+    no_proof: Dict[str, List[int]] = {}
     for i, r in enumerate(records):
         if not isinstance(r, dict):
             problems.append({"i": i, "why": "record is not an object"}); continue
@@ -650,7 +656,7 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
             problems.append({"i": i, "why": "batch merkle_root differs from the epoch anchor"})
         path = b.get("inclusion_proof")
         if path is None:
-            problems.append({"i": i, "why": "no inclusion_proof: membership in the epoch not verifiable from this record"})
+            no_proof.setdefault(b["epoch_id"], []).append(i)          # OPTIONAL (§3.2): decided once the epoch is rebuilt
         else:
             try:
                 ok = isinstance(path, list) and all(isinstance(s, dict) and _HEX64.match(str(s.get("hash", ""))) and s.get("side") in ("left", "right") for s in path)
@@ -679,10 +685,15 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
             elif len(lv) == lc and sorted(lv) == list(range(lc)):          # every leaf present: rebuild the tree
                 if merkle_root([lv[k] for k in range(lc)]).hex() != a["merkle_root"]:
                     problems.append({"epoch": eid, "why": "all leaves present but they do not rebuild the anchored merkle_root"})
+                elif eid in no_proof:
+                    warnings.append({"epoch": eid, "why": f"{len(no_proof[eid])} records without inclusion_proof: membership proven by rebuilding the whole epoch, not per record"})
+                    no_proof.pop(eid)
             elif len(lv) < lc:
                 incomplete[eid] = {"seen": len(lv), "leaf_count": lc}
                 (problems if require_complete else warnings).append(
                     {"epoch": eid, "why": f"{lc - len(lv)} of {lc} anchored leaves are not in these records (deleted, stripped of batch, or in another session)"})
+    for eid, idxs in no_proof.items():
+        problems.append({"epoch": eid, "why": f"records {idxs} carry no inclusion_proof and the epoch cannot be rebuilt from these records: membership not verifiable"})
     for eid in by_id:
         if eid not in leaves_by_epoch:
             lc = by_id[eid]["leaf_count"]
@@ -792,6 +803,8 @@ def _check_detail(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], war
             problems.append({"i": i, "why": "margin_reproducible must be a boolean (§13.8)"})
         elif not (_num(dm) and _num(me)):
             problems.append({"i": i, "why": "margin_reproducible without decision_margin and margin_epsilon (§13.3)"})
+        elif me < 0:
+            problems.append({"i": i, "why": "margin_epsilon is a bound on a perturbation: it cannot be negative (§13.3)"})
         elif bool(src["margin_reproducible"]) != (dm > 2 * me):
             problems.append({"i": i, "why": "margin_reproducible contradicts decision_margin > 2·margin_epsilon (§13.8)"})
 
