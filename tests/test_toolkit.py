@@ -1595,6 +1595,35 @@ class TestAAT04(unittest.TestCase):
             line = aat.to_csv(inj).splitlines()[2]
             self.assertIn("'=cmd", line); self.assertNotIn(",=cmd", line)
 
+    def test_round6_epoch_membership_tsa_failure_phase_basis_double_tombstone(self):
+        """Review round 6 (Opus): a copied record with the same record_id/leaf_index and altered content is not a member;
+        TSA anchoring that fails raises (no anchor without a token) and an anchor declaring a TSA without a token is
+        malformed; an omega entry with consistent=false is refused; a tombstone of a tombstone keeps the original hash."""
+        from omega_evidence.interop import aat
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = self._log(tmp)
+            plain = next(iter(aat.from_omega(entries, "1.0", close=True).values()))
+            an = aat.anchor_epoch(plain, epoch_id=aat._uuid4_from("e"))
+            forged = json.loads(json.dumps(plain))
+            fake = json.loads(json.dumps(forged[3])); fake["action_detail"]["resource"] = "/etc/passwd"; fake.pop("batch"); fake["batch"] = {k: v for k, v in forged[3]["batch"].items() if k != "inclusion_proof"}
+            forged.insert(3, fake)
+            ve = aat.verify_epochs(forged, [an]); self.assertFalse(ve["ok"]); self.assertTrue(any("NOT the leaf" in p["why"] or "DIFFERENT records" in p["why"] for p in ve["problems"]))
+            with self.assertRaises(RuntimeError):
+                aat.anchor_epoch(json.loads(json.dumps(plain)), epoch_id=aat._uuid4_from("t"), tsa_url="https://127.0.0.1:9/tsa")
+            self.assertFalse(aat.verify_epochs(plain, [dict(an, tsa={"tsa_url": "https://tsa", "token": None})])["ok"])
+            e2 = json.loads(json.dumps(entries)); e2[0]["consistent"] = False
+            with self.assertRaises(ValueError):
+                aat.from_omega(e2, "1.0")
+            self.assertIn("DERIVED by the exporter", plain[1]["action_detail"]["record_phase_basis"])
+            t1 = json.loads(json.dumps(plain)); t1[1] = aat.tombstone(t1[1], "gdpr", "2026-09-19T22:00:00Z")
+            t2 = json.loads(json.dumps(t1)); t2[1] = aat.tombstone(t2[1], "gdpr (corrected reason)", "2026-09-19T22:30:00Z")
+            self.assertEqual(t2[1]["tombstone_hash"], t1[1]["tombstone_hash"]); self.assertEqual(t2[1]["action_detail"]["original_action_type"], "tool_call")
+            self.assertTrue(aat.verify_chain(t2)["ok"], aat.verify_chain(t2)["problems"])
+            with self.assertRaises(ValueError):
+                aat.close_record(["junk"])
+            bad_uri = json.loads(json.dumps(plain)); bad_uri[-1]["agent_id"] = "urn:x y"
+            self.assertTrue(any("agent_id is not a URI" in p["why"] for p in aat.verify_chain(bad_uri)["problems"]))
+
     def test_merkle_epochs_against_cryptovalid_and_exports(self):
         from omega_evidence.interop import aat
         with tempfile.TemporaryDirectory() as tmp:
