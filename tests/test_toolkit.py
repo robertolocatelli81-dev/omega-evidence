@@ -1496,7 +1496,7 @@ class TestAAT04(unittest.TestCase):
             self.assertTrue(any("5.2" in p["why"] for p in aat.verify_chain(tail, keys=ks, agent_kid=kid)["problems"]))
             # two recorders in one session
             two = json.loads(json.dumps(ind)); two[1]["recording_component"] = "urn:gw:other"
-            self.assertTrue(any("more than one recording component" in p["why"] for p in aat.verify_chain(two, keys=ks)["problems"]))
+            self.assertTrue(any("second recording component" in p["why"] and p["i"] == 1 for p in aat.verify_chain(two, keys=ks)["problems"]))
             # audit paths: bottom-up == recursive; anchoring 4000 records stays fast
             for n in range(1, 65):
                 leaves = [hashlib.sha256(bytes([n, k])).digest() for k in range(n)]
