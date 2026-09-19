@@ -37,7 +37,9 @@ Declared choices where the draft is silent or ambiguous (each is also reported t
   * §13 field placement: accepted at the record top level or inside action_detail.
   * `external_timestamp` on a record: the token's messageImprint is checked against
     SHA-256(JCS(record without external_timestamp, signature-value fields and batch)) — the draft does not say
-    what the token covers; a token whose imprint is something else is reported as "imprint not bound".
+    what the token covers; a token whose imprint is something else is a problem. A token over an epoch root cannot
+    be carried inside a record of that epoch (it would change the record's leaf hash): such tokens live in the epoch
+    anchor and are checked by `verify_epochs`.
   * Epoch anchors: the draft says the RFC 3161 token over an epoch root "MAY be carried in the epoch's genesis
     record" — but every field except `batch` is inside the chain hash, so a token computed after the epoch is
     built cannot be inserted into an already-chained record without breaking prev_hash. Epoch anchors are
@@ -249,6 +251,35 @@ def audit_path(leaves: List[bytes], index: int) -> List[Dict[str, str]]:
     return audit_path(leaves[k:], index - k) + [{"hash": merkle_root(leaves[:k]).hex(), "side": "left"}]
 
 
+def merkle_levels(leaves: List[bytes]) -> List[List[bytes]]:
+    """Bottom-up levels of the RFC 6962 tree (an unpaired last node is promoted unchanged, which gives the same
+    tree as the recursive MTH — tested): levels[0] = leaves, levels[-1] = [root]. O(n) hashes."""
+    if not leaves:
+        return [[hashlib.sha256(b"").digest()]]
+    levels = [list(leaves)]
+    while len(levels[-1]) > 1:
+        cur = levels[-1]
+        levels.append([_node(cur[j], cur[j + 1]) if j + 1 < len(cur) else cur[j] for j in range(0, len(cur), 2)])
+    return levels
+
+
+def audit_paths(leaves: List[bytes]) -> List[List[Dict[str, str]]]:
+    """Every leaf's audit path from one bottom-up tree build: O(n log n) in total instead of O(n²) (review round 4).
+    Identical to audit_path(leaves, i) for each i (tested for n = 1..64)."""
+    levels = merkle_levels(leaves)
+    out: List[List[Dict[str, str]]] = []
+    for i in range(len(leaves)):
+        path: List[Dict[str, str]] = []
+        pos = i
+        for lvl in levels[:-1]:
+            sib = pos ^ 1
+            if sib < len(lvl):                       # an unpaired node was promoted: no sibling, no step
+                path.append({"hash": lvl[sib].hex(), "side": "left" if sib < pos else "right"})
+            pos //= 2
+        out.append(path)
+    return out
+
+
 def index_from_path(path: List[Dict[str, Any]], n: int) -> int:
     """The leaf index an RFC 6962 audit path of a tree with n leaves proves (descending from the root: the last
     step says whether the leaf is in the left [0, k) or right [k, n) subtree, k = largest power of two < n)."""
@@ -400,10 +431,12 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
             raise ValueError("omega record without session_id: cannot export (a session is never invented)")
         try:
             u = uuid.UUID(sid)
-            ok_v4 = u.version == 4 and str(u) == sid       # canonical 8-4-4-4-12 lowercase only
+            ok_v4 = u.version == 4
         except ValueError:
             ok_v4 = False
-        if not ok_v4:
+        if ok_v4:
+            sid = str(u)                                    # canonical 8-4-4-4-12 lowercase (uppercase/braces = same session)
+        else:
             sess.setdefault(sid, _uuid4_from(f"omega-session:{sid}"))
             sid = sess[sid]
         aid = e.get("agent_id")
@@ -553,10 +586,11 @@ def anchor_epoch(records: List[Dict[str, Any]], epoch_id: Optional[str] = None,
         raise ValueError("epoch_id must be a canonical UUID v4") from None
     for r in records:
         r.pop("batch", None)
-    leaves = [leaf_hash(r) for r in records]
+    leaves = [leaf_hash(r, strict=True) for r in records]      # export: integers beyond 2^53 refused, as for prev_hash
     root = merkle_root(leaves)
+    paths = audit_paths(leaves)
     for i, r in enumerate(records):
-        r["batch"] = {"epoch_id": eid, "merkle_root": root.hex(), "leaf_index": i, "inclusion_proof": audit_path(leaves, i)}
+        r["batch"] = {"epoch_id": eid, "merkle_root": root.hex(), "leaf_index": i, "inclusion_proof": paths[i]}
     anchor: Dict[str, Any] = {"epoch_id": eid, "merkle_root": root.hex(), "leaf_count": len(records),
                               "hash": "RFC 6962 / SHA-256 (leaf 0x00 || JCS(record without batch), node 0x01)"}
     if tsa_url:
@@ -580,7 +614,10 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
     problems: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
     by_id = {}
-    for a in anchors if isinstance(anchors, list) else []:
+    if not isinstance(anchors, list):
+        problems.append({"why": "anchors is not a list"})
+        anchors = []
+    for a in anchors:
         if not isinstance(a, dict) or not _HEX64.match(str(a.get("merkle_root", ""))) or not isinstance(a.get("epoch_id"), str) \
                 or not (isinstance(a.get("leaf_count"), int) and not isinstance(a.get("leaf_count"), bool) and a["leaf_count"] > 0) \
                 or ("tsa" in a and not (isinstance(a["tsa"], dict) and isinstance(a["tsa"].get("token"), (str, type(None))))):
@@ -648,7 +685,10 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
                     {"epoch": eid, "why": f"{lc - len(lv)} of {lc} anchored leaves are not in these records (deleted, stripped of batch, or in another session)"})
     for eid in by_id:
         if eid not in leaves_by_epoch:
-            warnings.append({"epoch": eid, "why": "anchor with no record of this epoch among these records: unaccounted for"})
+            lc = by_id[eid]["leaf_count"]
+            incomplete[eid] = {"seen": 0, "leaf_count": lc}
+            (problems if require_complete else warnings).append(
+                {"epoch": eid, "why": f"{lc} of {lc} anchored leaves are not in these records: epoch unaccounted for (whole-epoch truncation or another session)"})
     if leaves_by_epoch and any(r.get("batch") is None for r in records if isinstance(r, dict)):
         warnings.append({"why": "some records carry no batch object while others are anchored: they are outside every epoch checked here"})
     tsa: Dict[str, Any] = {}
@@ -786,7 +826,8 @@ def _check_optional(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], w
         problems.append({"i": i, "why": "human_override needs operator_id (§3.2)"})
     sc = r.get("sanctions_check")
     if sc is not None:
-        if not isinstance(sc, dict) or sc.get("result") not in ("clear", "match", "error") or not _RFC3339.match(str(sc.get("checked_at", ""))):
+        if not isinstance(sc, dict) or not isinstance(sc.get("provider"), str) or sc.get("result") not in ("clear", "match", "error") \
+                or not _RFC3339.match(str(sc.get("checked_at", ""))):
             problems.append({"i": i, "why": "sanctions_check malformed (provider, checked_at RFC 3339, result clear|match|error) (§3.2)"})
     ta = r.get("trust_assignment")
     if ta is not None:
@@ -841,7 +882,11 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     is a problem, never a pass. `require_signatures=True` makes an unsigned record a problem. `external_timestamp`
     tokens are verified with openssl when `external_timestamp_ca_file` is given (else recorded, NOT verified).
     With `agent_kid`, a self-recorded record signed by another key is a problem (§6.3 step 3a; a key rotation mid-session
-    therefore needs a new session). Returns {ok, records, problems, warnings, signatures_verified, hybrid_verified,
+    therefore needs a new session). Independence (§5.2) is decided for the whole session (genesis `recording_mode`, or any
+    record naming a recording component other than the agent) and then required of every record. DECLARED DEVIATION: a
+    tombstone must carry a valid signature of the deleting authority over the tombstone content (`tombstone(..., key=)`);
+    the draft's retained original signature cannot verify and is reported as such; a tombstoned genesis is refused
+    (§8.1 wins over §9.3's "any record"). With `keys` (even empty) or `pubkey_pem`, every record must be signed. Returns {ok, records, problems, warnings, signatures_verified, hybrid_verified,
     tombstones, keys_rejected, draft, scope}."""
     problems: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
@@ -860,6 +905,16 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     agent0 = None
     last_ts = None
     recording_mode = None
+    # §5.2 independence is a property of the SESSION, decided fail-closed before the loop: the genesis says so, or any
+    # record names a recording component other than the agent (a forger cannot opt a record out by omitting the field)
+    g0 = records[0] if records and isinstance(records[0], dict) else {}
+    gd0 = g0.get("action_detail") if isinstance(g0.get("action_detail"), dict) else {}
+    recorders = {r["recording_component"] for r in records if isinstance(r, dict) and isinstance(r.get("recording_component"), str)
+                 and r["recording_component"] != r.get("agent_id")}
+    if isinstance(gd0.get("recording_component_id"), str) and gd0.get("recording_mode") == "independent":
+        recorders.add(gd0["recording_component_id"])
+    session_independent = gd0.get("recording_mode") == "independent" or bool(recorders)
+    keys_given = keys is not None or pubkey_pem is not None
     prev_hashes_raw: List[bytes] = []
     for i, r in enumerate(records):
         if not isinstance(r, dict):
@@ -953,12 +1008,15 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 problems.append({"i": i, "why": "genesis recording_mode must be self or independent (§5)"})
             if recording_mode == "independent" and not _URI.match(str(d.get("recording_component_id", ""))):
                 problems.append({"i": i, "why": "independent recording: genesis needs recording_component_id (URI) (§5.2)"})
-        foreign_rc = "recording_component" in r and r["recording_component"] != r.get("agent_id")   # §3.2: this IS independent recording
-        if recording_mode == "independent" and "recording_component" not in r:
+        foreign_rc = session_independent                      # every record of an independent session, tombstones included
+        if session_independent and "recording_component" not in r:
             problems.append({"i": i, "why": "independent recording: every record MUST carry recording_component (§5.2)"})
-        if recording_mode == "independent" and "recording_component" in r and not foreign_rc:
+        if session_independent and "recording_component" in r and r["recording_component"] == r.get("agent_id"):
             problems.append({"i": i, "why": "independent recording declared but recording_component equals agent_id (§5.1/§5.2)"})
-        if recording_mode == "independent" or foreign_rc:
+        if session_independent and len(recorders) > 1:
+            if i == 0:
+                problems.append({"i": i, "why": f"more than one recording component in one session: {sorted(recorders)} (§5.2: one independent recorder)"})
+        if session_independent:
             if "signature" not in r:
                 problems.append({"i": i, "why": "independent recording: the recorder MUST sign every record with its own key (§5.2)"})
             elif "signer_kid" not in r:
@@ -967,14 +1025,14 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 problems.append({"i": i, "why": "independently recorded record signed with the AGENT's key (§5.2)"})
             elif agent_kid is None and i == 0:
                 warnings.append({"i": i, "why": "independent recording: pass agent_kid to check that the recorder's key differs from the agent's (§5.2)"})
-            if recording_mode is None and foreign_rc and i == 0:
+            if recording_mode is None and i == 0:
                 warnings.append({"i": i, "why": "records name a recording component other than the agent but the genesis declares no recording_mode (§8.1 SHOULD)"})
-        if recording_mode == "self" and foreign_rc:
-            problems.append({"i": i, "why": "self-recording: recording_component MUST equal agent_id when present (§5.1)"})
-        if not (recording_mode == "independent" or foreign_rc) and agent_kid is not None and "signature" in r and not is_tomb \
+        if recording_mode == "self" and session_independent:
+            problems.append({"i": i, "why": "self-recording declared but records name another recording component (§5.1)"})
+        if not session_independent and agent_kid is not None and "signature" in r and not is_tomb \
                 and isinstance(r.get("signer_kid"), str) and agent_kid not in (r["signer_kid"], r.get("signer_kid_classical")):
             problems.append({"i": i, "why": "self-recorded record not signed by the agent's key (§6.3 step 3a)"})
-        if not low and i == 0 and recording_mode != "independent" and not foreign_rc:
+        if not low and i == 0 and not session_independent:
             warnings.append({"i": i, "why": "L2+ session recorded by the agent itself (§5.2 SHOULD: independent recording)"})
         if low is False and ta is not None and ta.get("downgraded") is True:
             warnings.append({"i": i, "why": "trust_assignment.downgraded true on an L2+ record (§3.2: true only below the fail-safe default)"})
@@ -1022,6 +1080,11 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 problems.append({"i": i, "why": "tombstone needs deletion_reason and deleted_at (RFC 3339) (§9.3)"})
             if d.get("original_action_type") not in ACTION_TYPES:
                 problems.append({"i": i, "why": "tombstone original_action_type not in vocabulary (§9.3)"})
+            try:
+                if _RFC3339.match(str(d.get("deleted_at", ""))) and _RFC3339.match(ts) and _parse_ts(d["deleted_at"]) < _parse_ts(ts):
+                    problems.append({"i": i, "why": "tombstone deleted_at earlier than the record's own timestamp"})
+            except ValueError:
+                pass
             if r.get("outcome") != "success":
                 problems.append({"i": i, "why": "tombstone outcome MUST be success (§9.3)"})
         elif "tombstone_hash" in r:
@@ -1054,7 +1117,7 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                                                     "retained original signature (unverifiable — this module requires the deleting authority's) or a forgery"})
                 else:
                     problems.append({"i": i, "why": f"signature invalid: {why}"})
-        elif require_signatures or pubkey_pem is not None or keyset.by_kid:
+        elif require_signatures or keys_given:
             problems.append({"i": i, "why": ("tombstone without a signature of the deleting authority while the chain is verified with keys (§9.3 + review 2026-09-19)"
                                              if is_tomb else "unsigned record while signatures are required / a verification key was given "
                                                              "(a signed prefix with an unsigned continuation is a rewrite)")})
@@ -1065,15 +1128,14 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
             warnings.append({"i": i, "why": "external_timestamp recorded, NOT verified (no external_timestamp_ca_file): its time is unproven"})
         if isinstance(et, dict) and isinstance(et.get("token"), str) and external_timestamp_ca_file and canonical_ok:
             from .. import timestamp as _ts
-            imprints = [hashlib.sha256(jcs({k: v for k, v in r.items() if k not in SIGNATURE_VALUE_FIELDS + ("batch", "external_timestamp")},
-                                           strict=False)).hexdigest()]
-            b = r.get("batch")
-            if isinstance(b, dict) and _hex64(b.get("merkle_root")):
-                imprints.append(hashlib.sha256(bytes.fromhex(b["merkle_root"])).hexdigest())   # §6.4: a token over the epoch root
-            verdicts = [_ts.verify(et["token"], im, ca_file=external_timestamp_ca_file) for im in imprints]
+            # ONE pre-image: the record's own digest. A token over an epoch root cannot sit inside a record of that epoch
+            # (adding it changes the record's leaf hash, so no inclusion proof can bind the two — measured, review round 4):
+            # epoch-root tokens live in the epoch anchor and are checked by verify_epochs.
+            imprint = hashlib.sha256(jcs({k: v for k, v in r.items() if k not in SIGNATURE_VALUE_FIELDS + ("batch", "external_timestamp")},
+                                         strict=False)).hexdigest()
+            verdicts = [_ts.verify(et["token"], imprint, ca_file=external_timestamp_ca_file)]
             if not any(v.get("verified") is True for v in verdicts):
-                problems.append({"i": i, "why": "external_timestamp token not verified over this record's digest nor over its epoch root: "
-                                                + " / ".join(str(v.get("note")) for v in verdicts)})
+                problems.append({"i": i, "why": "external_timestamp token not verified over this record's digest: " + str(verdicts[0].get("note"))})
         prev = r
     ld = records[-1].get("action_detail") if records and isinstance(records[-1], dict) and isinstance(records[-1].get("action_detail"), dict) else {}
     if records and isinstance(records[-1], dict) and not (records[-1].get("action_type") == "lifecycle" and ld.get("event") == "session_end"):
@@ -1083,13 +1145,14 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     return {"ok": not problems, "records": len(records), "problems": problems, "warnings": warnings,
             "signatures_verified": signed_ok, "hybrid_verified": hybrid_ok, "tombstones": tombstones,
             "keys_rejected": list(keyset.bad), "draft": AAT_DRAFT,
-            "scope": ("chain + vocabularies + §4/§5/§7/§8/§9/§13 rules + every signature present (ES256, ML-DSA-65, hybrid), "
+            "scope": ("chain + vocabularies + §4.2/§5/§7/§8/§9/§13 rules + every signature present (ES256, ML-DSA-65, hybrid), "
                       "offline; does not prove the truth of the actions, only that the sequence was not altered since the "
                       "hashes were written. DECLARED LIMIT: without signatures the LAST record can be altered undetected "
                       "and a whole chain can be regenerated from scratch, and any record can be replaced by an unsigned "
-                      "tombstone (§9.3); even with signatures, truncation to a valid prefix is undetectable here — signatures, "
-                      "a session close carried elsewhere, or an external anchor (verify_epochs with a verified TSA token and "
-                      "require_complete) make it detectable. Batch objects are checked by verify_epochs "
+                      "tombstone (§9.3); even with signatures, truncation to a valid prefix is undetectable here — a session close "
+                      "carried elsewhere, or an external anchor (verify_epochs with a verified TSA token and require_complete) "
+                      "make it detectable. §4.3 (a pre-execution record before every state-changing action of a high-risk "
+                      "system) is not checked: which actions change state is not in the record. Batch objects are checked by verify_epochs "
                       "against their anchors, not here.")}
 
 
@@ -1265,7 +1328,10 @@ def _es256_verify(rec: Dict[str, Any], sig_b64u: str, pubkey_pem: bytes, msg: by
 
 
 def _mldsa_verify(sig_b64u: str, pub_raw: bytes, msg: bytes) -> Tuple[bool, str]:
-    from ..pqbackends import mldsa as _m
+    try:
+        from ..pqbackends import mldsa as _m
+    except ImportError:
+        return False, "ML-DSA-65 backend not present in this build: NOT verified"
     if not _m.available():
         return False, "ML-DSA-65 not verifiable on this host (cryptography >= 48 needed): NOT verified"
     try:

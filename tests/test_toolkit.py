@@ -1462,6 +1462,76 @@ class TestAAT04(unittest.TestCase):
             l2 = next(iter(aat.from_omega(entries, "1.0", trust_level="L2", close=True).values()))
             self.assertTrue(any("5.2 SHOULD" in w["why"] for w in aat.verify_chain(l2)["warnings"]))
 
+    def test_round4_session_independence_epochs_paths(self):
+        """Review round 4 (2026-09-19): independence is a session property (a record cannot opt out by omitting
+        recording_component); whole-epoch truncation under require_complete; a TSA token over an epoch root counts only
+        when the record's inclusion proof leads to that root; bottom-up audit paths equal the recursive ones; uppercase
+        session ids are the same session; keys={} still means every record must be signed."""
+        from omega_evidence.interop import aat
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography assente")
+        priv, pub = aat.generate_p256_keypair(); kid = aat.p256_thumbprint(pub)
+        privR, pubR = aat.generate_p256_keypair(); kidR = aat.p256_thumbprint(pubR)
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = self._log(tmp)
+            ind = next(iter(aat.from_omega(entries, "1.0", private_key_pem=privR, recording_component="urn:gw:x").values()))
+            nomode = json.loads(json.dumps(ind))
+            for k in ("recording_mode", "recording_component_id"):
+                nomode[0]["action_detail"].pop(k)
+            nomode[0] = aat.sign_record({k: v for k, v in nomode[0].items() if k not in ("signature", "sig_alg", "signer_kid")}, privR)
+            for k in range(1, len(nomode)):
+                nomode[k]["prev_hash"] = aat.record_hash(nomode[k - 1])
+                nomode[k] = aat.sign_record({kk: v for kk, v in nomode[k].items() if kk not in ("signature", "sig_alg", "signer_kid")}, privR)
+            ks = {kid: pub, kidR: pubR}
+            self.assertTrue(aat.verify_chain(nomode, keys=ks, agent_kid=kid)["ok"])
+            # the agent tombstones record 1 with its own key and drops recording_component: still an independent session
+            t = json.loads(json.dumps(nomode)); t[1] = aat.tombstone(t[1], "x", "2026-09-19T21:00:00Z", key=priv); t[1].pop("recording_component", None)
+            self.assertTrue(any("5.2" in p["why"] for p in aat.verify_chain(t, keys=ks, agent_kid=kid)["problems"]))
+            # the agent appends a self-signed tail record without recording_component
+            tail = json.loads(json.dumps(nomode)); extra = {k: v for k, v in tail[-1].items() if k not in ("signature", "sig_alg", "signer_kid", "recording_component")}
+            extra.update({"record_id": aat._uuid4_from("x"), "parent_record_id": tail[-1]["record_id"], "prev_hash": aat.record_hash(tail[-1])})
+            tail.append(aat.sign_record(extra, priv))
+            self.assertTrue(any("5.2" in p["why"] for p in aat.verify_chain(tail, keys=ks, agent_kid=kid)["problems"]))
+            # two recorders in one session
+            two = json.loads(json.dumps(ind)); two[1]["recording_component"] = "urn:gw:other"
+            self.assertTrue(any("more than one recording component" in p["why"] for p in aat.verify_chain(two, keys=ks)["problems"]))
+            # audit paths: bottom-up == recursive; anchoring 4000 records stays fast
+            for n in range(1, 65):
+                leaves = [hashlib.sha256(bytes([n, k])).digest() for k in range(n)]
+                self.assertEqual(aat.audit_paths(leaves), [aat.audit_path(leaves, k) for k in range(n)], n)
+                self.assertEqual(aat.merkle_levels(leaves)[-1][0], aat.merkle_root(leaves))
+            import time as _t
+            big = [{"record_id": aat._uuid4_from(str(k)), "n": k} for k in range(4000)]
+            t0 = _t.monotonic(); aat.anchor_epoch(big, epoch_id=aat._uuid4_from("big")); self.assertLess(_t.monotonic() - t0, 5.0)
+            with self.assertRaises(ValueError):
+                aat.anchor_epoch([{"n": 2 ** 53 + 1}], epoch_id=aat._uuid4_from("b"))            # export refuses lossy integers
+            # whole-epoch truncation: a warning by default, a problem with require_complete
+            es = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv, close=True).values()))
+            a1 = aat.anchor_epoch(es[:3], epoch_id=aat._uuid4_from("e1")); a2 = aat.anchor_epoch(es[3:], epoch_id=aat._uuid4_from("e2"))
+            self.assertTrue(aat.verify_epochs(es, [a1, a2], require_complete=True)["ok"])
+            ve = aat.verify_epochs(es[:3], [a1, a2], require_complete=True)
+            self.assertFalse(ve["ok"]); self.assertEqual(ve["incomplete"][a2["epoch_id"]]["seen"], 0)
+            self.assertFalse(aat.verify_epochs(es, "junk")["ok"])
+            # external_timestamp: verified over the record's own digest only; a token over some root (a forged batch, or a
+            # genuine old epoch token) never counts for a record (round 4: the record's leaf hash changes once the token is in)
+            from omega_evidence import timestamp as _tsmod
+            c = json.loads(json.dumps(es)); c[2]["external_timestamp"] = {"tsa_url": "https://tsa", "token": "AAAA", "anchored_at": "2020-01-01T00:00:00Z"}
+            own = hashlib.sha256(aat.jcs({k: v for k, v in c[2].items() if k not in ("signature", "signature_classical", "batch", "external_timestamp")}, strict=False)).hexdigest()
+            root_imprint = hashlib.sha256(bytes.fromhex(c[2]["batch"]["merkle_root"])).hexdigest()
+            for imprint, expect in ((own, True), (root_imprint, False)):
+                with unittest.mock.patch.object(_tsmod, "verify", lambda tok, im, ca_file=None, **kw: {"verified": im == imprint}):
+                    v = aat.verify_chain(c, external_timestamp_ca_file="/x/ca.pem")
+                self.assertEqual(not any("external_timestamp token not verified" in p["why"] for p in v["problems"]), expect)
+            # uppercase session id = same session; keys={} = every record must be signed; deleted_at before the record
+            up = json.loads(json.dumps(entries)); sid4 = aat._uuid4_from("s4"); up[0]["session_id"] = sid4.upper(); up[1]["session_id"] = sid4; up[2]["session_id"] = "{" + sid4 + "}"
+            self.assertEqual(list(aat.from_omega(up, "1.0").keys()), [sid4])
+            plain = next(iter(aat.from_omega(entries, "1.0", close=True).values()))
+            self.assertFalse(aat.verify_chain(plain, keys={})["ok"]); self.assertTrue(aat.verify_chain(plain)["ok"])
+            early = json.loads(json.dumps(plain)); early[1] = aat.tombstone(early[1], "x", "2020-01-01T00:00:00Z")
+            self.assertTrue(any("deleted_at earlier" in p["why"] for p in aat.verify_chain(early)["problems"]))
+
     def test_merkle_epochs_against_cryptovalid_and_exports(self):
         from omega_evidence.interop import aat
         with tempfile.TemporaryDirectory() as tmp:

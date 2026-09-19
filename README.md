@@ -134,7 +134,18 @@ would hide a dropped record); every format check uses fullmatch (a trailing newl
 of any length parse on Python 3.9-3.13; the synthesised close never claims `task_complete` (`trigger: "export"`,
 `close_basis`); §13 fields on a non-decision record are a problem; an L2+ session recorded by the agent itself is a
 warning (§5.2 SHOULD). Also declared: an agent whose key is compromised can tombstone its own self-recorded records with a
-valid signature — only an independent recorder or an anchored epoch reveals it.
+valid signature — only an independent recorder or an anchored epoch reveals it. Round 4 added: independence is decided
+for the whole session (genesis `recording_mode`, or any record naming a recording component other than the agent) and
+required of every record, tombstones and appended tails included — a record cannot opt out by omitting the field; one
+recorder per session; a whole epoch missing from the chain is a problem under `require_complete` (an attacker cuts on
+an epoch boundary); a record's `external_timestamp` is verified over the record's own digest only — a token over some
+Merkle root never counts for a record (adding the token changes the record's leaf hash, so no inclusion proof can bind
+the two: epoch-root tokens live in the epoch anchor); audit paths are built bottom-up (O(n log n), 4 000 records in
+well under a second instead of quadratic); `anchor_epoch` refuses integers beyond 2^53 like every export; uppercase or
+braced session ids are the same session; `keys={}` still means every record must be signed; a tombstone's `deleted_at`
+before the record's own timestamp is a problem. Not checked and stated: §4.3 (a pre-execution record before every
+state-changing action of a high-risk system) — which actions change state is not in the record; `time_verified` in
+`verify_epochs` is the only green about time, `ok` is about structure.
 
 Corrections to 0.7.0 (measured, not softened): 0.7.0 implemented -00 and its exports **violated the draft's REQUIRED
 per-action `action_detail` fields** (`tool_name`, `parameters_hash`, `decision_type` were not emitted; the verifier did
