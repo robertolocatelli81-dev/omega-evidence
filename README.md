@@ -153,7 +153,18 @@ low-S, reported to the author); §13 field names inside the `action_detail` of a
 unknown fields with a warning (the draft reserves only `aat_`), at the record's top level they are a problem;
 `environment_attestation` must be base64 or a URI; `inclusion_proof` is OPTIONAL — a complete epoch rebuilds without them;
 a CSV cell that would start a spreadsheet formula is prefixed with `'` (the CSV is never the record); a leap second, an
-empty `agent_version` and a negative `margin_epsilon` are refused.
+empty `agent_version` and a negative `margin_epsilon` are refused. Round 6 added: epoch membership is decided by the leaf
+hash, not by `record_id` (a copied record with altered content is not a member); an RFC 3161 anchoring that fails raises
+instead of returning an unanchored anchor, and an anchor declaring a TSA without a token is malformed; the exported
+`record_phase_basis` says what is true — the phase is DERIVED from the omega outcome, the omega library gates nothing — and an
+omega entry whose decision and outcome contradict each other (`consistent: false`) is refused; a tombstone of a tombstone
+keeps the original record's hash; **who may delete is pinned**: in a self-recorded session a tombstone must be signed by
+the agent (`agent_kid`) or by one of `tombstone_kids`, any other key in the key set is a problem, and without either the
+signer is named in a warning; the synthesised close states `session_outcome: "unknown"` (its `outcome` is that of the
+close action, declared — the draft's synthetic close for orphaned sessions describes a crash a monitor detected, which an
+export cannot claim either); `1e999` in a JSONL is refused as non-finite, the `--epochs` file cannot crash the CLI, an
+unparsable `pubkey_pem` or a non-dict `keys` is reported in `keys_rejected`; every guard of rounds 1-6 is now asserted by
+its own message in the tests, on chains re-linked and re-signed so that neither `prev_hash` nor the signature masks it.
 
 Corrections to 0.7.0 (measured, not softened): 0.7.0 implemented -00 and its exports **violated the draft's REQUIRED
 per-action `action_detail` fields** (`tool_name`, `parameters_hash`, `decision_type` were not emitted; the verifier did

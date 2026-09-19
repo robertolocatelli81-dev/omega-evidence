@@ -1624,6 +1624,72 @@ class TestAAT04(unittest.TestCase):
             bad_uri = json.loads(json.dumps(plain)); bad_uri[-1]["agent_id"] = "urn:x y"
             self.assertTrue(any("agent_id is not a URI" in p["why"] for p in aat.verify_chain(bad_uri)["problems"]))
 
+    def test_round6_guards_asserted_by_message(self):
+        """Review round 6 (Opus p3/p4): every guard the earlier tests reached only through prev_hash or the signature is
+        asserted by its own message; deleting authorities are pinned (agent_kid / tombstone_kids); the synthesised close
+        states session_outcome unknown; hostile CLI/JSON inputs are verdicts, not tracebacks."""
+        from omega_evidence.interop import aat
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography assente")
+        priv, pub = aat.generate_p256_keypair(); kid = aat.p256_thumbprint(pub)
+        privR, pubR = aat.generate_p256_keypair(); kidR = aat.p256_thumbprint(pubR)
+        privX, pubX = aat.generate_p256_keypair(); kidX = aat.p256_thumbprint(pubX)
+        ks = {kid: pub, kidR: pubR, kidX: pubX}
+
+        def resign(chain, key, start=1):
+            out = json.loads(json.dumps(chain))
+            for k in range(start, len(out)):
+                body = {kk: v for kk, v in out[k].items() if kk not in ("signature", "sig_alg", "signer_kid", "signature_classical", "signer_kid_classical")}
+                if k > 0:
+                    body["parent_record_id"] = out[k - 1]["record_id"]; body["prev_hash"] = aat.record_hash(out[k - 1])
+                out[k] = aat.sign_record(body, key)
+            return out
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = self._log(tmp)
+            ind = next(iter(aat.from_omega(entries, "1.0", private_key_pem=privR, recording_component="urn:gw:x").values()))
+            # 1. omission of recording_component, re-signed by the recorder itself: the omission rule, by message
+            om = json.loads(json.dumps(ind)); om[2].pop("recording_component"); om = resign(om, privR, start=2)
+            self.assertTrue(any("every record MUST carry recording_component" in p["why"] for p in aat.verify_chain(om, keys=ks, agent_kid=kid)["problems"]))
+            # 2. session_end not last, chain re-linked: §8.3 rule by message
+            es = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv, close=True).values()))
+            moved = json.loads(json.dumps(es)); moved.insert(2, moved.pop()); moved = resign(moved, priv, start=1)
+            self.assertTrue(any("session_end is not the last record" in p["why"] for p in aat.verify_chain(moved, keys=ks)["problems"]))
+            # 3. deleting authorities: a foreign key in `keys` cannot tombstone a self-recorded record when agent_kid is pinned
+            t = json.loads(json.dumps(es)); t[2] = aat.tombstone(t[2], "x", "2026-09-19T22:00:00Z", key=privX)
+            v = aat.verify_chain(t, keys=ks, agent_kid=kid); self.assertTrue(any("not a deleting authority" in p["why"] for p in v["problems"]))
+            self.assertTrue(aat.verify_chain(t, keys=ks, agent_kid=kid, tombstone_kids=[kidX])["ok"])
+            v = aat.verify_chain(t, keys=ks); self.assertTrue(v["ok"]); self.assertTrue(any("not pinned" in w["why"] for w in v["warnings"]))
+            ta = json.loads(json.dumps(es)); ta[2] = aat.tombstone(ta[2], "x", "2026-09-19T22:00:00Z", key=priv)
+            self.assertTrue(aat.verify_chain(ta, keys=ks, agent_kid=kid)["ok"])                    # the agent may delete its own
+            # 4. key algorithm mismatch by message: a record claiming ML-DSA-65 under a P-256 kid
+            alg = json.loads(json.dumps(es)); alg[-1]["sig_alg"] = "ML-DSA-65"
+            self.assertTrue(any("record says ML-DSA-65" in p["why"] for p in aat.verify_chain(alg, keys=ks)["problems"]))
+            # 5. signer_kid_classical == signer_kid on an unsigned-classical path; tombstoned genesis; close states unknown
+            same = json.loads(json.dumps(es)); same[-1]["signer_kid_classical"] = same[-1]["signer_kid"]; same[-1]["signature_classical"] = same[-1]["signature"]; same[-1]["sig_alg"] = "ML-DSA-65"
+            self.assertTrue(any("two DISTINCT keys" in p["why"] for p in aat.verify_chain(same, keys=ks)["problems"]))
+            g = json.loads(json.dumps(es)); g[0] = aat.tombstone(g[0], "x", "2026-09-19T22:00:00Z", key=priv)
+            self.assertTrue(any("8.1" in p["why"] for p in aat.verify_chain(g, keys=ks)["problems"]))
+            self.assertEqual(es[-1]["action_detail"]["session_outcome"], "unknown")
+            from omega_evidence.pqbackends import mldsa
+            if mldsa.available():
+                kp = mldsa.MlDsaFileSigner.keygen(os.path.join(tmp, "pq.key")); signer = mldsa.MlDsaFileSigner(os.path.join(tmp, "pq.key"))
+                pkid = aat.mldsa65_thumbprint(base64.b64decode(kp["public_key_b64"]))
+                pq = next(iter(aat.from_omega(entries, "1.0", pq_signer=signer).values()))
+                short = json.loads(json.dumps(pq)); short[-1]["signature"] = short[-1]["signature"][:-8]
+                self.assertTrue(any("3309" in p["why"] or "not canonical" in p["why"] for p in aat.verify_chain(short, keys={pkid: kp["public_key_b64"]})["problems"]))
+            # 6. hostile verifier-side inputs are verdicts
+            self.assertFalse(aat.verify_chain(es, keys=[1, 2])["ok"])
+            v = aat.verify_chain(es, pubkey_pem=b"junk"); self.assertFalse(v["ok"]); self.assertTrue(any("pubkey_pem" in k for k in v["keys_rejected"]))
+            with self.assertRaises(ValueError):
+                aat.from_jsonl('{"a": 1e999}\n')
+            import subprocess, sys as _sys
+            open(os.path.join(tmp, "c.jsonl"), "w").write(aat.to_jsonl(es)); open(os.path.join(tmp, "deep.json"), "w").write("[" * 100000)
+            r = subprocess.run([_sys.executable, "-m", "omega_evidence.interop.aat", "verify", os.path.join(tmp, "c.jsonl"), "--epochs", os.path.join(tmp, "deep.json")],
+                               capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            self.assertEqual(r.returncode, 2); self.assertIn('"ok": false', r.stdout); self.assertNotIn("Traceback", r.stderr)
+
     def test_merkle_epochs_against_cryptovalid_and_exports(self):
         from omega_evidence.interop import aat
         with tempfile.TemporaryDirectory() as tmp:

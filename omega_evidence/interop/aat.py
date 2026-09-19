@@ -530,8 +530,12 @@ def close_record(chain: List[Dict[str, Any]], synthesised: bool = False, timesta
         raise ValueError("close record timestamp earlier than the last record (§3.3: timestamps MUST NOT be backdated)")
     dur = int((_parse_ts(ts) - _parse_ts(chain[0]["timestamp"])).total_seconds() * 1000)
     # a close written at export time cannot claim how the session ended: trigger "export", state unknown (never task_complete)
+    # DECLARED: `outcome` is the outcome of the close ACTION (the chain was sealed), not of the session; the draft's synthetic
+    # close for orphaned sessions (§8.3: outcome "failure", trigger "crash_recovery") describes a crash a monitor detected —
+    # an export knows neither a crash nor a completion, so it says "unknown" in session_outcome and "export" in trigger.
     detail = {"event": "session_end", "previous_state": "unknown" if synthesised else "active", "new_state": "closed",
               "trigger": trigger or ("export" if synthesised else "task_complete"),
+              "session_outcome": "unknown" if synthesised else "completed",
               "session_hash": hashlib.sha256(b"".join(prev_hashes)).hexdigest(),
               "record_count": len(chain) + 1, "duration_ms": dur}
     if synthesised:
@@ -910,7 +914,8 @@ def _check_optional(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], w
 def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = None,
                  keys: Optional[Dict[str, Any]] = None, agent_kid: Optional[str] = None,
                  require_signatures: bool = False, consequential: Optional[Callable[[Dict[str, Any]], bool]] = None,
-                 external_timestamp_ca_file: Optional[str] = None, allow_legacy_03: bool = False) -> Dict[str, Any]:
+                 external_timestamp_ca_file: Optional[str] = None, allow_legacy_03: bool = False,
+                 tombstone_kids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Verify one AAT (-04) chain offline, fail-closed. Checks (draft sections): mandatory fields and vocabularies
     (§3.1), UUID v4 identifiers, RFC 3339 UTC monotonic timestamps, sizes and the aat_ prefix (§3.3), §7 REQUIRED
     action_detail fields, record_phase rules (§4.2, §8.1, §8.3), recording independence (§5.1/5.2 — with
@@ -928,8 +933,11 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     record naming a recording component other than the agent) and then required of every record. DECLARED DEVIATION: a
     tombstone must carry a valid signature of the deleting authority over the tombstone content (`tombstone(..., key=)`);
     the draft's retained original signature cannot verify and is reported as such; a tombstoned genesis is refused
-    (§8.1 wins over §9.3's "any record"). With `keys` (even empty) or `pubkey_pem`, every record must be signed. Returns {ok, records, problems, warnings, signatures_verified, hybrid_verified,
-    tombstones, keys_rejected, draft, scope}."""
+    (§8.1 wins over §9.3's "any record"). WHO may delete: a tombstone's signer must be the agent (`agent_kid`) in a
+    self-recorded session, or one of `tombstone_kids` (the deleting authorities the relying party names); a tombstone by any
+    other key in `keys` is a problem, and without `agent_kid`/`tombstone_kids` a signed tombstone is accepted with a warning
+    naming its signer (the authority is not pinned). With `keys` (even empty) or `pubkey_pem`, every record must be signed.
+    Returns {ok, records, problems, warnings, signatures_verified, hybrid_verified, tombstones, keys_rejected, draft, scope}."""
     problems: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
     if not isinstance(records, list):
@@ -961,7 +969,7 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     for i, r in enumerate(records):
         if not isinstance(r, dict):
             problems.append({"i": i, "why": "record is not an object"}); continue      # prev is NOT reset (no genesis mid-chain)
-        rid = str(r.get("record_id"))
+        rid = r.get("record_id") if isinstance(r.get("record_id"), str) else repr(type(r.get("record_id")))
         if rid in seen_ids:
             problems.append({"i": i, "why": "duplicate record_id"})
         seen_ids.add(rid)
@@ -1074,6 +1082,14 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
         if not session_independent and agent_kid is not None and "signature" in r and not is_tomb \
                 and isinstance(r.get("signer_kid"), str) and agent_kid not in (r["signer_kid"], r.get("signer_kid_classical")):
             problems.append({"i": i, "why": "self-recorded record not signed by the agent's key (§6.3 step 3a)"})
+        if is_tomb and "signature" in r and isinstance(r.get("signer_kid"), str):
+            allowed = set(tombstone_kids or [])
+            if not session_independent and agent_kid is not None:
+                allowed.add(agent_kid)
+            if allowed and r["signer_kid"] not in allowed and r.get("signer_kid_classical") not in allowed:
+                problems.append({"i": i, "why": f"tombstone signed by {r['signer_kid']!r}, not a deleting authority (agent_kid / tombstone_kids)"})
+            elif not allowed:
+                warnings.append({"i": i, "why": f"tombstone signed by {r['signer_kid']!r}: deleting authority not pinned (pass agent_kid or tombstone_kids)"})
         if not low and i == 0 and not session_independent:
             warnings.append({"i": i, "why": "L2+ session recorded by the agent itself (§5.2 SHOULD: independent recording)"})
         if low is False and ta is not None and ta.get("downgraded") is True:
@@ -1329,6 +1345,9 @@ class _KeySet:
         self.fallback: Optional[bytes] = pubkey_pem
         self.allow_legacy = False
         self.bad: List[str] = []
+        if keys is not None and not isinstance(keys, dict):
+            self.bad.append("<keys is not a dict>")
+            keys = {}
         for kid, k in (keys or {}).items():
             try:
                 if isinstance(k, str):
@@ -1347,8 +1366,9 @@ class _KeySet:
         if pubkey_pem is not None:
             try:
                 self.by_kid.setdefault(p256_thumbprint(pubkey_pem), ("ES256", pubkey_pem))
-            except Exception:  # noqa: BLE001 — no cryptography, or not a P-256 key: fallback stays unresolved
-                pass
+            except Exception:  # noqa: BLE001 — no cryptography, or not a P-256 key: reported, never silent
+                self.bad.append("<pubkey_pem is not a P-256 public PEM>")
+                self.fallback = None
 
     def resolve(self, kid: Optional[str], alg: str) -> Optional[Tuple[str, bytes]]:
         if kid is None:
@@ -1472,7 +1492,7 @@ def from_jsonl(text: str) -> List[Dict[str, Any]]:
         if line == "":
             continue
         try:
-            obj = json.loads(line, parse_constant=_no_constant, object_pairs_hook=_no_dup_keys)
+            obj = json.loads(line, parse_constant=_no_constant, parse_float=_finite_float, object_pairs_hook=_no_dup_keys)
         except json.JSONDecodeError as ex:
             raise ValueError(f"JSONL line {n + 1}: {ex.msg}") from None
         except ValueError as ex:
@@ -1487,6 +1507,13 @@ def from_jsonl(text: str) -> List[Dict[str, Any]]:
 
 def _no_constant(name: str) -> Any:
     raise ValueError(f"{name} is not JSON")
+
+
+def _finite_float(text: str) -> float:
+    f = float(text)
+    if f != f or f in (float("inf"), float("-inf")):
+        raise ValueError(f"number {text} is not representable as a finite double")
+    return f
 
 
 def _no_dup_keys(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
@@ -1553,6 +1580,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     v.add_argument("--tsa-ca", help="PEM trust anchor for RFC 3161 tokens (epoch anchors and external_timestamp)")
     v.add_argument("--allow-legacy-03", action="store_true", help="accept signed records without signer_kid, resolved with --pubkey (-03 rule)")
     v.add_argument("--epochs-complete", action="store_true", help="an epoch with anchored leaves missing from the chain is a problem")
+    v.add_argument("--tombstone-kid", action="append", default=[], help="kid of a deleting authority allowed to sign tombstones (repeatable)")
     c = sub.add_parser("csv", help="print the chain as §10.3 CSV (lossy, not authoritative)")
     c.add_argument("chain")
     a = p.parse_args(argv)
@@ -1570,16 +1598,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"})); return 2
     try:
         out = verify_chain(records, pubkey_pem=pub, keys=keys or None, agent_kid=a.agent_kid, require_signatures=a.require_signatures,
-                           external_timestamp_ca_file=a.tsa_ca, allow_legacy_03=a.allow_legacy_03)
+                           external_timestamp_ca_file=a.tsa_ca, allow_legacy_03=a.allow_legacy_03, tombstone_kids=a.tombstone_kid or None)
     except Exception as ex:  # noqa: BLE001 — a verifier prints a verdict, never a traceback
         print(json.dumps({"ok": False, "error": f"verifier error: {type(ex).__name__}: {ex}"})); return 2
     if a.epochs:
         try:
             with open(a.epochs, encoding="utf-8") as f:
-                anchors = json.load(f)
+                anchors = json.load(f, parse_constant=_no_constant)
             if not isinstance(anchors, list):
                 raise ValueError("epochs file must be a JSON array")
-        except (OSError, ValueError) as ex:
+        except (OSError, ValueError, RecursionError) as ex:
             print(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"})); return 2
         try:
             out["epochs"] = verify_epochs(records, anchors, tsa_ca_file=a.tsa_ca, require_complete=a.epochs_complete)
