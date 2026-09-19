@@ -21,7 +21,7 @@ but do not derive from, this toolkit.
 pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
 
 # or straight from the tagged source
-pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.5.0
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.8.0
 ```
 
 Release artifacts (`.whl` / `.tar.gz`) are attached to each
@@ -127,7 +127,14 @@ survives hostile anchors and records (non-objects, unhashable ids, NaN, deep nes
 one epoch and reports anchors no record accounts for; integers beyond the double range are "not canonicalizable"
 instead of an `OverflowError`; the export refuses a missing session, an outcome the runtime never writes, a duplicate
 record identity, a backdated close and a `recording_component` equal to the agent; leap seconds and 7-9 digit fractions
-parse.
+parse. Round 3 added: one agent per chain (`agent_id` is checked against the genesis, the export refuses two agents in
+one session); with `agent_kid`, a self-recorded record signed by another key in the key set is a problem (§6.3 step 3a
+— a key rotation mid-session needs a new session); `leaf_count` is mandatory in an epoch anchor (an anchor without it
+would hide a dropped record); every format check uses fullmatch (a trailing newline is not a digest); fractional seconds
+of any length parse on Python 3.9-3.13; the synthesised close never claims `task_complete` (`trigger: "export"`,
+`close_basis`); §13 fields on a non-decision record are a problem; an L2+ session recorded by the agent itself is a
+warning (§5.2 SHOULD). Also declared: an agent whose key is compromised can tombstone its own self-recorded records with a
+valid signature — only an independent recorder or an anchored epoch reveals it.
 
 Corrections to 0.7.0 (measured, not softened): 0.7.0 implemented -00 and its exports **violated the draft's REQUIRED
 per-action `action_detail` fields** (`tool_name`, `parameters_hash`, `decision_type` were not emitted; the verifier did
@@ -266,26 +273,18 @@ python3 tests/test_toolkit.py
 
 ## Releasing (maintainers)
 
-Releases publish to PyPI via **Trusted Publishing (OIDC)** — no API token is
-stored anywhere. Two halves:
+Distribution is the **GitHub Release** and the author's PEP 503 index (`https://robertolocatelli81-dev.github.io/pypi/`,
+sha256-pinned to the release assets); publication on PyPI was dropped by decision of the author on 15 September 2026.
+A release ships the wheel and sdist, a CycloneDX SBOM, a CRA evidence pack (ledger, pack, AWS KMS Ed25519 signature,
+trust store) and `SHA256SUMS`; `release-build.yml` rebuilds the distributions, checks their metadata and runs the tests
+on every published release. Install:
 
-1. **One-time PyPI registration** (owner). Because the project does not exist on
-   PyPI yet, register a **pending publisher** first: pypi.org → *Your account* →
-   *Publishing* → *Add a pending publisher* → GitHub, with:
-   - PyPI Project Name: `omega-evidence`
-   - Owner: `robertolocatelli81-dev`
-   - Repository: `omega-evidence`
-   - Workflow: `publish.yml`
-   - Environment: `pypi`
+```bash
+pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
+```
 
-   (After the first successful publish the project exists, and the same entry
-   appears under the project's own *Publishing* settings.)
-2. **Cut a release**: create a GitHub Release (tag e.g. `v0.1.0`). The
-   `publish.yml` workflow builds, `twine check`s, runs the tests, and publishes
-   to PyPI using short-lived OIDC credentials.
-
-CI (`ci.yml`) runs the test suite on every push and pull request across
-Python 3.9 / 3.11 / 3.13.
+CI (`ci.yml`) runs the test suite on every push and pull request across Python 3.9 / 3.11 / 3.13, with and without
+`cryptography`, and the differential oracle with Go 1.27, JDK 27 and Node 24.
 
 ## Contact, pilots, citation
 

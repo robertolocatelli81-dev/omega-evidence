@@ -105,8 +105,7 @@ RECORD_MAX_BYTES = 256 * 1024
 _SESSION_HASH_NOTE = "hex(SHA-256(prev_hash(1) || ... || prev_hash(N))) over the raw 32-byte digests, N = the close record"
 
 # omega → AAT (lossy, declared)
-_ACTION_MAP = {"tool_call": "tool_call", "tool_response": "tool_response", "decision": "decision",
-               "delegation": "delegation", "escalation": "escalation", "error": "error", "lifecycle": "lifecycle",
+_ACTION_MAP = {"tool_call": "tool_call", "decision": "decision",                       # the two whose §7 fields are derivable
                "file_write": "tool_call", "file_read": "tool_call", "command_exec": "tool_call", "network": "tool_call"}
 _OUTCOME_MAP = {"executed": "success", "blocked": "denied", "pending_approval": "escalated"}   # the three the runtime writes
 # §4.1: the omega runtime writes `blocked` and `pending_approval` records as the enforcement decision, before
@@ -191,6 +190,8 @@ def jcs(obj: Any, strict: bool = True) -> bytes:
                 parts.append(enc(i, depth + 1))
             return "[" + ",".join(parts) + "]"
         if isinstance(x, dict):
+            if not all(isinstance(k, str) for k in x):
+                raise TypeError("JCS: object keys must be strings")
             keys = sorted(x.keys(), key=lambda k: k.encode("utf-16-be"))
             parts = []
             for k in keys:
@@ -275,12 +276,14 @@ def root_from_path(leaf: bytes, path: List[Dict[str, Any]]) -> bytes:
     return h
 
 
-_RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d{1,9})?([Zz]|[+-]\d{2}:\d{2})$")
-_URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:.+")
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_NONCE = re.compile(r"^[0-9a-f]{32,}$")
-_SHA256_PREFIXED = re.compile(r"^sha256:[0-9a-f]{64}$")
-_B64U = re.compile(r"^[A-Za-z0-9_\-]+$")
+# `$` would accept a trailing newline: every format check uses fullmatch semantics (\Z)
+_RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})\Z")
+_URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:[^\r\n]+\Z")
+_HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
+_NONCE = re.compile(r"^[0-9a-f]{32,}\Z")
+_SHA256_PREFIXED = re.compile(r"^sha256:[0-9a-f]{64}\Z")
+_B64U = re.compile(r"^[A-Za-z0-9_\-]+\Z")
+_ISO2 = re.compile(r"^[A-Z]{2}\Z")
 
 
 # ── export from an omega AgentEvidenceLog ledger ─────────────────────────────────────────────
@@ -290,16 +293,21 @@ def _rfc3339(ts: str) -> str:
     t = str(ts)
     if not _RFC3339.match(t):
         raise ValueError(f"not RFC 3339 (extended format with offset required): {t!r} — an evidence export never invents a time")
-    d = _parse_ts(t).astimezone(timezone.utc)
-    return d.strftime("%Y-%m-%dT%H:%M:%S.") + f"{d.microsecond // 1000:03d}Z"
+    try:
+        d = _parse_ts(t).astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        raise ValueError(f"not a representable instant: {t!r}") from None
+    return f"{d.year:04d}-" + d.strftime("%m-%dT%H:%M:%S.") + f"{d.microsecond // 1000:03d}Z"
 
 
 def _parse_ts(ts: str) -> datetime:
+    """RFC 3339 → aware datetime for COMPARISON: fraction truncated/padded to 6 digits (Python < 3.11 parses only 3 or 6),
+    a leap second (:60) compared as 59.999999, lowercase t/z accepted."""
     t = str(ts)
     t = t[:10] + "T" + t[11:] if len(t) > 10 else t
-    if t[17:19] == "60":                                  # RFC 3339 leap second: compared as 59.999999 (Python has no :60)
-        m = re.match(r"^(\.\d+)?(.*)$", t[19:])
-        t = t[:17] + "59.999999" + (m.group(2) if m else "")
+    t = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], t, count=1)
+    if t[17:19] == "60":
+        t = t[:17] + "59.999999" + t[26:] if t[19:20] == "." else t[:17] + "59.999999" + t[19:]
     return datetime.fromisoformat(t[:-1] + "+00:00" if t.endswith(("Z", "z")) else t)
 
 
@@ -361,6 +369,8 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
         raise ValueError(f"trust_level must be one of {TRUST_LEVELS}")
     if recording_component is not None and not _URI.match(str(recording_component)):
         raise ValueError("recording_component must be a URI (scheme:...)")
+    if recording_component is not None and private_key_pem is None and pq_signer is None:
+        raise ValueError("independent recording MUST be signed by the recorder (§5.2): pass private_key_pem and/or pq_signer")
     chains: Dict[str, List[Dict[str, Any]]] = {}
     prevs: Dict[str, Dict[str, Any]] = {}
     seeds_seen: set = set()
@@ -444,6 +454,8 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
             chains[sid] = [gen]
             prevs[sid] = gen
         prev = prevs[sid]
+        if rec["agent_id"] != prev["agent_id"]:
+            raise ValueError("two agents in one omega session: an AAT chain is one session of one agent — refused, not merged")
         rec["parent_record_id"] = prev["record_id"]
         rec["prev_hash"] = record_hash(prev)
         if e.get("human_approver"):
@@ -463,7 +475,7 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
 
 
 def close_record(chain: List[Dict[str, Any]], synthesised: bool = False, timestamp: Optional[str] = None,
-                 trigger: str = "task_complete") -> Dict[str, Any]:
+                 trigger: Optional[str] = None) -> Dict[str, Any]:
     """§8.3 session close record for `chain` (unsigned; sign it before appending if the chain is signed).
     `session_hash` = hex(SHA-256(prev_hash(1) || ... || prev_hash(N))) over the raw digests, N being the close
     record itself — so it includes the hash of the last existing record. Timestamp = the last record's unless given."""
@@ -475,11 +487,14 @@ def close_record(chain: List[Dict[str, Any]], synthesised: bool = False, timesta
     if _parse_ts(ts) < _parse_ts(last["timestamp"]):
         raise ValueError("close record timestamp earlier than the last record (§3.3: timestamps MUST NOT be backdated)")
     dur = int((_parse_ts(ts) - _parse_ts(chain[0]["timestamp"])).total_seconds() * 1000)
-    detail = {"event": "session_end", "previous_state": "active", "new_state": "closed", "trigger": trigger,
+    # a close written at export time cannot claim how the session ended: trigger "export", state unknown (never task_complete)
+    detail = {"event": "session_end", "previous_state": "unknown" if synthesised else "active", "new_state": "closed",
+              "trigger": trigger or ("export" if synthesised else "task_complete"),
               "session_hash": hashlib.sha256(b"".join(prev_hashes)).hexdigest(),
               "record_count": len(chain) + 1, "duration_ms": dur}
     if synthesised:
         detail["synthesised_by"] = "omega_evidence.interop.aat"
+        detail["close_basis"] = "synthesised at export: the omega ledger carries no session end; this record only seals the chain"
     rec = {"record_id": _uuid4_from(f"omega-close:{last['session_id']}:{record_hash(last, strict=False)}"),
            "timestamp": ts, "agent_id": last["agent_id"], "agent_version": last["agent_version"],
            "session_id": last["session_id"], "action_type": "lifecycle", "action_detail": detail,
@@ -567,7 +582,7 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
     by_id = {}
     for a in anchors if isinstance(anchors, list) else []:
         if not isinstance(a, dict) or not _HEX64.match(str(a.get("merkle_root", ""))) or not isinstance(a.get("epoch_id"), str) \
-                or ("leaf_count" in a and not (isinstance(a["leaf_count"], int) and not isinstance(a["leaf_count"], bool) and a["leaf_count"] > 0)) \
+                or not (isinstance(a.get("leaf_count"), int) and not isinstance(a.get("leaf_count"), bool) and a["leaf_count"] > 0) \
                 or ("tsa" in a and not (isinstance(a["tsa"], dict) and isinstance(a["tsa"].get("token"), (str, type(None))))):
             problems.append({"epoch": a.get("epoch_id") if isinstance(a, dict) else None,
                              "why": "anchor malformed (epoch_id string, merkle_root hex, leaf_count positive integer, tsa object with a string token)"})
@@ -710,6 +725,8 @@ def _check_detail(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], war
                                                              "output_digest", "environment_attestation", "margin_reproducible",
                                                              "decision_margin", "margin_epsilon")}}
     rc = src.get("reproducibility_class")
+    if at != "decision" and any(k in src for k in CLOSURE_DIGESTS + ("inference_config", "environment", "reproducibility_class", "output_digest")):
+        problems.append({"i": i, "why": "reproducibility fields on a non-decision record (§13.3: decision records only)"})
     if rc is not None and rc not in REPRODUCIBILITY_CLASSES:
         problems.append({"i": i, "why": f"reproducibility_class not in {REPRODUCIBILITY_CLASSES} (§13.3)"})
     for name in CLOSURE_DIGESTS:
@@ -718,8 +735,6 @@ def _check_detail(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], war
     if "output_digest" in src and not _hex64(src["output_digest"]):
         problems.append({"i": i, "why": "output_digest is not a lowercase hex SHA-256 (§13.3)"})
     if rc == "reproducible":
-        if at != "decision":
-            problems.append({"i": i, "why": "reproducibility_class on a non-decision record (§13.3)"})
         missing = [n for n in CLOSURE_DIGESTS if n not in src]
         ic, env = src.get("inference_config"), src.get("environment")
         if not isinstance(ic, dict) or any(k not in ic for k in ("temperature", "top_k", "top_p", "seed", "max_tokens")):
@@ -764,7 +779,7 @@ def _check_optional(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], w
             for x in dr:
                 if x not in DENY_REASONS and "_" not in x.strip("_"):
                     warnings.append({"i": i, "why": f"deny_reasons code {x!r} neither registered nor prefixed (SHOULD)"})
-    if "jurisdiction" in r and not (isinstance(r["jurisdiction"], str) and re.match(r"^[A-Z]{2}$", r["jurisdiction"])):
+    if "jurisdiction" in r and not (isinstance(r["jurisdiction"], str) and _ISO2.match(r["jurisdiction"])):
         problems.append({"i": i, "why": "jurisdiction is not an ISO 3166-1 alpha-2 code (§3.2)"})
     ho = r.get("human_override")
     if ho is not None and not (isinstance(ho, dict) and isinstance(ho.get("operator_id"), str)):
@@ -825,9 +840,14 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     problem unless `allow_legacy_03=True`, which then resolves it with `pubkey_pem` (the -03 rule). A signature that cannot be verified on this host (no `cryptography`, or no ML-DSA in it)
     is a problem, never a pass. `require_signatures=True` makes an unsigned record a problem. `external_timestamp`
     tokens are verified with openssl when `external_timestamp_ca_file` is given (else recorded, NOT verified).
-    Returns {ok, records, problems, warnings, signatures_verified, hybrid_verified, tombstones, draft, scope}."""
+    With `agent_kid`, a self-recorded record signed by another key is a problem (§6.3 step 3a; a key rotation mid-session
+    therefore needs a new session). Returns {ok, records, problems, warnings, signatures_verified, hybrid_verified,
+    tombstones, keys_rejected, draft, scope}."""
     problems: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
+    if not isinstance(records, list):
+        return {"ok": False, "records": 0, "problems": [{"i": -1, "why": "records is not a list"}], "warnings": [],
+                "signatures_verified": 0, "hybrid_verified": 0, "tombstones": 0, "keys_rejected": [], "draft": AAT_DRAFT, "scope": ""}
     keyset = _KeySet(keys, pubkey_pem)
     keyset.allow_legacy = allow_legacy_03
     prev: Optional[Dict[str, Any]] = None
@@ -837,6 +857,7 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     if not records:
         problems.append({"i": -1, "why": "empty chain: nothing to verify (not a valid audit trail)"})
     session0 = None
+    agent0 = None
     last_ts = None
     recording_mode = None
     prev_hashes_raw: List[bytes] = []
@@ -891,6 +912,10 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
             session0 = r.get("session_id")
         elif r.get("session_id") != session0:
             problems.append({"i": i, "why": "session_id differs: one chain must be one session (§8)"})
+        if agent0 is None:
+            agent0 = r.get("agent_id")
+        elif r.get("agent_id") != agent0:
+            problems.append({"i": i, "why": "agent_id differs from the genesis record: one chain is one session of one agent (§3.1/§8)"})
         if not _URI.match(str(r.get("agent_id", ""))):
             problems.append({"i": i, "why": "agent_id is not a URI (scheme:...)"})
         canonical_ok = True
@@ -946,6 +971,13 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 warnings.append({"i": i, "why": "records name a recording component other than the agent but the genesis declares no recording_mode (§8.1 SHOULD)"})
         if recording_mode == "self" and foreign_rc:
             problems.append({"i": i, "why": "self-recording: recording_component MUST equal agent_id when present (§5.1)"})
+        if not (recording_mode == "independent" or foreign_rc) and agent_kid is not None and "signature" in r and not is_tomb \
+                and isinstance(r.get("signer_kid"), str) and agent_kid not in (r["signer_kid"], r.get("signer_kid_classical")):
+            problems.append({"i": i, "why": "self-recorded record not signed by the agent's key (§6.3 step 3a)"})
+        if not low and i == 0 and recording_mode != "independent" and not foreign_rc:
+            warnings.append({"i": i, "why": "L2+ session recorded by the agent itself (§5.2 SHOULD: independent recording)"})
+        if low is False and ta is not None and ta.get("downgraded") is True:
+            warnings.append({"i": i, "why": "trust_assignment.downgraded true on an L2+ record (§3.2: true only below the fail-safe default)"})
         # nonce uniqueness (§14.5)
         n = r.get("nonce")
         if isinstance(n, str):
@@ -1017,6 +1049,9 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 if ok:
                     signed_ok += 1
                     hybrid_ok += 1 if hyb else 0
+                elif is_tomb:
+                    problems.append({"i": i, "why": f"tombstone signature does not verify over the tombstone content ({why}): either the draft's "
+                                                    "retained original signature (unverifiable — this module requires the deleting authority's) or a forgery"})
                 else:
                     problems.append({"i": i, "why": f"signature invalid: {why}"})
         elif require_signatures or pubkey_pem is not None or keyset.by_kid:
@@ -1052,9 +1087,9 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                       "offline; does not prove the truth of the actions, only that the sequence was not altered since the "
                       "hashes were written. DECLARED LIMIT: without signatures the LAST record can be altered undetected "
                       "and a whole chain can be regenerated from scratch, and any record can be replaced by an unsigned "
-                      "tombstone (§9.3); even with signatures, truncation to a valid prefix is undetectable — signatures, "
-                      "a session close carried elsewhere, or an external anchor (verify_epochs with a verified TSA token) "
-                      "close that. Batch objects are checked by verify_epochs "
+                      "tombstone (§9.3); even with signatures, truncation to a valid prefix is undetectable here — signatures, "
+                      "a session close carried elsewhere, or an external anchor (verify_epochs with a verified TSA token and "
+                      "require_complete) make it detectable. Batch objects are checked by verify_epochs "
                       "against their anchors, not here.")}
 
 
@@ -1184,7 +1219,7 @@ class _KeySet:
         for kid, k in (keys or {}).items():
             try:
                 if isinstance(k, str):
-                    k = base64.b64decode(k, validate=True)
+                    k = k.encode() if k.lstrip().startswith("-----") else base64.b64decode(k, validate=True)
                 if isinstance(k, (bytes, bytearray)) and bytes(k).lstrip().startswith(b"-----"):
                     self.by_kid[str(kid)] = ("ES256", bytes(k))
                 elif isinstance(k, (bytes, bytearray)) and len(k) == 1952:
@@ -1213,10 +1248,13 @@ def _es256_verify(rec: Dict[str, Any], sig_b64u: str, pubkey_pem: bytes, msg: by
     except ImportError:
         return False, "cryptography not installed: signature NOT verified"
     try:
+        raw = _b64u_dec(sig_b64u)
+    except ValueError as ex:
+        return False, str(ex)
+    try:
         pk = serialization.load_pem_public_key(pubkey_pem)
         if not isinstance(pk, ec.EllipticCurvePublicKey) or pk.curve.name != "secp256r1":
             return False, "key is not P-256"
-        raw = _b64u_dec(sig_b64u)
         if len(raw) != 64:
             return False, "signature is not 64 bytes (IEEE P1363 r||s)"
         der = encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))

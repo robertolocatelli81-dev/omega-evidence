@@ -1266,7 +1266,14 @@ class TestAAT04(unittest.TestCase):
             with self.assertRaises(ValueError):
                 aat.jcs(json.loads("[" * 600 + "]" * 600))
             # independent recording MUST be signed (§5.2); the agent's key in the classical slot is caught too
-            ind = next(iter(aat.from_omega(entries, "1.0", recording_component="urn:gw:1").values()))
+            with self.assertRaises(ValueError):
+                aat.from_omega(entries, "1.0", recording_component="urn:gw:1")                  # independent MUST be signed: export refuses
+            ind = json.loads(json.dumps(next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv2, recording_component="urn:gw:1").values()))))
+            for r in ind:
+                for k in ("signature", "sig_alg", "signer_kid"):
+                    r.pop(k)
+            for k in range(1, len(ind)):
+                ind[k]["prev_hash"] = aat.record_hash(ind[k - 1])
             self.assertTrue(any("5.2" in p["why"] for p in aat.verify_chain(ind)["problems"]))
             from omega_evidence.pqbackends import mldsa
             if mldsa.available():
@@ -1372,10 +1379,10 @@ class TestAAT04(unittest.TestCase):
             with self.assertRaises(ValueError):
                 aat.close_record(es[:-1], timestamp="2000-01-01T00:00:00Z")
             # -03 fallback never applies to an independent recorder; independence declared with own component is a problem
-            ind = next(iter(aat.from_omega(entries, "1.0", recording_component="urn:gw:1").values()))
+            ind = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv, recording_component="urn:gw:1").values()))
             legacy = []
             for r in ind:
-                body = dict(r)
+                body = {k: v for k, v in r.items() if k not in ("signature", "sig_alg", "signer_kid")}
                 if legacy:
                     body["parent_record_id"] = legacy[-1]["record_id"]; body["prev_hash"] = aat.record_hash(legacy[-1])
                 body["signature"], _ = aat._es256_sign(aat._signing_input(body), priv)
@@ -1389,6 +1396,71 @@ class TestAAT04(unittest.TestCase):
             # leap second and 7-digit fractions are foreign-valid instants
             leap = json.loads(json.dumps(es)); leap[-2]["timestamp"] = "2026-12-31T23:59:59.1234567Z"; leap[-1]["timestamp"] = "2026-12-31T23:59:60Z"
             self.assertFalse(any("calendar" in p["why"] or "monotonic" in p["why"] for p in aat.verify_chain(leap)["problems"]))
+
+    def test_round3_attribution_regex_fraction_specific_messages(self):
+        """Review round 3 (2026-09-19): one agent per chain, the agent's key for self-recorded records (§6.3 3a),
+        leaf_count mandatory in anchors, fullmatch on every format check, fractions of any length (Python 3.9 parses only
+        3 or 6 digits), a synthesised close never claims task_complete, and the guards the earlier tests masked behind
+        prev_hash are asserted by their own message on the LAST record."""
+        from omega_evidence.interop import aat
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography assente")
+        priv, pub = aat.generate_p256_keypair(); kid = aat.p256_thumbprint(pub)
+        priv2, pub2 = aat.generate_p256_keypair(); kid2 = aat.p256_thumbprint(pub2)
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = self._log(tmp)
+            es = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv, close=True).values()))
+            self.assertEqual(es[-1]["action_detail"]["trigger"], "export"); self.assertIn("close_basis", es[-1]["action_detail"])
+            self.assertNotIn("task_complete", json.dumps(es))
+            # one agent per chain (verify) and per session (export)
+            two = json.loads(json.dumps(es)); two[2]["agent_id"] = "urn:omega:agent:someone-else"
+            self.assertTrue(any("one agent" in p["why"] for p in aat.verify_chain(two)["problems"]))
+            e2 = json.loads(json.dumps(entries)); e2[1]["agent_id"] = "bot-8"
+            with self.assertRaises(ValueError):
+                aat.from_omega(e2, "1.0")
+            # self-recorded chain signed by a non-agent key in the key set: problem when agent_kid is given
+            other = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv2, close=True).values()))
+            self.assertTrue(aat.verify_chain(other, keys={kid: pub, kid2: pub2})["ok"])
+            self.assertTrue(any("6.3 step 3a" in p["why"] for p in aat.verify_chain(other, keys={kid: pub, kid2: pub2}, agent_kid=kid)["problems"]))
+            self.assertTrue(aat.verify_chain(es, keys={kid: pub, kid2: pub2}, agent_kid=kid)["ok"])
+            # anchors without leaf_count are malformed (a dropped record would otherwise hide)
+            an = aat.anchor_epoch(es, epoch_id=aat._uuid4_from("e"))
+            nolc = {k: v for k, v in an.items() if k != "leaf_count"}
+            self.assertTrue(any("anchor malformed" in p["why"] for p in aat.verify_epochs(es[:3], [nolc])["problems"]))
+            # fullmatch: a trailing newline is not a hex digest / nonce / country code
+            plain = next(iter(aat.from_omega(entries, "1.0", close=True).values()))
+            for mut, word in ((lambda r: r[-1]["action_detail"].update({"session_hash": r[-1]["action_detail"]["session_hash"] + "\n"}), "session_hash"),
+                              (lambda r: r[-1].update({"nonce": "b" * 32 + "\n"}), "nonce"),
+                              (lambda r: r[-1].update({"jurisdiction": "IT\n"}), "jurisdiction"),
+                              (lambda r: r[-1]["action_detail"].update({"aat_x": 1}), "aat_ prefix")):
+                m = json.loads(json.dumps(plain)); mut(m)
+                self.assertTrue(any(word in p["why"] for p in aat.verify_chain(m)["problems"]), word)
+            # fractions of 1, 2, 7 and 12 digits parse (and compare) on every supported Python
+            for frac in (".5", ".12", ".1234567", ".123456789012"):
+                self.assertEqual(aat._parse_ts("2026-09-19T20:00:00" + frac + "Z").year, 2026)
+            self.assertEqual(aat._rfc3339("0999-01-01T00:00:00Z"), "0999-01-01T00:00:00.000Z")
+            # guards asserted by their own message on the last record (no prev_hash to mask them)
+            last = json.loads(json.dumps(es))
+            sig = last[-1]["signature"]; raw = aat._b64u_dec(sig); pad = "=" * (-len(sig) % 4)
+            alt = next(c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+                       if c != sig[-1] and base64.urlsafe_b64decode(sig[:-1] + c + pad) == raw)          # same bytes, non-canonical tail
+            last[-1]["signature"] = sig[:-1] + alt
+            self.assertTrue(any("not canonical" in p["why"] for p in aat.verify_chain(last, keys={kid: pub})["problems"]))
+            from omega_evidence.pqbackends import mldsa
+            if mldsa.available():
+                kp = mldsa.MlDsaFileSigner.keygen(os.path.join(tmp, "pq.key")); signer = mldsa.MlDsaFileSigner(os.path.join(tmp, "pq.key"))
+                pkid = aat.mldsa65_thumbprint(base64.b64decode(kp["public_key_b64"]))
+                hy = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv, pq_signer=signer).values()))
+                bc = json.loads(json.dumps(hy)); bc[-1]["signature_classical"] = hy[-2]["signature_classical"]
+                self.assertTrue(any("signature_classical invalid" in p["why"] for p in aat.verify_chain(bc, keys={pkid: kp["public_key_b64"], kid: pub})["problems"]))
+                self.assertTrue(any("record says" in p["why"] for p in aat.verify_chain(hy, keys={pkid: pub, kid: pub})["problems"]))   # ES256 key under the PQ kid
+            # §13 fields only on decision records; L2+ self-recorded is a warning
+            wrong = json.loads(json.dumps(plain)); wrong[1]["reproducibility_class"] = "reconstructable"
+            self.assertTrue(any("decision records only" in p["why"] for p in aat.verify_chain(wrong)["problems"]))
+            l2 = next(iter(aat.from_omega(entries, "1.0", trust_level="L2", close=True).values()))
+            self.assertTrue(any("5.2 SHOULD" in w["why"] for w in aat.verify_chain(l2)["warnings"]))
 
     def test_merkle_epochs_against_cryptovalid_and_exports(self):
         from omega_evidence.interop import aat
