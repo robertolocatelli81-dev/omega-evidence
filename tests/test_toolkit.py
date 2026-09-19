@@ -1455,7 +1455,7 @@ class TestAAT04(unittest.TestCase):
                 hy = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv, pq_signer=signer).values()))
                 bc = json.loads(json.dumps(hy)); bc[-1]["signature_classical"] = hy[-2]["signature_classical"]
                 self.assertTrue(any("signature_classical invalid" in p["why"] for p in aat.verify_chain(bc, keys={pkid: kp["public_key_b64"], kid: pub})["problems"]))
-                self.assertTrue(any("record says" in p["why"] for p in aat.verify_chain(hy, keys={pkid: pub, kid: pub})["problems"]))   # ES256 key under the PQ kid
+                v = aat.verify_chain(hy, keys={pkid: pub, kid: pub}); self.assertFalse(v["ok"]); self.assertEqual(v["keys_rejected"], [pkid])   # ES256 key under the PQ kid: not its thumbprint
             # §13 fields only on decision records; L2+ self-recorded is a warning
             wrong = json.loads(json.dumps(plain)); wrong[1]["reproducibility_class"] = "reconstructable"
             self.assertTrue(any("decision records only" in p["why"] for p in aat.verify_chain(wrong)["problems"]))
@@ -1544,6 +1544,56 @@ class TestAAT04(unittest.TestCase):
                 aat.from_omega(e_leap, "1.0")
             neg = json.loads(json.dumps(plain)); neg[3].update({"margin_reproducible": True, "decision_margin": 0.001, "margin_epsilon": -1000})
             self.assertTrue(any("cannot be negative" in p["why"] for p in aat.verify_chain(neg)["problems"]))
+
+    def test_round5_self_certifying_kids_low_s_s13_placement_csv(self):
+        """Review round 5 (2026-09-19): a key set entry whose kid is not the thumbprint of its key is rejected (a poisoned
+        map cannot relabel keys); ES256 signatures are emitted in low-S form and a high-S (malleable) form is reported;
+        §13 field NAMES inside action_detail of a non-decision record are preserved (warning), at the top level a problem;
+        environment_attestation has a shape; CSV cells cannot start a spreadsheet formula."""
+        from omega_evidence.interop import aat
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography assente")
+        priv, pub = aat.generate_p256_keypair(); kid = aat.p256_thumbprint(pub)
+        priv2, pub2 = aat.generate_p256_keypair(); kid2 = aat.p256_thumbprint(pub2)
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = self._log(tmp)
+            byB = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv2, close=True).values()))
+            relabel = json.loads(json.dumps(byB))
+            for r in relabel:
+                r["signer_kid"] = kid                                   # claims the agent's kid (breaks the signature, but the map is the point)
+            v = aat.verify_chain(byB, keys={kid: pub2}, agent_kid=kid)  # poisoned map: agent's kid → B's key
+            self.assertFalse(v["ok"]); self.assertEqual(v["keys_rejected"], [kid])
+            self.assertTrue(aat.verify_chain(byB, keys={kid2: pub2})["ok"])
+            # low-S: every emitted signature has s <= n/2; the (r, n-s) twin verifies with a warning, never silently
+            for r in byB:
+                sig = aat._b64u_dec(r["signature"]); self.assertLessEqual(int.from_bytes(sig[32:], "big"), aat.P256_ORDER // 2)
+            hi = json.loads(json.dumps(byB)); sig = aat._b64u_dec(hi[-1]["signature"])
+            s_hi = aat.P256_ORDER - int.from_bytes(sig[32:], "big")
+            hi[-1]["signature"] = aat._b64u(sig[:32] + s_hi.to_bytes(32, "big"))
+            v = aat.verify_chain(hi, keys={kid2: pub2})
+            self.assertTrue(v["ok"], v["problems"]); self.assertTrue(any("high-S" in w["why"] for w in v["warnings"]))
+            self.assertNotEqual(aat.record_hash(hi[-1]), aat.record_hash(byB[-1]))    # the malleated twin has another hash: declared
+            # §13 names inside a tool_call's action_detail: preserved, warning only; at the top level: problem
+            plain = next(iter(aat.from_omega(entries, "1.0", close=True).values()))
+            open_ = next(iter(aat.from_omega(entries, "1.0").values()))                    # no close: the LAST record can be edited freely
+            det = json.loads(json.dumps(open_)); det[-1]["action_detail"]["environment"] = "production"
+            self.assertEqual(det[-1]["action_type"], "decision")                             # a decision: §13 names are checked, not just warned
+            det[1]["action_detail"]["environment"] = "production"; det[2]["prev_hash"] = aat.record_hash(det[1]); det[3]["prev_hash"] = aat.record_hash(det[2])
+            v = aat.verify_chain(det); self.assertTrue(any("§13 field names" in w["why"] for w in v["warnings"]))
+            self.assertTrue(v["ok"], v["problems"])
+            top = json.loads(json.dumps(open_)); top[-1]["action_type"] = "tool_call"; top[-1]["action_detail"] = {"tool_name": "t", "parameters_hash": "0" * 64}
+            top[-1]["decision_margin"] = 1.0; top[-1]["margin_epsilon"] = 0.4; top[-1]["margin_reproducible"] = True
+            self.assertTrue(any("decision records only" in p["why"] for p in aat.verify_chain(top)["problems"]))
+            ea = json.loads(json.dumps(open_)); ea[-1]["environment_attestation"] = 5
+            self.assertTrue(any("environment_attestation" in p["why"] for p in aat.verify_chain(ea)["problems"]))
+            ea[-1]["environment_attestation"] = "https://attest.example/quote/1"
+            self.assertFalse(any("environment_attestation" in p["why"] for p in aat.verify_chain(ea)["problems"]))
+            # CSV injection
+            inj = json.loads(json.dumps(plain)); inj[1]["agent_version"] = "=cmd|'/c calc'!A0"
+            line = aat.to_csv(inj).splitlines()[2]
+            self.assertIn("'=cmd", line); self.assertNotIn(",=cmd", line)
 
     def test_merkle_epochs_against_cryptovalid_and_exports(self):
         from omega_evidence.interop import aat

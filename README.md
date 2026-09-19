@@ -145,7 +145,15 @@ well under a second instead of quadratic); `anchor_epoch` refuses integers beyon
 braced session ids are the same session; `keys={}` still means every record must be signed; a tombstone's `deleted_at`
 before the record's own timestamp is a problem. Not checked and stated: §4.3 (a pre-execution record before every
 state-changing action of a high-risk system) — which actions change state is not in the record; `time_verified` in
-`verify_epochs` is the only green about time, `ok` is about structure.
+`verify_epochs` is the only green about time, `ok` is about structure. Round 5 added: a key-set entry whose `kid` is not
+the RFC 7638 / AKP thumbprint of its key is rejected (a mislabelled or poisoned map cannot pass a key off as the agent's
+or the recorder's); ES256 signatures are emitted in low-S form and a high-S signature is reported as malleable — the
+`(r, n−s)` twin verifies, so an outsider can change a signed record's HASH (never its content; the draft mandates no
+low-S, reported to the author); §13 field names inside the `action_detail` of a non-decision record are preserved as
+unknown fields with a warning (the draft reserves only `aat_`), at the record's top level they are a problem;
+`environment_attestation` must be base64 or a URI; `inclusion_proof` is OPTIONAL — a complete epoch rebuilds without them;
+a CSV cell that would start a spreadsheet formula is prefixed with `'` (the CSV is never the record); a leap second, an
+empty `agent_version` and a negative `margin_epsilon` are refused.
 
 Corrections to 0.7.0 (measured, not softened): 0.7.0 implemented -00 and its exports **violated the draft's REQUIRED
 per-action `action_detail` fields** (`tool_name`, `parameters_hash`, `decision_type` were not emitted; the verifier did

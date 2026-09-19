@@ -315,6 +315,7 @@ _NONCE = re.compile(r"^[0-9a-f]{32,}\Z")
 _SHA256_PREFIXED = re.compile(r"^sha256:[0-9a-f]{64}\Z")
 _B64U = re.compile(r"^[A-Za-z0-9_\-]+\Z")
 _ISO2 = re.compile(r"^[A-Z]{2}\Z")
+_B64_STD = re.compile(r"^[A-Za-z0-9+/]+={0,2}\Z")
 
 
 # ── export from an omega AgentEvidenceLog ledger ─────────────────────────────────────────────
@@ -772,12 +773,20 @@ def _check_detail(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], war
                                   and 0.0 <= d["confidence"] <= 1.0):
         problems.append({"i": i, "why": "decision confidence is not a number in [0,1] (§7.3)"})
     # §13: a decision marked reproducible needs a CLOSED attestation; fields at top level or in action_detail
-    src = {**d, **{k: r[k] for k in r if k in CLOSURE_DIGESTS + ("inference_config", "environment", "reproducibility_class",
-                                                             "output_digest", "environment_attestation", "margin_reproducible",
-                                                             "decision_margin", "margin_epsilon")}}
+    s13 = CLOSURE_DIGESTS + ("inference_config", "environment", "reproducibility_class", "output_digest", "environment_attestation",
+                             "margin_reproducible", "decision_margin", "margin_epsilon")
+    if at != "decision":
+        top = [k for k in s13 if k in r]
+        if top:
+            problems.append({"i": i, "why": f"reproducibility fields {top} on a non-decision record (§13.3: decision records only)"})
+        if any(k in d for k in s13):
+            warnings.append({"i": i, "why": "action_detail of a non-decision record uses §13 field names (preserved as unknown fields, not checked)"})
+        return
+    src = {**d, **{k: r[k] for k in r if k in s13}}
     rc = src.get("reproducibility_class")
-    if at != "decision" and any(k in src for k in CLOSURE_DIGESTS + ("inference_config", "environment", "reproducibility_class", "output_digest")):
-        problems.append({"i": i, "why": "reproducibility fields on a non-decision record (§13.3: decision records only)"})
+    if "environment_attestation" in src and not (isinstance(src["environment_attestation"], str) and src["environment_attestation"]
+                                                and (_URI.match(src["environment_attestation"]) or _B64_STD.match(src["environment_attestation"]))):
+        problems.append({"i": i, "why": "environment_attestation must be a base64 attestation or a URI (§13.3)"})
     if rc is not None and rc not in REPRODUCIBILITY_CLASSES:
         problems.append({"i": i, "why": f"reproducibility_class not in {REPRODUCIBILITY_CLASSES} (§13.3)"})
     for name in CLOSURE_DIGESTS:
@@ -1021,7 +1030,6 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 problems.append({"i": i, "why": "genesis recording_mode must be self or independent (§5)"})
             if recording_mode == "independent" and not _URI.match(str(d.get("recording_component_id", ""))):
                 problems.append({"i": i, "why": "independent recording: genesis needs recording_component_id (URI) (§5.2)"})
-        foreign_rc = session_independent                      # every record of an independent session, tombstones included
         if session_independent and "recording_component" not in r:
             problems.append({"i": i, "why": "independent recording: every record MUST carry recording_component (§5.2)"})
         if session_independent and "recording_component" in r and r["recording_component"] == r.get("agent_id"):
@@ -1125,6 +1133,8 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 if ok:
                     signed_ok += 1
                     hybrid_ok += 1 if hyb else 0
+                    if "high-S" in why:
+                        warnings.append({"i": i, "why": "ES256 signature in high-S form: malleable (r, n−s) — an outsider can change this record's hash, not its content"})
                 elif is_tomb:
                     problems.append({"i": i, "why": f"tombstone signature does not verify over the tombstone content ({why}): either the draft's "
                                                     "retained original signature (unverifiable — this module requires the deleting authority's) or a forgery"})
@@ -1154,7 +1164,7 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     if records and isinstance(records[-1], dict) and not (records[-1].get("action_type") == "lifecycle" and ld.get("event") == "session_end"):
         warnings.append({"i": len(records) - 1, "why": "no session close: the session is orphaned or the chain was truncated to a valid prefix (§8.3) — undetectable without the close or an external anchor"})
     if keyset.bad:
-        problems.append({"i": -1, "why": f"keys rejected (not a P-256 PEM nor a 1952-byte ML-DSA-65 key): {keyset.bad}"})
+        problems.append({"i": -1, "why": f"keys rejected (not a P-256 PEM / 1952-byte ML-DSA-65 key, or kid != thumbprint of the key): {keyset.bad}"})
     return {"ok": not problems, "records": len(records), "problems": problems, "warnings": warnings,
             "signatures_verified": signed_ok, "hybrid_verified": hybrid_ok, "tombstones": tombstones,
             "keys_rejected": list(keyset.bad), "draft": AAT_DRAFT,
@@ -1228,6 +1238,9 @@ def _pq_pub_raw(pq_signer: Any) -> bytes:
     return raw
 
 
+P256_ORDER = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+
+
 def _es256_sign(msg: bytes, private_key_pem: bytes) -> Tuple[str, str]:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -1237,6 +1250,7 @@ def _es256_sign(msg: bytes, private_key_pem: bytes) -> Tuple[str, str]:
         raise ValueError("ES256 signatures require an ECDSA P-256 (secp256r1) key")
     der = sk.sign(msg, ec.ECDSA(Prehashed(hashes.SHA256())))
     r, s = decode_dss_signature(der)
+    s = min(s, P256_ORDER - s)                     # low-S: one canonical signature per (key, message) — see _es256_verify
     pub = sk.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
     return _b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big")), p256_thumbprint(pub)
 
@@ -1285,7 +1299,9 @@ def sign_record_hybrid(rec: Dict[str, Any], pq_signer: Any, classical_private_ke
 
 
 class _KeySet:
-    """kid → ("ES256", pem bytes) | ("ML-DSA-65", raw 1952 bytes); `pubkey_pem` doubles as the -03 fallback key."""
+    """kid → ("ES256", pem bytes) | ("ML-DSA-65", raw 1952 bytes), each kid CHECKED to be the RFC 7638 / AKP thumbprint of
+    its key (a poisoned map cannot relabel a key as the agent's or the recorder's — review round 5); `pubkey_pem` doubles
+    as the -03 fallback key."""
 
     def __init__(self, keys: Optional[Dict[str, Any]], pubkey_pem: Optional[bytes]):
         self.by_kid: Dict[str, Tuple[str, bytes]] = {}
@@ -1297,12 +1313,15 @@ class _KeySet:
                 if isinstance(k, str):
                     k = k.encode() if k.lstrip().startswith("-----") else base64.b64decode(k, validate=True)
                 if isinstance(k, (bytes, bytearray)) and bytes(k).lstrip().startswith(b"-----"):
-                    self.by_kid[str(kid)] = ("ES256", bytes(k))
+                    alg, tp = "ES256", p256_thumbprint(bytes(k))
                 elif isinstance(k, (bytes, bytearray)) and len(k) == 1952:
-                    self.by_kid[str(kid)] = ("ML-DSA-65", bytes(k))
+                    alg, tp = "ML-DSA-65", mldsa65_thumbprint(bytes(k))
                 else:
-                    self.bad.append(str(kid))
-            except (ValueError, TypeError):
+                    self.bad.append(str(kid)); continue
+                if tp != str(kid):                        # signer_kid is self-certifying: a mislabelled key set is not a key set
+                    self.bad.append(str(kid)); continue
+                self.by_kid[str(kid)] = (alg, bytes(k))
+            except Exception:  # noqa: BLE001 — unparsable key, or no cryptography: rejected, reported
                 self.bad.append(str(kid))
         if pubkey_pem is not None:
             try:
@@ -1333,9 +1352,13 @@ def _es256_verify(rec: Dict[str, Any], sig_b64u: str, pubkey_pem: bytes, msg: by
             return False, "key is not P-256"
         if len(raw) != 64:
             return False, "signature is not 64 bytes (IEEE P1363 r||s)"
-        der = encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))
+        r_, s_ = int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big")
+        der = encode_dss_signature(r_, s_)
         pk.verify(der, msg, ec.ECDSA(Prehashed(hashes.SHA256())))
-        return True, "ok"
+        # ECDSA malleability: (r, n−s) verifies too, and `signature` is inside the next prev_hash / the Merkle leaf, so a
+        # third party can change a record's HASH (not its content) — the draft mandates no low-S; this module emits low-S
+        # and reports a high-S signature (declared, review round 5) rather than refusing foreign chains
+        return True, ("ok" if s_ <= P256_ORDER // 2 else "ok (high-S: malleable ECDSA form, the record's hash is not unique)")
     except Exception as ex:  # noqa: BLE001
         return False, type(ex).__name__
 
@@ -1393,8 +1416,8 @@ def _verify_record_signatures_inner(rec: Dict[str, Any], keyset: _KeySet) -> Tup
         cok, cwhy = _es256_verify(rec, rec["signature_classical"], ck[1], msg)
         if not cok:
             return False, f"hybrid: signature_classical invalid: {cwhy}", False
-        return True, "ok", True
-    return True, "ok", False
+        return True, cwhy, True
+    return True, why, False
 
 
 def verify_signature(rec: Dict[str, Any], pubkey_pem: bytes) -> Tuple[bool, str]:
@@ -1465,9 +1488,15 @@ def to_csv(records: List[Dict[str, Any]]) -> str:
     w = csv.writer(buf, lineterminator="\r\n")
     w.writerow(CSV_COLUMNS)
     for r in records:
-        w.writerow([json.dumps(r.get(c), separators=(",", ":"), sort_keys=True) if c == "action_detail"
-                    else ("" if r.get(c) is None else str(r.get(c))) for c in CSV_COLUMNS])
+        w.writerow([_csv_safe(json.dumps(r.get(c), separators=(",", ":"), sort_keys=True, allow_nan=False) if c == "action_detail"
+                              else ("" if r.get(c) is None else str(r.get(c)))) for c in CSV_COLUMNS])
     return buf.getvalue()
+
+
+def _csv_safe(v: str) -> str:
+    """A cell starting with = + - @ or a tab/CR would be run as a formula by spreadsheet tools (CSV injection): prefixed
+    with a single quote, as OWASP recommends. The CSV is for human review, never the authoritative record (§10.3)."""
+    return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────────────────────
