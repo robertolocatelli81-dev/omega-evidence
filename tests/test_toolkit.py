@@ -1122,7 +1122,16 @@ class TestAAT04(unittest.TestCase):
             self.assertFalse(aat.verify_chain(swapped, keys={kid: pub, aat.p256_thumbprint(pub2): pub2})["ok"])   # kid is signed
             unsigned = next(iter(aat.from_omega(entries, "1.0").values()))
             self.assertFalse(aat.verify_chain(unsigned, require_signatures=True)["ok"])
-            self.assertTrue(aat.verify_chain(unsigned, keys={kid: pub})["ok"])                # keys given, nothing signed: no claim
+            self.assertFalse(aat.verify_chain(unsigned, keys={kid: pub})["ok"])               # keys given → every record must be signed (round 2)
+            self.assertTrue(aat.verify_chain(unsigned)["ok"])                                  # no key, no claim
+            rewritten = json.loads(json.dumps(es))                                             # signed prefix + unsigned continuation = rewrite
+            for r in rewritten[2:]:
+                for k in ("signature", "sig_alg", "signer_kid"):
+                    r.pop(k)
+            for k in range(3, 5):
+                rewritten[k]["prev_hash"] = aat.record_hash(rewritten[k - 1], strict=False)
+            rewritten[-1]["action_detail"]["session_hash"] = hashlib.sha256(b"".join(bytes.fromhex(r["prev_hash"]) for r in rewritten[1:])).hexdigest()
+            self.assertFalse(aat.verify_chain(rewritten, keys={kid: pub})["ok"])
             # -03 legacy: signature without sig_alg/signer_kid, verified through the fallback key (warning), not through `keys`
             legacy = []
             for r in unsigned:
@@ -1308,6 +1317,79 @@ class TestAAT04(unittest.TestCase):
             with self.assertRaises(ValueError):
                 aat.from_omega(e3, "1.0")
 
+    def test_round2_hostile_epochs_export_never_invents(self):
+        """Review round 2 (2026-09-19): verify_epochs and verify_chain never raise on hostile JSON; the export never
+        invents (session, outcome, phase, duplicate identity, self-recording labelled independent); legacy -03 never
+        applies to an independent recorder; margin_reproducible must be a boolean; anchors must not conflict."""
+        from omega_evidence.interop import aat
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography assente")
+        priv, pub = aat.generate_p256_keypair(); kid = aat.p256_thumbprint(pub)
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = self._log(tmp)
+            es = next(iter(aat.from_omega(entries, "1.0", private_key_pem=priv, close=True).values()))
+            an = aat.anchor_epoch(es, epoch_id=aat._uuid4_from("e"))
+            hostile = [lambda r, a: r.__setitem__(1, "junk"), lambda r, a: r[1]["batch"].__setitem__("epoch_id", ["x"]),
+                       lambda r, a: a[0].pop("epoch_id"), lambda r, a: r[1]["action_detail"].__setitem__("x", float("nan")),
+                       lambda r, a: r[1]["action_detail"].__setitem__("deep", json.loads("[" * 600 + "]" * 600)),
+                       lambda r, a: a[0].__setitem__("leaf_count", "5"), lambda r, a: a[0].__setitem__("tsa", {"token": 5}),
+                       lambda r, a: a.append(dict(a[0], merkle_root="0" * 64))]
+            for mut in hostile:
+                rr = json.loads(json.dumps(es)); aa = json.loads(json.dumps([an])); mut(rr, aa)
+                self.assertFalse(aat.verify_epochs(rr, aa)["ok"])
+            self.assertTrue(any("conflicting anchors" in p["why"] for p in aat.verify_epochs(es, [an, dict(an, merkle_root="0" * 64)])["problems"]))
+            ve = aat.verify_epochs(es[:1], [an, dict(an, epoch_id=aat._uuid4_from("other"))])
+            self.assertTrue(any("unaccounted" in w["why"] for w in ve["warnings"]))
+            for mut in (lambda r: r[1].update({"action_type": "lifecycle", "action_detail": "abc"}),
+                        lambda r: r[-1].update({"action_type": "lifecycle", "action_detail": True}),
+                        lambda r: r[1].update({"latency_ms": int("1" + "0" * 400)}),
+                        lambda r: r[1].update({"batch": {"epoch_id": "not-a-uuid", "merkle_root": "0" * 64, "leaf_index": 0}}),
+                        lambda r: r[1].update({"batch": {"epoch_id": aat._uuid4_from("e"), "merkle_root": "0" * 64, "leaf_index": 0, "inclusion_proof": [{"hash": "zz", "side": "up"}]}}),
+                        lambda r: r[3].update({"margin_reproducible": "false", "decision_margin": 5, "margin_epsilon": 1})):
+                h = json.loads(json.dumps(es)); mut(h)
+                self.assertFalse(aat.verify_chain(h, keys={kid: pub})["ok"])
+            plain = next(iter(aat.from_omega(entries, "1.0", close=True).values()))            # unsigned: the rule itself, not the signature, must fire
+            pm = json.loads(json.dumps(plain)); pm[3].update({"margin_reproducible": "false", "decision_margin": 5, "margin_epsilon": 1})
+            self.assertTrue(any("must be a boolean" in p["why"] for p in aat.verify_chain(pm)["problems"]))
+            pb = json.loads(json.dumps(plain)); pb[1]["batch"] = {"epoch_id": "not-a-uuid", "merkle_root": "0" * 64, "leaf_index": 0}
+            self.assertTrue(any("UUID v4" in p["why"] for p in aat.verify_chain(pb)["problems"]))
+            pl = json.loads(json.dumps(plain)); pl[1]["action_type"] = "lifecycle"; pl[1]["action_detail"] = "abc"
+            self.assertTrue(any("not an object" in p["why"] for p in aat.verify_chain(pl)["problems"]))
+            with self.assertRaises(ValueError):
+                aat.jcs({"x": int("1" + "0" * 400)}, strict=False)
+            # export never invents
+            for bad in ({"session_id": None}, {"outcome": "denied"}, {"outcome": "success"}):
+                e2 = json.loads(json.dumps(entries)); e2[0].update(bad)
+                with self.assertRaises(ValueError):
+                    aat.from_omega(e2, "1.0")
+            e3 = json.loads(json.dumps(entries)); e3[1]["record_sha3"] = e3[0]["record_sha3"]
+            with self.assertRaises(ValueError):
+                aat.from_omega(e3, "1.0")
+            with self.assertRaises(ValueError):
+                aat.from_omega(entries, "1.0", recording_component="urn:omega:agent:bot-7")
+            with self.assertRaises(ValueError):
+                aat.close_record(es[:-1], timestamp="2000-01-01T00:00:00Z")
+            # -03 fallback never applies to an independent recorder; independence declared with own component is a problem
+            ind = next(iter(aat.from_omega(entries, "1.0", recording_component="urn:gw:1").values()))
+            legacy = []
+            for r in ind:
+                body = dict(r)
+                if legacy:
+                    body["parent_record_id"] = legacy[-1]["record_id"]; body["prev_hash"] = aat.record_hash(legacy[-1])
+                body["signature"], _ = aat._es256_sign(aat._signing_input(body), priv)
+                legacy.append(body)
+            self.assertFalse(aat.verify_chain(legacy, pubkey_pem=pub, agent_kid=kid, allow_legacy_03=True)["ok"])
+            own = json.loads(json.dumps(es))
+            own[0]["action_detail"].update({"recording_mode": "independent", "recording_component_id": own[0]["agent_id"]})
+            for r in own:
+                r["recording_component"] = r["agent_id"]
+            self.assertTrue(any("equals agent_id" in p["why"] for p in aat.verify_chain(own)["problems"]))
+            # leap second and 7-digit fractions are foreign-valid instants
+            leap = json.loads(json.dumps(es)); leap[-2]["timestamp"] = "2026-12-31T23:59:59.1234567Z"; leap[-1]["timestamp"] = "2026-12-31T23:59:60Z"
+            self.assertFalse(any("calendar" in p["why"] or "monotonic" in p["why"] for p in aat.verify_chain(leap)["problems"]))
+
     def test_merkle_epochs_against_cryptovalid_and_exports(self):
         from omega_evidence.interop import aat
         with tempfile.TemporaryDirectory() as tmp:
@@ -1319,7 +1401,7 @@ class TestAAT04(unittest.TestCase):
             self.assertTrue(aat.verify_chain(recs)["ok"])                                  # batch is detached: chain hashes unchanged
             self.assertEqual([aat.record_hash(r) for r in recs], [aat.record_hash(r) for r in plain])
             ve = aat.verify_epochs(recs, [anchor]); self.assertTrue(ve["ok"], ve["problems"])
-            # oracle: cryptovalid's RFC 6962 implementation on the same leaves, for 1..9 leaves
+            # oracle: cryptovalid's RFC 6962 implementation on the same leaves, for 1..20 leaves
             import importlib.util, sys as _sys
             cv = os.path.join(os.path.expanduser("~"), "omega", "omega_package", "opencore", "cryptovalid_merkle.py")
             if os.path.exists(cv):

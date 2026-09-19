@@ -120,7 +120,14 @@ list-valued `action_type`) — all problems now, never exceptions; independent r
 claimed a `leaf_count` check it did not do (now: index bound, index proven by the audit path, incomplete epochs
 reported, complete epochs rebuilt); non-UTC offsets (a SHOULD) were refused; booleans passed as numbers in the §13.8
 margin rule; truncation of a signed chain to a valid prefix was silent (now a warning, and stated as undetectable
-without the close or an anchor).
+without the close or an anchor). Round 2 added: with `keys` given, an unsigned record is a problem (a signed prefix
+with an unsigned continuation is a rewrite — round 1 had left that open for the `keys` path); the -03 fallback never
+applies to an independent recorder; `recording_component` equal to the agent is not independence; `verify_epochs`
+survives hostile anchors and records (non-objects, unhashable ids, NaN, deep nesting), refuses conflicting anchors for
+one epoch and reports anchors no record accounts for; integers beyond the double range are "not canonicalizable"
+instead of an `OverflowError`; the export refuses a missing session, an outcome the runtime never writes, a duplicate
+record identity, a backdated close and a `recording_component` equal to the agent; leap seconds and 7-9 digit fractions
+parse.
 
 Corrections to 0.7.0 (measured, not softened): 0.7.0 implemented -00 and its exports **violated the draft's REQUIRED
 per-action `action_detail` fields** (`tool_name`, `parameters_hash`, `decision_type` were not emitted; the verifier did

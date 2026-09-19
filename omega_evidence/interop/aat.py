@@ -108,13 +108,10 @@ _SESSION_HASH_NOTE = "hex(SHA-256(prev_hash(1) || ... || prev_hash(N))) over the
 _ACTION_MAP = {"tool_call": "tool_call", "tool_response": "tool_response", "decision": "decision",
                "delegation": "delegation", "escalation": "escalation", "error": "error", "lifecycle": "lifecycle",
                "file_write": "tool_call", "file_read": "tool_call", "command_exec": "tool_call", "network": "tool_call"}
-_OUTCOME_MAP = {"executed": "success", "blocked": "denied", "pending_approval": "escalated",
-                "success": "success", "failure": "failure", "timeout": "timeout", "denied": "denied", "escalated": "escalated"}
+_OUTCOME_MAP = {"executed": "success", "blocked": "denied", "pending_approval": "escalated"}   # the three the runtime writes
 # §4.1: the omega runtime writes `blocked` and `pending_approval` records as the enforcement decision, before
 # anything runs; `executed` records after the action completed. Declared in every exported action_detail.
-_PHASE_MAP = {"blocked": "pre_execution", "pending_approval": "pre_execution", "executed": "post_execution",
-              "denied": "pre_execution", "escalated": "pre_execution", "success": "post_execution",
-              "failure": "post_execution", "timeout": "post_execution"}
+_PHASE_MAP = {"blocked": "pre_execution", "pending_approval": "pre_execution", "executed": "post_execution"}
 
 
 # ── JCS (RFC 8785), subset ───────────────────────────────────────────────────────────────────
@@ -177,7 +174,10 @@ def jcs(obj: Any, strict: bool = True) -> bytes:
             if abs(x) > 2 ** 53:
                 if strict:
                     raise ValueError("JCS: integers beyond 2^53 lose precision in ES6 — refused on export")
-                return _es6_number(float(x))
+                try:
+                    return _es6_number(float(x))
+                except OverflowError:
+                    raise ValueError("JCS: integer beyond the double range (ES6 would give Infinity, which JCS forbids)") from None
             return str(x)
         if isinstance(x, float):
             if x != x or x in (float("inf"), float("-inf")):
@@ -297,6 +297,9 @@ def _rfc3339(ts: str) -> str:
 def _parse_ts(ts: str) -> datetime:
     t = str(ts)
     t = t[:10] + "T" + t[11:] if len(t) > 10 else t
+    if t[17:19] == "60":                                  # RFC 3339 leap second: compared as 59.999999 (Python has no :60)
+        m = re.match(r"^(\.\d+)?(.*)$", t[19:])
+        t = t[:17] + "59.999999" + (m.group(2) if m else "")
     return datetime.fromisoformat(t[:-1] + "+00:00" if t.endswith(("Z", "z")) else t)
 
 
@@ -360,6 +363,7 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
         raise ValueError("recording_component must be a URI (scheme:...)")
     chains: Dict[str, List[Dict[str, Any]]] = {}
     prevs: Dict[str, Dict[str, Any]] = {}
+    seeds_seen: set = set()
     sess = dict(session_ids or {})
     for k, v in sess.items():
         try:
@@ -381,7 +385,9 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
     for e in entries:
         if e.get("kind") != "agent_governance_action":
             continue
-        sid = str(e.get("session_id", ""))
+        sid = e.get("session_id")
+        if not isinstance(sid, str) or not sid:
+            raise ValueError("omega record without session_id: cannot export (a session is never invented)")
         try:
             u = uuid.UUID(sid)
             ok_v4 = u.version == 4 and str(u) == sid       # canonical 8-4-4-4-12 lowercase only
@@ -396,6 +402,11 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
         seed = e.get("self_hash") or e.get("record_sha3")
         if not seed:
             raise ValueError("omega record without self_hash/record_sha3: no stable identity, cannot export")
+        if seed in seeds_seen:
+            raise ValueError("two omega records with the same self_hash: the export would carry a duplicate record_id")
+        seeds_seen.add(seed)
+        if recording_component is not None and recording_component in (aid, f"urn:omega:agent:{aid}"):
+            raise ValueError("recording_component equals the agent: that is self-recording, not independent (§5.1)")
         oa, oo = str(e.get("action")), str(e.get("outcome"))
         if oa not in _ACTION_MAP:
             raise ValueError(f"omega action {oa!r} has no AAT mapping: refused, not guessed")
@@ -461,6 +472,8 @@ def close_record(chain: List[Dict[str, Any]], synthesised: bool = False, timesta
     last = chain[-1]
     prev_hashes = [bytes.fromhex(r["prev_hash"]) for r in chain[1:]] + [bytes.fromhex(record_hash(last, strict=False))]
     ts = _rfc3339(timestamp) if timestamp else last["timestamp"]
+    if _parse_ts(ts) < _parse_ts(last["timestamp"]):
+        raise ValueError("close record timestamp earlier than the last record (§3.3: timestamps MUST NOT be backdated)")
     dur = int((_parse_ts(ts) - _parse_ts(chain[0]["timestamp"])).total_seconds() * 1000)
     detail = {"event": "session_end", "previous_state": "active", "new_state": "closed", "trigger": trigger,
               "session_hash": hashlib.sha256(b"".join(prev_hashes)).hexdigest(),
@@ -552,20 +565,32 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
     problems: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
     by_id = {}
-    for a in anchors:
-        if not isinstance(a, dict) or not _HEX64.match(str(a.get("merkle_root", ""))):
-            problems.append({"epoch": a.get("epoch_id") if isinstance(a, dict) else None, "why": "anchor malformed"})
+    for a in anchors if isinstance(anchors, list) else []:
+        if not isinstance(a, dict) or not _HEX64.match(str(a.get("merkle_root", ""))) or not isinstance(a.get("epoch_id"), str) \
+                or ("leaf_count" in a and not (isinstance(a["leaf_count"], int) and not isinstance(a["leaf_count"], bool) and a["leaf_count"] > 0)) \
+                or ("tsa" in a and not (isinstance(a["tsa"], dict) and isinstance(a["tsa"].get("token"), (str, type(None))))):
+            problems.append({"epoch": a.get("epoch_id") if isinstance(a, dict) else None,
+                             "why": "anchor malformed (epoch_id string, merkle_root hex, leaf_count positive integer, tsa object with a string token)"})
+            continue
+        if a["epoch_id"] in by_id and by_id[a["epoch_id"]] != a:
+            problems.append({"epoch": a["epoch_id"], "why": "conflicting anchors for the same epoch_id"})
             continue
         by_id[a["epoch_id"]] = a
     seen: Dict[str, Dict[int, str]] = {}
     leaves_by_epoch: Dict[str, Dict[int, bytes]] = {}
     for i, r in enumerate(records):
+        if not isinstance(r, dict):
+            problems.append({"i": i, "why": "record is not an object"}); continue
         b = r.get("batch")
         if b is None:
             continue
         if not isinstance(b, dict) or not _HEX64.match(str(b.get("merkle_root", ""))) or not isinstance(b.get("leaf_index"), int) \
-                or isinstance(b.get("leaf_index"), bool) or b["leaf_index"] < 0:
+                or isinstance(b.get("leaf_index"), bool) or b["leaf_index"] < 0 or not isinstance(b.get("epoch_id"), str):
             problems.append({"i": i, "why": "batch object malformed"}); continue
+        try:
+            lh = leaf_hash(r)
+        except (ValueError, TypeError, RecursionError) as ex:
+            problems.append({"i": i, "why": f"record not canonicalizable: {type(ex).__name__}"}); continue
         a = by_id.get(b.get("epoch_id"))
         if a is None:
             problems.append({"i": i, "why": f"no anchor for epoch {b.get('epoch_id')}"}); continue
@@ -577,7 +602,7 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
         else:
             try:
                 ok = isinstance(path, list) and all(isinstance(s, dict) and _HEX64.match(str(s.get("hash", ""))) and s.get("side") in ("left", "right") for s in path)
-                if not ok or root_from_path(leaf_hash(r), path).hex() != b["merkle_root"]:
+                if not ok or root_from_path(lh, path).hex() != b["merkle_root"]:
                     problems.append({"i": i, "why": "inclusion_proof does not lead to merkle_root"})
                 elif isinstance(a.get("leaf_count"), int) and not isinstance(a.get("leaf_count"), bool) and a["leaf_count"] > 0 \
                         and index_from_path(path, a["leaf_count"]) != b["leaf_index"]:
@@ -591,7 +616,7 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
         lc = a.get("leaf_count")
         if isinstance(lc, int) and not isinstance(lc, bool) and b["leaf_index"] >= lc:
             problems.append({"i": i, "why": f"leaf_index {b['leaf_index']} >= leaf_count {lc} of the epoch anchor"})
-        leaves_by_epoch.setdefault(b["epoch_id"], {})[b["leaf_index"]] = leaf_hash(r)
+        leaves_by_epoch.setdefault(b["epoch_id"], {})[b["leaf_index"]] = lh
     incomplete: Dict[str, Dict[str, int]] = {}
     for eid, lv in leaves_by_epoch.items():
         a = by_id[eid]
@@ -606,6 +631,9 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
                 incomplete[eid] = {"seen": len(lv), "leaf_count": lc}
                 (problems if require_complete else warnings).append(
                     {"epoch": eid, "why": f"{lc - len(lv)} of {lc} anchored leaves are not in these records (deleted, stripped of batch, or in another session)"})
+    for eid in by_id:
+        if eid not in leaves_by_epoch:
+            warnings.append({"epoch": eid, "why": "anchor with no record of this epoch among these records: unaccounted for"})
     if leaves_by_epoch and any(r.get("batch") is None for r in records if isinstance(r, dict)):
         warnings.append({"why": "some records carry no batch object while others are anchored: they are outside every epoch checked here"})
     tsa: Dict[str, Any] = {}
@@ -635,6 +663,14 @@ def _hex64(v: Any) -> bool:
 
 def _num(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _uuid4_ok(v: Any) -> bool:
+    try:
+        u = uuid.UUID(str(v))
+        return isinstance(v, str) and u.version == 4 and str(u) == v
+    except ValueError:
+        return False
 
 
 def _check_detail(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], warnings: List[Dict[str, Any]]) -> None:
@@ -697,7 +733,9 @@ def _check_detail(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], war
                                             "missing " + ", ".join(missing)})
     if "margin_reproducible" in src:
         dm, me = src.get("decision_margin"), src.get("margin_epsilon")
-        if not (_num(dm) and _num(me)):
+        if not isinstance(src["margin_reproducible"], bool):
+            problems.append({"i": i, "why": "margin_reproducible must be a boolean (§13.8)"})
+        elif not (_num(dm) and _num(me)):
             problems.append({"i": i, "why": "margin_reproducible without decision_margin and margin_epsilon (§13.3)"})
         elif bool(src["margin_reproducible"]) != (dm > 2 * me):
             problems.append({"i": i, "why": "margin_reproducible contradicts decision_margin > 2·margin_epsilon (§13.8)"})
@@ -714,6 +752,8 @@ def _check_optional(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], w
     if "risk_score" in r and not (isinstance(r["risk_score"], (int, float)) and not isinstance(r["risk_score"], bool)
                                   and 0.0 <= r["risk_score"] <= 1.0):
         problems.append({"i": i, "why": "risk_score is not a number in [0,1] (§3.2)"})
+    if "deny_reasons" not in r and r.get("outcome") == "denied" and r.get("trust_level") in ("L2", "L3", "L4"):
+        warnings.append({"i": i, "why": "denied at L2+ without deny_reasons (§3.2 RECOMMENDED)"})
     if "deny_reasons" in r:
         dr = r["deny_reasons"]
         if not isinstance(dr, list) or not all(isinstance(x, str) and x for x in dr):
@@ -746,9 +786,13 @@ def _check_optional(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], w
                 or not _RFC3339.match(str(et.get("anchored_at", ""))):
             problems.append({"i": i, "why": "external_timestamp needs tsa_url, token, anchored_at (RFC 3339) (§3.2)"})
     b = r.get("batch")
-    if b is not None and not (isinstance(b, dict) and _hex64(b.get("merkle_root")) and isinstance(b.get("epoch_id"), str)
-                              and _num(b.get("leaf_index")) and isinstance(b.get("leaf_index"), int) and b["leaf_index"] >= 0):
-        problems.append({"i": i, "why": "batch needs epoch_id, merkle_root (hex), leaf_index (non-negative integer) (§3.2)"})
+    if b is not None:
+        if not (isinstance(b, dict) and _hex64(b.get("merkle_root")) and _uuid4_ok(b.get("epoch_id"))
+                and _num(b.get("leaf_index")) and isinstance(b.get("leaf_index"), int) and b["leaf_index"] >= 0):
+            problems.append({"i": i, "why": "batch needs epoch_id (UUID v4), merkle_root (hex), leaf_index (non-negative integer) (§3.2)"})
+        elif "inclusion_proof" in b and not (isinstance(b["inclusion_proof"], list) and all(
+                isinstance(st, dict) and _hex64(st.get("hash")) and st.get("side") in ("left", "right") for st in b["inclusion_proof"])):
+            problems.append({"i": i, "why": "inclusion_proof must be an array of {hash: 64 lowercase hex, side: left|right} (§3.2)"})
     if "sig_alg" in r and r["sig_alg"] not in SIG_ALGS:
         problems.append({"i": i, "why": f"sig_alg not in the registry {SIG_ALGS} (§15.3)"})
     for k in ("signer_kid", "signer_kid_classical"):
@@ -887,11 +931,17 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
         foreign_rc = "recording_component" in r and r["recording_component"] != r.get("agent_id")   # §3.2: this IS independent recording
         if recording_mode == "independent" and "recording_component" not in r:
             problems.append({"i": i, "why": "independent recording: every record MUST carry recording_component (§5.2)"})
+        if recording_mode == "independent" and "recording_component" in r and not foreign_rc:
+            problems.append({"i": i, "why": "independent recording declared but recording_component equals agent_id (§5.1/§5.2)"})
         if recording_mode == "independent" or foreign_rc:
             if "signature" not in r:
                 problems.append({"i": i, "why": "independent recording: the recorder MUST sign every record with its own key (§5.2)"})
+            elif "signer_kid" not in r:
+                problems.append({"i": i, "why": "independent recording: signed record without signer_kid — the -03 fallback (the agent's key) does not apply to an independent recorder (§5.2)"})
             elif agent_kid is not None and agent_kid in (r.get("signer_kid"), r.get("signer_kid_classical")):
                 problems.append({"i": i, "why": "independently recorded record signed with the AGENT's key (§5.2)"})
+            elif agent_kid is None and i == 0:
+                warnings.append({"i": i, "why": "independent recording: pass agent_kid to check that the recorder's key differs from the agent's (§5.2)"})
             if recording_mode is None and foreign_rc and i == 0:
                 warnings.append({"i": i, "why": "records name a recording component other than the agent but the genesis declares no recording_mode (§8.1 SHOULD)"})
         if recording_mode == "self" and foreign_rc:
@@ -922,7 +972,8 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                     except (ValueError, TypeError, RecursionError) as ex:
                         exp = None
                         problems.append({"i": i, "why": f"previous record not canonicalizable: {type(ex).__name__}"})
-                    prev_tomb = prev.get("action_type") == "lifecycle" and (prev.get("action_detail") or {}).get("event") == "record_deleted"
+                    pd = prev.get("action_detail") if isinstance(prev.get("action_detail"), dict) else {}
+                    prev_tomb = prev.get("action_type") == "lifecycle" and pd.get("event") == "record_deleted"
                     if exp is not None and r.get("prev_hash") != exp:
                         if prev_tomb and r.get("prev_hash") == prev.get("tombstone_hash"):
                             pass                                     # §9.3: the chain break is accepted through tombstone_hash
@@ -968,9 +1019,10 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                     hybrid_ok += 1 if hyb else 0
                 else:
                     problems.append({"i": i, "why": f"signature invalid: {why}"})
-        elif require_signatures or (pubkey_pem is not None and keys is None) or (is_tomb and keyset.by_kid):
+        elif require_signatures or pubkey_pem is not None or keyset.by_kid:
             problems.append({"i": i, "why": ("tombstone without a signature of the deleting authority while the chain is verified with keys (§9.3 + review 2026-09-19)"
-                                             if is_tomb else "unsigned record while signatures are required / a verification key was given")})
+                                             if is_tomb else "unsigned record while signatures are required / a verification key was given "
+                                                             "(a signed prefix with an unsigned continuation is a rewrite)")})
         elif is_tomb:
             warnings.append({"i": i, "why": "unsigned tombstone accepted on tombstone_hash alone (§9.3): in an unsigned chain any record can be replaced this way"})
         et = r.get("external_timestamp")
@@ -986,10 +1038,10 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
             verdicts = [_ts.verify(et["token"], im, ca_file=external_timestamp_ca_file) for im in imprints]
             if not any(v.get("verified") is True for v in verdicts):
                 problems.append({"i": i, "why": "external_timestamp token not verified over this record's digest nor over its epoch root: "
-                                                + str(verdicts[0].get("note"))})
+                                                + " / ".join(str(v.get("note")) for v in verdicts)})
         prev = r
-    if records and isinstance(records[-1], dict) and not (records[-1].get("action_type") == "lifecycle"
-                                                          and (records[-1].get("action_detail") or {}).get("event") == "session_end"):
+    ld = records[-1].get("action_detail") if records and isinstance(records[-1], dict) and isinstance(records[-1].get("action_detail"), dict) else {}
+    if records and isinstance(records[-1], dict) and not (records[-1].get("action_type") == "lifecycle" and ld.get("event") == "session_end"):
         warnings.append({"i": len(records) - 1, "why": "no session close: the session is orphaned or the chain was truncated to a valid prefix (§8.3) — undetectable without the close or an external anchor"})
     if keyset.bad:
         problems.append({"i": -1, "why": f"keys rejected (not a P-256 PEM nor a 1952-byte ML-DSA-65 key): {keyset.bad}"})
