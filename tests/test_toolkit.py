@@ -1690,6 +1690,71 @@ class TestAAT04(unittest.TestCase):
                                capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             self.assertEqual(r.returncode, 2); self.assertIn('"ok": false', r.stdout); self.assertNotIn("Traceback", r.stderr)
 
+    def test_round7_recorder_pin_legacy_effective_kid_close_tombstone(self):
+        """Review round 7 (Opus/Sonnet, 2026-09-20): the recorder of an independent session is pinned (recorder_kid, or the
+        first signing key) so a deleting-only key cannot rewrite the tail; the -03 fallback key is judged by its thumbprint
+        like any other; a list-valued signer_kid_classical on a tombstone is a verdict, not a TypeError; tombstone_kids is
+        typed; a tombstoned session close is refused; tool_response.parent_call_id must name an earlier tool_call."""
+        from omega_evidence.interop import aat
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography assente")
+        privA, pubA = aat.generate_p256_keypair(); kidA = aat.p256_thumbprint(pubA)
+        privR, pubR = aat.generate_p256_keypair(); kidR = aat.p256_thumbprint(pubR)
+        privD, pubD = aat.generate_p256_keypair(); kidD = aat.p256_thumbprint(pubD)
+        ks = {kidA: pubA, kidR: pubR, kidD: pubD}
+
+        def resign(chain, key, start):
+            out = json.loads(json.dumps(chain))
+            for k in range(start, len(out)):
+                body = {kk: v for kk, v in out[k].items() if kk not in ("signature", "sig_alg", "signer_kid", "signature_classical", "signer_kid_classical")}
+                body["parent_record_id"] = out[k - 1]["record_id"]; body["prev_hash"] = aat.record_hash(out[k - 1])
+                out[k] = aat.sign_record(body, key)
+            return out
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = self._log(tmp)
+            ind = next(iter(aat.from_omega(entries, "1.0", private_key_pem=privR, recording_component="urn:recorder:R", close=True).values()))
+            v = aat.verify_chain(ind, keys=ks, agent_kid=kidA, tombstone_kids=[kidD]); self.assertTrue(v["ok"], v["problems"])
+            self.assertTrue(any("recorder key not pinned" in w["why"] for w in v["warnings"]))
+            self.assertFalse(any("recorder key not pinned" in w["why"] for w in aat.verify_chain(ind, keys=ks, agent_kid=kidA, recorder_kid=kidR)["warnings"]))
+            # the deleting-only key D rewrites record 2 and the tail: refused, with and without tombstone_kids / recorder_kid
+            rw = json.loads(json.dumps(ind)); rw[2]["action_detail"]["resource"] = "/etc/passwd"; rw = resign(rw, privD, 2)
+            for kw in ({"tombstone_kids": [kidD]}, {}, {"recorder_kid": kidR}):
+                v = aat.verify_chain(rw, keys=ks, agent_kid=kidA, **kw)
+                self.assertTrue(any("second signing key" in p["why"] or "not the session's recorder" in p["why"] for p in v["problems"]), kw)
+            # D may tombstone (named authority), the recorder may tombstone, A (the agent) may not in an independent session
+            td = json.loads(json.dumps(ind)); td[2] = aat.tombstone(td[2], "x", "2099-01-01T00:00:00Z", key=privD)
+            self.assertTrue(aat.verify_chain(td, keys=ks, agent_kid=kidA, recorder_kid=kidR, tombstone_kids=[kidD])["ok"])
+            self.assertTrue(any("not a deleting authority" in p["why"] for p in aat.verify_chain(td, keys=ks, agent_kid=kidA, recorder_kid=kidR)["problems"]))
+            tr = json.loads(json.dumps(ind)); tr[2] = aat.tombstone(tr[2], "x", "2099-01-01T00:00:00Z", key=privR)
+            self.assertTrue(aat.verify_chain(tr, keys=ks, agent_kid=kidA, recorder_kid=kidR)["ok"])
+            # hostile: signer_kid_classical as a list on a tombstone → verdict, no TypeError; tombstone_kids typed
+            bad = json.loads(json.dumps(td)); bad[2]["signer_kid_classical"] = []
+            v = aat.verify_chain(bad, keys=ks, agent_kid=kidA, recorder_kid=kidR); self.assertFalse(v["ok"])
+            v = aat.verify_chain(ind, keys=ks, tombstone_kids=5); self.assertTrue(any("tombstone_kids" in p["why"] for p in v["problems"]))
+            # -03 fallback: the fallback key is judged by its thumbprint (agent_kid pin holds; deleting authority holds)
+            byB = next(iter(aat.from_omega(entries, "1.0").values()))            # no close: the close's session_hash would not survive re-signing
+            legacy = []
+            for r in byB:
+                body = dict(r)
+                if legacy:
+                    body["parent_record_id"] = legacy[-1]["record_id"]; body["prev_hash"] = aat.record_hash(legacy[-1])
+                body["signature"], _ = aat._es256_sign(aat._signing_input(body), privD)
+                legacy.append(body)
+            self.assertTrue(aat.verify_chain(legacy, pubkey_pem=pubD, allow_legacy_03=True)["ok"])
+            self.assertTrue(any("6.3 step 3a" in p["why"] for p in aat.verify_chain(legacy, pubkey_pem=pubD, agent_kid=kidA, allow_legacy_03=True)["problems"]))
+            # a tombstoned session close is refused; parent_call_id must resolve
+            es = next(iter(aat.from_omega(entries, "1.0", private_key_pem=privA, close=True).values()))
+            tc = json.loads(json.dumps(es)); tc[-1] = aat.tombstone(tc[-1], "x", "2099-01-01T00:00:00Z", key=privA)
+            self.assertTrue(any("session close was replaced" in p["why"] for p in aat.verify_chain(tc, keys=ks, agent_kid=kidA)["problems"]))
+            plain = next(iter(aat.from_omega(entries, "1.0").values()))
+            resp = json.loads(json.dumps(plain)); resp[-1].update({"action_type": "tool_response", "record_phase": "post_execution",
+                                                                   "action_detail": {"tool_name": "t", "response_hash": "0" * 64, "parent_call_id": aat._uuid4_from("nope")}})
+            self.assertTrue(any("parent_call_id" in p["why"] for p in aat.verify_chain(resp)["problems"]))
+            resp[-1]["action_detail"]["parent_call_id"] = plain[1]["record_id"]
+            self.assertFalse(any("parent_call_id" in p["why"] for p in aat.verify_chain(resp)["problems"]))
+
     def test_merkle_epochs_against_cryptovalid_and_exports(self):
         from omega_evidence.interop import aat
         with tempfile.TemporaryDirectory() as tmp:
@@ -1701,7 +1766,15 @@ class TestAAT04(unittest.TestCase):
             self.assertTrue(aat.verify_chain(recs)["ok"])                                  # batch is detached: chain hashes unchanged
             self.assertEqual([aat.record_hash(r) for r in recs], [aat.record_hash(r) for r in plain])
             ve = aat.verify_epochs(recs, [anchor]); self.assertTrue(ve["ok"], ve["problems"])
-            # oracle: cryptovalid's RFC 6962 implementation on the same leaves, for 1..20 leaves
+            # oracle: cryptovalid's RFC 6962 roots and audit paths for 1..20 leaves, VENDORED as vectors (tests/fixtures) so the
+            # claim reproduces in any clone; the live implementation is used too when this machine has it
+            vec = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "rfc6962_cryptovalid_vectors.json")))
+            self.assertEqual(len(vec["trees"]), 20)
+            for t in vec["trees"]:
+                n = t["n"]; datas = [bytes([i]) * 3 for i in range(n)]; leaves = [hashlib.sha256(b"\x00" + d).digest() for d in datas]
+                self.assertEqual(aat.merkle_root(leaves).hex(), t["root"], n)
+                for i in range(n):
+                    self.assertEqual([st["hash"] for st in aat.audit_path(leaves, i)], t["paths"][i], (n, i))
             import importlib.util, sys as _sys
             cv = os.path.join(os.path.expanduser("~"), "omega", "omega_package", "opencore", "cryptovalid_merkle.py")
             if os.path.exists(cv):
@@ -1719,8 +1792,7 @@ class TestAAT04(unittest.TestCase):
                     while len(level) > 1:
                         level = [aat._node(level[j], level[j + 1]) if j + 1 < len(level) else level[j] for j in range(0, len(level), 2)]
                     self.assertEqual(level[0], aat.merkle_root(leaves), n)
-            else:
-                self.skipTest("cryptovalid_merkle oracle not on this host")
+            # (no live cryptovalid on this host: the vendored vectors above already carried the comparison)
             bad = json.loads(json.dumps(recs)); bad[2]["batch"]["inclusion_proof"][0]["hash"] = "0" * 64
             self.assertFalse(aat.verify_epochs(bad, [anchor])["ok"])
             dupidx = json.loads(json.dumps(recs)); dupidx[2]["batch"]["leaf_index"] = 1

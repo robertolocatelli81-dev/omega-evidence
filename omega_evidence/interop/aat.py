@@ -915,7 +915,7 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                  keys: Optional[Dict[str, Any]] = None, agent_kid: Optional[str] = None,
                  require_signatures: bool = False, consequential: Optional[Callable[[Dict[str, Any]], bool]] = None,
                  external_timestamp_ca_file: Optional[str] = None, allow_legacy_03: bool = False,
-                 tombstone_kids: Optional[List[str]] = None) -> Dict[str, Any]:
+                 tombstone_kids: Optional[List[str]] = None, recorder_kid: Optional[str] = None) -> Dict[str, Any]:
     """Verify one AAT (-04) chain offline, fail-closed. Checks (draft sections): mandatory fields and vocabularies
     (§3.1), UUID v4 identifiers, RFC 3339 UTC monotonic timestamps, sizes and the aat_ prefix (§3.3), §7 REQUIRED
     action_detail fields, record_phase rules (§4.2, §8.1, §8.3), recording independence (§5.1/5.2 — with
@@ -933,10 +933,13 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     record naming a recording component other than the agent) and then required of every record. DECLARED DEVIATION: a
     tombstone must carry a valid signature of the deleting authority over the tombstone content (`tombstone(..., key=)`);
     the draft's retained original signature cannot verify and is reported as such; a tombstoned genesis is refused
-    (§8.1 wins over §9.3's "any record"). WHO may delete: a tombstone's signer must be the agent (`agent_kid`) in a
-    self-recorded session, or one of `tombstone_kids` (the deleting authorities the relying party names); a tombstone by any
-    other key in `keys` is a problem, and without `agent_kid`/`tombstone_kids` a signed tombstone is accepted with a warning
-    naming its signer (the authority is not pinned). With `keys` (even empty) or `pubkey_pem`, every record must be signed.
+    (§8.1 wins over §9.3's "any record"). WHO may sign: in a self-recorded session every record must be signed by the agent (`agent_kid`, §6.3 step 3a); in an
+    independent session by the recorder — `recorder_kid` if given, else the first signing key seen, which becomes the
+    session's recorder and any later different key on a non-tombstone record is a problem (a second signing key in one
+    independent session). WHO may delete: a tombstone's signer must be the agent (self-recorded) / the recorder
+    (independent) or one of `tombstone_kids` (deleting authorities the relying party names); any other key in `keys` is a
+    problem, and without an applicable authority a signed tombstone is accepted with a warning naming its signer. The kid a
+    signature is judged by is the thumbprint of the key that VERIFIED it (so the -03 fallback key is judged like any other). With `keys` (even empty) or `pubkey_pem`, every record must be signed.
     Returns {ok, records, problems, warnings, signatures_verified, hybrid_verified, tombstones, keys_rejected, draft, scope}."""
     problems: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
@@ -945,10 +948,21 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 "signatures_verified": 0, "hybrid_verified": 0, "tombstones": 0, "keys_rejected": [], "draft": AAT_DRAFT, "scope": ""}
     keyset = _KeySet(keys, pubkey_pem)
     keyset.allow_legacy = allow_legacy_03
+    if tombstone_kids is not None and not (isinstance(tombstone_kids, (list, tuple, set)) and all(isinstance(k, str) for k in tombstone_kids)):
+        problems.append({"i": -1, "why": "tombstone_kids must be a list of kid strings"})
+        tombstone_kids = None
+    fallback_kid = None
+    if keyset.fallback is not None:
+        try:
+            fallback_kid = p256_thumbprint(keyset.fallback)
+        except Exception:  # noqa: BLE001
+            fallback_kid = None
+    session_recorder_kid = recorder_kid
     prev: Optional[Dict[str, Any]] = None
     signed_ok = hybrid_ok = tombstones = 0
     seen_ids: set = set()
     seen_nonces: set = set()
+    call_ids: set = set()
     if not records:
         problems.append({"i": -1, "why": "empty chain: nothing to verify (not a valid audit trail)"})
     session0 = None
@@ -1037,6 +1051,10 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
         _check_optional(i, r, problems, warnings)
         d = r.get("action_detail") if isinstance(r.get("action_detail"), dict) else {}
         is_tomb = r.get("action_type") == "lifecycle" and d.get("event") == "record_deleted"
+        if r.get("action_type") == "tool_response" and isinstance(d.get("parent_call_id"), str) and d["parent_call_id"] not in call_ids:
+            problems.append({"i": i, "why": "tool_response.parent_call_id does not name an earlier tool_call of this session (§7.2)"})
+        if r.get("action_type") == "tool_call" or (is_tomb and d.get("original_action_type") == "tool_call"):
+            call_ids.add(rid)
         # §4.2 / §8 phase rules
         if (r.get("action_type"), r.get("outcome")) in PRE_EXECUTION_REQUIRED and r.get("record_phase") != "pre_execution":
             problems.append({"i": i, "why": f"{r.get('action_type')}/{r.get('outcome')} MUST be record_phase pre_execution (§4.2)"})
@@ -1079,17 +1097,29 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 warnings.append({"i": i, "why": "records name a recording component other than the agent but the genesis declares no recording_mode (§8.1 SHOULD)"})
         if recording_mode == "self" and session_independent:
             problems.append({"i": i, "why": "self-recording declared but records name another recording component (§5.1)"})
-        if not session_independent and agent_kid is not None and "signature" in r and not is_tomb \
-                and isinstance(r.get("signer_kid"), str) and agent_kid not in (r["signer_kid"], r.get("signer_kid_classical")):
+        # effective signer kids: what the signature will be judged by — the record's kids, or the -03 fallback key's thumbprint
+        eff = [k for k in (r.get("signer_kid"), r.get("signer_kid_classical")) if isinstance(k, str)]
+        if "signature" in r and not eff and allow_legacy_03 and fallback_kid is not None:
+            eff = [fallback_kid]
+        if not session_independent and agent_kid is not None and "signature" in r and not is_tomb and eff and agent_kid not in eff:
             problems.append({"i": i, "why": "self-recorded record not signed by the agent's key (§6.3 step 3a)"})
-        if is_tomb and "signature" in r and isinstance(r.get("signer_kid"), str):
+        if session_independent and "signature" in r and not is_tomb and eff:
+            if session_recorder_kid is None:
+                session_recorder_kid = eff[0]                       # the first signing key of the session is its recorder
+                if recorder_kid is None:
+                    warnings.append({"i": i, "why": f"recorder key not pinned: taking {eff[0]!r} as the session's recorder (pass recorder_kid)"})
+            elif session_recorder_kid not in eff:
+                problems.append({"i": i, "why": f"record signed by {eff[0]!r}, not the session's recorder {session_recorder_kid!r} (§5.2: a second signing key in one independent session)"})
+        if is_tomb and "signature" in r and eff:
             allowed = set(tombstone_kids or [])
             if not session_independent and agent_kid is not None:
                 allowed.add(agent_kid)
-            if allowed and r["signer_kid"] not in allowed and r.get("signer_kid_classical") not in allowed:
-                problems.append({"i": i, "why": f"tombstone signed by {r['signer_kid']!r}, not a deleting authority (agent_kid / tombstone_kids)"})
+            if session_independent and session_recorder_kid is not None:
+                allowed.add(session_recorder_kid)
+            if allowed and not (set(eff) & allowed):
+                problems.append({"i": i, "why": f"tombstone signed by {eff[0]!r}, not a deleting authority (agent_kid / recorder / tombstone_kids)"})
             elif not allowed:
-                warnings.append({"i": i, "why": f"tombstone signed by {r['signer_kid']!r}: deleting authority not pinned (pass agent_kid or tombstone_kids)"})
+                warnings.append({"i": i, "why": f"tombstone signed by {eff[0]!r}: deleting authority not pinned (pass agent_kid / recorder_kid / tombstone_kids)"})
         if not low and i == 0 and not session_independent:
             warnings.append({"i": i, "why": "L2+ session recorded by the agent itself (§5.2 SHOULD: independent recording)"})
         if low is False and ta is not None and ta.get("downgraded") is True:
@@ -1145,6 +1175,8 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 pass
             if r.get("outcome") != "success":
                 problems.append({"i": i, "why": "tombstone outcome MUST be success (§9.3)"})
+            if d.get("original_action_type") == "lifecycle" and i == len(records) - 1:
+                problems.append({"i": i, "why": "the session close was replaced by a tombstone: a deleted close reopens the chain to appends (§8.3; refused like a tombstoned genesis)"})
         elif "tombstone_hash" in r:
             problems.append({"i": i, "why": "tombstone_hash on a record that is not a tombstone"})
         # §8.3 close
@@ -1581,6 +1613,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     v.add_argument("--allow-legacy-03", action="store_true", help="accept signed records without signer_kid, resolved with --pubkey (-03 rule)")
     v.add_argument("--epochs-complete", action="store_true", help="an epoch with anchored leaves missing from the chain is a problem")
     v.add_argument("--tombstone-kid", action="append", default=[], help="kid of a deleting authority allowed to sign tombstones (repeatable)")
+    v.add_argument("--recorder-kid", help="RFC 7638 / AKP thumbprint of the independent recorder's key (independent sessions)")
     c = sub.add_parser("csv", help="print the chain as §10.3 CSV (lossy, not authoritative)")
     c.add_argument("chain")
     a = p.parse_args(argv)
@@ -1598,7 +1631,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"})); return 2
     try:
         out = verify_chain(records, pubkey_pem=pub, keys=keys or None, agent_kid=a.agent_kid, require_signatures=a.require_signatures,
-                           external_timestamp_ca_file=a.tsa_ca, allow_legacy_03=a.allow_legacy_03, tombstone_kids=a.tombstone_kid or None)
+                           external_timestamp_ca_file=a.tsa_ca, allow_legacy_03=a.allow_legacy_03, tombstone_kids=a.tombstone_kid or None, recorder_kid=a.recorder_kid)
     except Exception as ex:  # noqa: BLE001 — a verifier prints a verdict, never a traceback
         print(json.dumps({"ok": False, "error": f"verifier error: {type(ex).__name__}: {ex}"})); return 2
     if a.epochs:

@@ -21,7 +21,7 @@ but do not derive from, this toolkit.
 pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
 
 # or straight from the tagged source
-pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.8.0
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.8.1
 ```
 
 Release artifacts (`.whl` / `.tar.gz`) are attached to each
@@ -166,6 +166,16 @@ export cannot claim either); `1e999` in a JSONL is refused as non-finite, the `-
 unparsable `pubkey_pem` or a non-dict `keys` is reported in `keys_rejected`; every guard of rounds 1-6 is now asserted by
 its own message in the tests, on chains re-linked and re-signed so that neither `prev_hash` nor the signature masks it.
 
+**0.8.1 (20 September 2026) — round 7**, run after 0.8.0 shipped and applied the same day: the **recorder of an
+independent session is pinned** (`recorder_kid`, or the first signing key of the session), so a deleting-only key or any
+other non-agent key in the key set can no longer rewrite the tail of an independent session with `ok: true` (0.8.0's "who
+may delete is pinned" held only for self-recorded sessions — corrected, measured); the -03 fallback key is judged by its
+thumbprint like any other, so `agent_kid` and the deleting authorities also bind legacy records; a tombstone whose
+`signer_kid_classical` is not a string is a verdict, not a `TypeError`; `tombstone_kids` is type-checked; a tombstoned session
+close is refused like a tombstoned genesis (a deleted close would reopen the chain to appends); `tool_response.parent_call_id`
+must name an earlier `tool_call` of the session; the RFC 6962 comparison with cryptovalid is vendored as 20 root/path
+vectors in `tests/fixtures/`, so it reproduces in any clone.
+
 Corrections to 0.7.0 (measured, not softened): 0.7.0 implemented -00 and its exports **violated the draft's REQUIRED
 per-action `action_detail` fields** (`tool_name`, `parameters_hash`, `decision_type` were not emitted; the verifier did
 not check them) — fixed and enforced; -00 chains have no `record_phase` and are refused with an explicit reason
@@ -270,7 +280,7 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
-### Breaking changes in 0.8.0
+### Breaking changes in 0.8.0 / 0.8.1
 
 - `interop.aat` now implements draft **-04**: `record_phase` is mandatory, the §7 per-action `action_detail` fields
   are required, `signer_kid`/`sig_alg` accompany every signature, and `verify_chain` takes `keys={kid: key}`
