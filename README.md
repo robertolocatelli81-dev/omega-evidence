@@ -108,8 +108,8 @@ audit paths (roots and paths identical to cryptovalid's implementation for 1…2
 RFC 3161 token (verified only against a trust anchor, never green without one). Exports: JSONL (§10.1, the JCS form, so
 the file re-reads to the same hashes) and CSV (§10.3, lossy, declared).
 
-Review round 1 (Gemini 3.1 Pro, Claude Opus 5, Sonnet 5, Haiku 4.5, 19 September 2026) found and we fixed, each
-re-measured: a **forged tombstone** (`tombstone_hash` := the next record's public `prev_hash`, stale signature kept)
+Six review rounds (Gemini 3.1 Pro, Claude Opus 5, Sonnet 5, Haiku 4.5, 19 September 2026; the dossier lists every finding;
+every guard is asserted by its own message in the tests and ablated) found and we fixed, each re-measured — round 1: a **forged tombstone** (`tombstone_hash` := the next record's public `prev_hash`, stale signature kept)
 made any signed record disappear with `ok: true` — the draft's §9.3 "retains the signature field" is exactly that hole,
 so this module DEVIATES: a tombstone is signed anew by the deleting authority (`tombstone(..., key=)`) and verified like
 any record, an unsigned tombstone passes only in an unsigned chain and is reported; hostile inputs crashed the verifier
