@@ -1242,11 +1242,12 @@ class TestAAT04(unittest.TestCase):
             # legitimate deletion: tombstone signed anew by the deleting authority
             good = json.loads(json.dumps(es)); good[2] = aat.tombstone(good[2], "gdpr_art17", "2099-01-01T00:00:00Z", key=priv2)
             self.assertEqual(good[2]["signer_kid"], kid2); self.assertIn("original_signature", good[2]["action_detail"])
-            v = aat.verify_chain(good, keys={kid: pub, kid2: pub2}, require_signatures=True)
+            v = aat.verify_chain(good, keys={kid: pub, kid2: pub2}, require_signatures=True, tombstone_kids=[kid2])
             self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["tombstones"], 1); self.assertEqual(v["signatures_verified"], 5)
+            self.assertFalse(aat.verify_chain(good, keys={kid: pub, kid2: pub2})["ok"])          # not a named deleting authority (round 8: the agent is inferred)
             self.assertFalse(aat.verify_chain(good, keys={kid: pub})["ok"])                       # deleting key unknown → problem
             edited = json.loads(json.dumps(good)); edited[2]["action_detail"]["deletion_reason"] = "other"
-            self.assertFalse(aat.verify_chain(edited, keys={kid: pub, kid2: pub2})["ok"])       # tombstone content is signed
+            self.assertFalse(aat.verify_chain(edited, keys={kid: pub, kid2: pub2}, tombstone_kids=[kid2])["ok"])   # tombstone content is signed
             # unsigned chain: tombstone accepted with the §9.3 warning
             plain = next(iter(aat.from_omega(entries, "1.0", close=True).values()))
             plain[2] = aat.tombstone(plain[2], "gdpr_art17", "2099-01-01T00:00:00Z")
@@ -1660,7 +1661,8 @@ class TestAAT04(unittest.TestCase):
             t = json.loads(json.dumps(es)); t[2] = aat.tombstone(t[2], "x", "2099-01-01T00:00:00Z", key=privX)
             v = aat.verify_chain(t, keys=ks, agent_kid=kid); self.assertTrue(any("not a deleting authority" in p["why"] for p in v["problems"]))
             self.assertTrue(aat.verify_chain(t, keys=ks, agent_kid=kid, tombstone_kids=[kidX])["ok"])
-            v = aat.verify_chain(t, keys=ks); self.assertTrue(v["ok"]); self.assertTrue(any("not pinned" in w["why"] for w in v["warnings"]))
+            v = aat.verify_chain(t, keys=ks); self.assertFalse(v["ok"])                          # round 8: the genesis signer is the inferred agent, X is not an authority
+            self.assertTrue(any("agent key not pinned" in w["why"] for w in v["warnings"]))
             ta = json.loads(json.dumps(es)); ta[2] = aat.tombstone(ta[2], "x", "2099-01-01T00:00:00Z", key=priv)
             self.assertTrue(aat.verify_chain(ta, keys=ks, agent_kid=kid)["ok"])                    # the agent may delete its own
             # 4. key algorithm mismatch by message: a record claiming ML-DSA-65 under a P-256 kid
@@ -1747,13 +1749,69 @@ class TestAAT04(unittest.TestCase):
             # a tombstoned session close is refused; parent_call_id must resolve
             es = next(iter(aat.from_omega(entries, "1.0", private_key_pem=privA, close=True).values()))
             tc = json.loads(json.dumps(es)); tc[-1] = aat.tombstone(tc[-1], "x", "2099-01-01T00:00:00Z", key=privA)
-            self.assertTrue(any("session close was replaced" in p["why"] for p in aat.verify_chain(tc, keys=ks, agent_kid=kidA)["problems"]))
+            self.assertTrue(any("deleted genesis or close" in p["why"] for p in aat.verify_chain(tc, keys=ks, agent_kid=kidA)["problems"]))
             plain = next(iter(aat.from_omega(entries, "1.0").values()))
             resp = json.loads(json.dumps(plain)); resp[-1].update({"action_type": "tool_response", "record_phase": "post_execution",
                                                                    "action_detail": {"tool_name": "t", "response_hash": "0" * 64, "parent_call_id": aat._uuid4_from("nope")}})
             self.assertTrue(any("parent_call_id" in p["why"] for p in aat.verify_chain(resp)["problems"]))
             resp[-1]["action_detail"]["parent_call_id"] = plain[1]["record_id"]
             self.assertFalse(any("parent_call_id" in p["why"] for p in aat.verify_chain(resp)["problems"]))
+
+    def test_round8_close_reopen_self_recorded_rewrite_s13_types(self):
+        """Review round 8 (Opus/Haiku, 2026-09-20): a tombstoned close followed by appends is refused anywhere in the chain;
+        a self-recorded session without agent_kid pins the genesis signer as the agent (a second key in the key set cannot
+        rewrite the tail); §13 inference_config / environment values are typed."""
+        from omega_evidence.interop import aat
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("cryptography assente")
+        privA, pubA = aat.generate_p256_keypair(); kidA = aat.p256_thumbprint(pubA)
+        privD, pubD = aat.generate_p256_keypair(); kidD = aat.p256_thumbprint(pubD)
+        ks = {kidA: pubA, kidD: pubD}
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = self._log(tmp)
+            es = next(iter(aat.from_omega(entries, "1.0", private_key_pem=privA, close=True).values()))
+            # tombstone the close, append a wire_transfer and a new close, all signed by the agent: refused
+            re = json.loads(json.dumps(es)); re[-1] = aat.tombstone(re[-1], "oops", "2099-01-01T00:00:00Z", key=privA)
+            extra = {k: v for k, v in es[1].items() if k not in ("signature", "sig_alg", "signer_kid")}
+            extra.update({"record_id": aat._uuid4_from("wire"), "parent_record_id": re[-1]["record_id"], "prev_hash": aat.record_hash(re[-1]),
+                          "timestamp": "2099-01-02T00:00:00Z", "action_detail": {"tool_name": "wire_transfer", "parameters_hash": "0" * 64}})
+            re.append(aat.sign_record(extra, privA)); re.append(aat.sign_record(aat.close_record(re, synthesised=True), privA))
+            v = aat.verify_chain(re, keys=ks, agent_kid=kidA, require_signatures=True)
+            self.assertTrue(any("deleted genesis or close" in p["why"] for p in v["problems"]), v["problems"])
+            # a pause record may be tombstoned (original_event recorded)
+            pz = json.loads(json.dumps(es)); pause = {k: v for k, v in es[1].items() if k not in ("signature", "sig_alg", "signer_kid")}
+            pause.update({"record_id": aat._uuid4_from("pause"), "action_type": "lifecycle", "action_detail": {"event": "pause"}, "record_phase": "concurrent"})
+            pz = [pz[0], aat.sign_record(dict(pause, parent_record_id=pz[0]["record_id"], prev_hash=aat.record_hash(pz[0])), privA)]
+            pz[1] = aat.tombstone(pz[1], "x", "2099-01-01T00:00:00Z", key=privA)
+            self.assertEqual(pz[1]["action_detail"]["original_event"], "pause")
+            self.assertFalse(any("deleted genesis or close" in p["why"] for p in aat.verify_chain(pz, keys=ks, agent_kid=kidA)["problems"]))
+            # self-recorded without agent_kid: D (in the key set) rewrites the tail → problem; the honest chain warns only
+            rw = json.loads(json.dumps(es)); rw[2]["action_detail"]["resource"] = "/etc/passwd"
+            for k in range(2, len(rw)):
+                body = {kk: v for kk, v in rw[k].items() if kk not in ("signature", "sig_alg", "signer_kid")}
+                body["parent_record_id"] = rw[k - 1]["record_id"]; body["prev_hash"] = aat.record_hash(rw[k - 1])
+                rw[k] = aat.sign_record(body, privD)
+            v = aat.verify_chain(rw, keys=ks, require_signatures=True)
+            self.assertTrue(any("6.3 step 3a" in p["why"] for p in v["problems"]))
+            v = aat.verify_chain(es, keys=ks, require_signatures=True)
+            self.assertTrue(v["ok"], v["problems"]); self.assertTrue(any("agent key not pinned" in w["why"] for w in v["warnings"]))
+            # §13 typed values
+            plain = next(iter(aat.from_omega(entries, "1.0").values()))
+            d = json.loads(json.dumps(plain)); d[-1]["reproducibility_class"] = "reproducible"
+            d[-1].update({k: "sha256:" + "1" * 64 for k in aat.CLOSURE_DIGESTS}); d[-1]["content_fingerprint"] = "2" * 64
+            d[-1]["inference_config"] = {"temperature": "high", "top_k": 1, "top_p": 1, "seed": None, "max_tokens": 10}
+            d[-1]["environment"] = {"engine": "x", "engine_version": "1", "hardware": "cpu", "batch_size": 1, "num_threads": 1}
+            self.assertTrue(any("OPEN attestation" in p["why"] for p in aat.verify_chain(d)["problems"]))
+            d[-1]["inference_config"]["temperature"] = 0
+            self.assertFalse(any("OPEN attestation" in p["why"] for p in aat.verify_chain(d)["problems"]))
+            d[-1]["environment"]["batch_size"] = "1"
+            self.assertTrue(any("OPEN attestation" in p["why"] for p in aat.verify_chain(d)["problems"]))
+            d[-1]["environment"]["batch_size"] = 1; d[-1]["inference_config"]["seed"] = "x"
+            self.assertTrue(any("OPEN attestation" in p["why"] for p in aat.verify_chain(d)["problems"]))
+            d[-1]["inference_config"].pop("seed")
+            self.assertTrue(any("OPEN attestation" in p["why"] for p in aat.verify_chain(d)["problems"]))
 
     def test_merkle_epochs_against_cryptovalid_and_exports(self):
         from omega_evidence.interop import aat

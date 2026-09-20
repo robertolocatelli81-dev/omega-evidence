@@ -585,6 +585,9 @@ def tombstone(rec: Dict[str, Any], deletion_reason: str, deleted_at: str, key: A
     out["action_type"] = "lifecycle"
     out["action_detail"] = {"event": "record_deleted", "deletion_reason": str(deletion_reason),
                             "deleted_at": _rfc3339(deleted_at), "original_action_type": rec.get("action_type")}
+    d0 = rec.get("action_detail") if isinstance(rec.get("action_detail"), dict) else {}
+    if rec.get("action_type") == "lifecycle" and d0.get("event") != "record_deleted":
+        out["action_detail"]["original_event"] = d0.get("event")      # a genesis or a close cannot be deleted (§8.1/§8.3)
     orig = {k: rec[k] for k in ("signature", "sig_alg", "signer_kid", "signature_classical", "signer_kid_classical") if k in rec}
     if orig:
         out["action_detail"]["original_signature"] = orig
@@ -593,6 +596,8 @@ def tombstone(rec: Dict[str, Any], deletion_reason: str, deleted_at: str, key: A
     if rec.get("action_type") == "lifecycle" and prev_d.get("event") == "record_deleted" and _hex64(rec.get("tombstone_hash")):
         out["tombstone_hash"] = rec["tombstone_hash"]                 # re-tombstoning keeps the ORIGINAL record's hash
         out["action_detail"]["original_action_type"] = prev_d.get("original_action_type")
+        if "original_event" in prev_d:
+            out["action_detail"]["original_event"] = prev_d["original_event"]
     else:
         out["tombstone_hash"] = record_hash(rec, strict=False)
     if key is not None and classical_private_key_pem is not None:
@@ -818,10 +823,12 @@ def _check_detail(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], war
     if rc == "reproducible":
         missing = [n for n in CLOSURE_DIGESTS if n not in src]
         ic, env = src.get("inference_config"), src.get("environment")
-        if not isinstance(ic, dict) or any(k not in ic for k in ("temperature", "top_k", "top_p", "seed", "max_tokens")):
-            missing.append("inference_config{temperature,top_k,top_p,seed,max_tokens}")
-        if not isinstance(env, dict) or any(k not in env for k in ("engine", "engine_version", "hardware", "batch_size", "num_threads")):
-            missing.append("environment{engine,engine_version,hardware,batch_size,num_threads}")
+        if not isinstance(ic, dict) or not all(_num(ic.get(k)) for k in ("temperature", "top_k", "top_p", "max_tokens")) \
+                or not (ic.get("seed") is None or _num(ic.get("seed"))) or "seed" not in ic:
+            missing.append("inference_config{temperature,top_k,top_p,max_tokens: numbers; seed: number or null}")
+        if not isinstance(env, dict) or not all(isinstance(env.get(k), str) and env[k] for k in ("engine", "engine_version", "hardware")) \
+                or not all(_num(env.get(k)) for k in ("batch_size", "num_threads")):
+            missing.append("environment{engine,engine_version,hardware: strings; batch_size,num_threads: numbers}")
         if not _hex64(r.get("content_fingerprint")) and not _hex64(r.get("input_hash")):
             missing.append("sealed input (content_fingerprint or input_hash)")
         if missing:
@@ -958,6 +965,7 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
         except Exception:  # noqa: BLE001
             fallback_kid = None
     session_recorder_kid = recorder_kid
+    session_agent_kid = agent_kid
     prev: Optional[Dict[str, Any]] = None
     signed_ok = hybrid_ok = tombstones = 0
     seen_ids: set = set()
@@ -1101,8 +1109,12 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
         eff = [k for k in (r.get("signer_kid"), r.get("signer_kid_classical")) if isinstance(k, str)]
         if "signature" in r and not eff and allow_legacy_03 and fallback_kid is not None:
             eff = [fallback_kid]
-        if not session_independent and agent_kid is not None and "signature" in r and not is_tomb and eff and agent_kid not in eff:
-            problems.append({"i": i, "why": "self-recorded record not signed by the agent's key (§6.3 step 3a)"})
+        if not session_independent and "signature" in r and not is_tomb and eff:
+            if session_agent_kid is None:
+                session_agent_kid = eff[0]                          # the first signing key of a self-recorded session is its agent
+                warnings.append({"i": i, "why": f"agent key not pinned: taking {eff[0]!r} as the session's agent (pass agent_kid)"})
+            elif session_agent_kid not in eff:
+                problems.append({"i": i, "why": "self-recorded record not signed by the agent's key (§6.3 step 3a)"})
         if session_independent and "signature" in r and not is_tomb and eff:
             if session_recorder_kid is None:
                 session_recorder_kid = eff[0]                       # the first signing key of the session is its recorder
@@ -1112,8 +1124,8 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 problems.append({"i": i, "why": f"record signed by {eff[0]!r}, not the session's recorder {session_recorder_kid!r} (§5.2: a second signing key in one independent session)"})
         if is_tomb and "signature" in r and eff:
             allowed = set(tombstone_kids or [])
-            if not session_independent and agent_kid is not None:
-                allowed.add(agent_kid)
+            if not session_independent and session_agent_kid is not None:
+                allowed.add(session_agent_kid)
             if session_independent and session_recorder_kid is not None:
                 allowed.add(session_recorder_kid)
             if allowed and not (set(eff) & allowed):
@@ -1175,8 +1187,9 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 pass
             if r.get("outcome") != "success":
                 problems.append({"i": i, "why": "tombstone outcome MUST be success (§9.3)"})
-            if d.get("original_action_type") == "lifecycle" and i == len(records) - 1:
-                problems.append({"i": i, "why": "the session close was replaced by a tombstone: a deleted close reopens the chain to appends (§8.3; refused like a tombstoned genesis)"})
+            if d.get("original_action_type") == "lifecycle" and d.get("original_event") not in ("pause", "resume", "configuration_change", "key_rotation", "trust_level_change"):
+                problems.append({"i": i, "why": "a tombstoned lifecycle record without an original_event outside {pause, resume, configuration_change, "
+                                                "key_rotation, trust_level_change}: a deleted genesis or close would reopen the chain (§8.1/§8.3; refused anywhere in the chain)"})
         elif "tombstone_hash" in r:
             problems.append({"i": i, "why": "tombstone_hash on a record that is not a tombstone"})
         # §8.3 close

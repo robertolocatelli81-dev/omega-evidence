@@ -174,7 +174,12 @@ thumbprint like any other, so `agent_kid` and the deleting authorities also bind
 `signer_kid_classical` is not a string is a verdict, not a `TypeError`; `tombstone_kids` is type-checked; a tombstoned session
 close is refused like a tombstoned genesis (a deleted close would reopen the chain to appends); `tool_response.parent_call_id`
 must name an earlier `tool_call` of the session; the RFC 6962 comparison with cryptovalid is vendored as 20 root/path
-vectors in `tests/fixtures/`, so it reproduces in any clone.
+vectors in `tests/fixtures/`, so it reproduces in any clone. **Round 8** (the last, its findings applied and re-measured
+without a further round): a tombstoned close followed by appends was refused only while the tombstone was still the last
+record — now a tombstoned genesis or close is refused anywhere (a tombstone of a `pause`/`resume`/`configuration_change`/
+`key_rotation`/`trust_level_change` record carries `original_event` and passes); a self-recorded session without
+`agent_kid` pins the genesis signer as the agent (warning), so a second key in the key set cannot rewrite the tail without
+a problem; `inference_config` and `environment` values are typed for the §13.6 closure.
 
 Corrections to 0.7.0 (measured, not softened): 0.7.0 implemented -00 and its exports **violated the draft's REQUIRED
 per-action `action_detail` fields** (`tool_name`, `parameters_hash`, `decision_type` were not emitted; the verifier did
