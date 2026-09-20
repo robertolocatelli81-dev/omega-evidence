@@ -21,7 +21,7 @@ but do not derive from, this toolkit.
 pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
 
 # or straight from the tagged source
-pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.8.1
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.8.2
 ```
 
 Release artifacts (`.whl` / `.tar.gz`) are attached to each
@@ -176,10 +176,17 @@ close is refused like a tombstoned genesis (a deleted close would reopen the cha
 must name an earlier `tool_call` of the session; the RFC 6962 comparison with cryptovalid is vendored as 20 root/path
 vectors in `tests/fixtures/`, so it reproduces in any clone. **Round 8** (the last, its findings applied and re-measured
 without a further round): a tombstoned close followed by appends was refused only while the tombstone was still the last
-record — now a tombstoned genesis or close is refused anywhere (a tombstone of a `pause`/`resume`/`configuration_change`/
-`key_rotation`/`trust_level_change` record carries `original_event` and passes); a self-recorded session without
-`agent_kid` pins the genesis signer as the agent (warning), so a second key in the key set cannot rewrite the tail without
-a problem; `inference_config` and `environment` values are typed for the §13.6 closure.
+record — and 0.8.1's `original_event` guard could be written by the deleter ("pause" on a deleted close reopened the
+chain: found by the same round, measured against the shipped 0.8.1). **0.8.2** closes it the only way that does not trust
+the deleter: **no lifecycle record is ever tombstoned** (`tombstone()` raises; a chain carrying one is refused anywhere;
+lifecycle records carry no erasable content, §9.3 exists for content), and a tombstone as the LAST record is a problem
+(its `tombstone_hash` is bound to nothing). Also from round 8: a self-recorded session without `agent_kid` pins the genesis
+signer as the agent (warning), so a second key in the key set cannot rewrite the tail without a problem; the PRIMARY
+signer (`signer_kid`) is what every pin is compared with — a hybrid record whose classical half is the agent's key while
+the primary is foreign is not the agent's; re-tombstoning keeps the ORIGINAL record's signature as evidence and lists the
+deleters' signatures; the export verifies its own chains with the keys it just used before returning them, and refuses an
+omega `agent_id` that cannot become a URI or a non-string `human_approver`; `inference_config` and `environment` values
+are typed for the §13.6 closure.
 
 Corrections to 0.7.0 (measured, not softened): 0.7.0 implemented -00 and its exports **violated the draft's REQUIRED
 per-action `action_detail` fields** (`tool_name`, `parameters_hash`, `decision_type` were not emitted; the verifier did
@@ -285,7 +292,7 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
-### Breaking changes in 0.8.0 / 0.8.1
+### Breaking changes in 0.8.0 / 0.8.1 / 0.8.2
 
 - `interop.aat` now implements draft **-04**: `record_phase` is mandatory, the §7 per-action `action_detail` fields
   are required, `signer_kid`/`sig_alg` accompany every signature, and `verify_chain` takes `keys={kid: key}`

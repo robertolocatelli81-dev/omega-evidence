@@ -371,6 +371,13 @@ def _uuid4_from(seed: str) -> str:
     return str(uuid.UUID(bytes=bytes(b)))
 
 
+def _urn_agent(aid: str) -> str:
+    u = f"urn:omega:agent:{aid}"
+    if not _URI.match(u):
+        raise ValueError(f"omega agent_id {aid!r} cannot become a URI (whitespace): refused, an export never rewrites an identity")
+    return u
+
+
 def _detail_for(e: Dict[str, Any], aat_type: str, omega_action: str) -> Dict[str, Any]:
     """§7 REQUIRED action_detail fields, DERIVED from what the omega record carries — never invented.
     tool_call: tool_name = the omega action (file_write, command_exec, network, ...) and parameters_hash =
@@ -481,10 +488,12 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
         if oo not in _OUTCOME_MAP:
             raise ValueError(f"omega outcome {oo!r} has no AAT mapping: refused, not guessed")
         aat_type = _ACTION_MAP[oa]
+        if e.get("human_approver") is not None and not isinstance(e.get("human_approver"), str):
+            raise ValueError("omega human_approver must be a string (AAT operator_id, §3.2): refused, not coerced")
         rec: Dict[str, Any] = {
             "record_id": _uuid4_from(f"omega-record:{seed}"),
             "timestamp": _rfc3339(str(e.get("timestamp_utc", ""))),
-            "agent_id": aid if _URI.match(aid) else f"urn:omega:agent:{aid}",
+            "agent_id": aid if _URI.match(aid) else _urn_agent(aid),
             "agent_version": agent_version,
             "session_id": sid,
             "action_type": aat_type,
@@ -529,6 +538,18 @@ def from_omega(entries: List[Dict[str, Any]], agent_version: str, trust_level: s
     if close:
         for sid, chain in chains.items():
             chain.append(_sign(close_record(chain, synthesised=True)))
+    self_keys: Dict[str, Any] = {}                                  # an export verifies itself before it is handed over
+    if private_key_pem is not None:
+        from cryptography.hazmat.primitives import serialization
+        pub = serialization.load_pem_private_key(private_key_pem, password=None).public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+        self_keys[p256_thumbprint(pub)] = pub
+    if pq_signer is not None:
+        self_keys[mldsa65_thumbprint(_pq_pub_raw(pq_signer))] = _pq_pub_raw(pq_signer)
+    for sid, chain in chains.items():
+        v = verify_chain(chain, keys=self_keys or None)
+        if not v["ok"]:
+            raise ValueError(f"export self-check failed for session {sid}: {v['problems'][:3]}")
     return chains
 
 
@@ -587,17 +608,21 @@ def tombstone(rec: Dict[str, Any], deletion_reason: str, deleted_at: str, key: A
                             "deleted_at": _rfc3339(deleted_at), "original_action_type": rec.get("action_type")}
     d0 = rec.get("action_detail") if isinstance(rec.get("action_detail"), dict) else {}
     if rec.get("action_type") == "lifecycle" and d0.get("event") != "record_deleted":
-        out["action_detail"]["original_event"] = d0.get("event")      # a genesis or a close cannot be deleted (§8.1/§8.3)
+        raise ValueError("lifecycle records carry no erasable content and are never tombstoned (§8.1/§8.3; a deleter's claim about which one it was cannot be checked)")
     orig = {k: rec[k] for k in ("signature", "sig_alg", "signer_kid", "signature_classical", "signer_kid_classical") if k in rec}
-    if orig:
+    is_re = rec.get("action_type") == "lifecycle" and d0.get("event") == "record_deleted"
+    if is_re:
+        if "original_signature" in d0:
+            out["action_detail"]["original_signature"] = d0["original_signature"]     # the ORIGINAL record's signature survives every re-tombstoning
+        if orig:
+            out["action_detail"]["deleter_signatures"] = list(d0.get("deleter_signatures", [])) + [orig]
+    elif orig:
         out["action_detail"]["original_signature"] = orig
     out["outcome"] = "success"
     prev_d = rec.get("action_detail") if isinstance(rec.get("action_detail"), dict) else {}
     if rec.get("action_type") == "lifecycle" and prev_d.get("event") == "record_deleted" and _hex64(rec.get("tombstone_hash")):
         out["tombstone_hash"] = rec["tombstone_hash"]                 # re-tombstoning keeps the ORIGINAL record's hash
         out["action_detail"]["original_action_type"] = prev_d.get("original_action_type")
-        if "original_event" in prev_d:
-            out["action_detail"]["original_event"] = prev_d["original_event"]
     else:
         out["tombstone_hash"] = record_hash(rec, strict=False)
     if key is not None and classical_private_key_pem is not None:
@@ -1098,7 +1123,7 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
             elif "signer_kid" not in r:
                 problems.append({"i": i, "why": "independent recording: signed record without signer_kid — the -03 fallback (the agent's key) does not apply to an independent recorder (§5.2)"})
             elif agent_kid is not None and agent_kid in (r.get("signer_kid"), r.get("signer_kid_classical")):
-                problems.append({"i": i, "why": "independently recorded record signed with the AGENT's key (§5.2)"})
+                problems.append({"i": i, "why": "independently recorded record signed with the AGENT's key (§5.2)"})     # either half: the agent must not appear at all
             elif agent_kid is None and i == 0:
                 warnings.append({"i": i, "why": "independent recording: pass agent_kid to check that the recorder's key differs from the agent's (§5.2)"})
             if recording_mode is None and i == 0:
@@ -1109,29 +1134,32 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
         eff = [k for k in (r.get("signer_kid"), r.get("signer_kid_classical")) if isinstance(k, str)]
         if "signature" in r and not eff and allow_legacy_03 and fallback_kid is not None:
             eff = [fallback_kid]
-        if not session_independent and "signature" in r and not is_tomb and eff:
+        # the PRIMARY signer (signer_kid) is what a pin is compared with; a hybrid record's classical half is judged as the
+        # companion of that principal (pinned by `*_classical` companions the caller may pass), never as an alternative
+        primary = eff[0] if eff else None
+        if not session_independent and "signature" in r and not is_tomb and primary is not None:
             if session_agent_kid is None:
-                session_agent_kid = eff[0]                          # the first signing key of a self-recorded session is its agent
-                warnings.append({"i": i, "why": f"agent key not pinned: taking {eff[0]!r} as the session's agent (pass agent_kid)"})
-            elif session_agent_kid not in eff:
+                session_agent_kid = primary                         # the first signing key of a self-recorded session is its agent
+                warnings.append({"i": i, "why": f"agent key not pinned: taking {primary!r} as the session's agent (pass agent_kid)"})
+            elif session_agent_kid != primary:
                 problems.append({"i": i, "why": "self-recorded record not signed by the agent's key (§6.3 step 3a)"})
-        if session_independent and "signature" in r and not is_tomb and eff:
+        if session_independent and "signature" in r and not is_tomb and primary is not None:
             if session_recorder_kid is None:
-                session_recorder_kid = eff[0]                       # the first signing key of the session is its recorder
+                session_recorder_kid = primary                      # the first signing key of the session is its recorder
                 if recorder_kid is None:
-                    warnings.append({"i": i, "why": f"recorder key not pinned: taking {eff[0]!r} as the session's recorder (pass recorder_kid)"})
-            elif session_recorder_kid not in eff:
-                problems.append({"i": i, "why": f"record signed by {eff[0]!r}, not the session's recorder {session_recorder_kid!r} (§5.2: a second signing key in one independent session)"})
+                    warnings.append({"i": i, "why": f"recorder key not pinned: taking {primary!r} as the session's recorder (pass recorder_kid)"})
+            elif session_recorder_kid != primary:
+                problems.append({"i": i, "why": f"record signed by {primary!r}, not the session's recorder {session_recorder_kid!r} (§5.2: a second signing key in one independent session)"})
         if is_tomb and "signature" in r and eff:
             allowed = set(tombstone_kids or [])
             if not session_independent and session_agent_kid is not None:
                 allowed.add(session_agent_kid)
             if session_independent and session_recorder_kid is not None:
                 allowed.add(session_recorder_kid)
-            if allowed and not (set(eff) & allowed):
-                problems.append({"i": i, "why": f"tombstone signed by {eff[0]!r}, not a deleting authority (agent_kid / recorder / tombstone_kids)"})
+            if allowed and primary not in allowed:
+                problems.append({"i": i, "why": f"tombstone signed by {primary!r}, not a deleting authority (agent_kid / recorder / tombstone_kids)"})
             elif not allowed:
-                warnings.append({"i": i, "why": f"tombstone signed by {eff[0]!r}: deleting authority not pinned (pass agent_kid / recorder_kid / tombstone_kids)"})
+                warnings.append({"i": i, "why": f"tombstone signed by {primary!r}: deleting authority not pinned (pass agent_kid / recorder_kid / tombstone_kids)"})
         if not low and i == 0 and not session_independent:
             warnings.append({"i": i, "why": "L2+ session recorded by the agent itself (§5.2 SHOULD: independent recording)"})
         if low is False and ta is not None and ta.get("downgraded") is True:
@@ -1187,9 +1215,11 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                 pass
             if r.get("outcome") != "success":
                 problems.append({"i": i, "why": "tombstone outcome MUST be success (§9.3)"})
-            if d.get("original_action_type") == "lifecycle" and d.get("original_event") not in ("pause", "resume", "configuration_change", "key_rotation", "trust_level_change"):
-                problems.append({"i": i, "why": "a tombstoned lifecycle record without an original_event outside {pause, resume, configuration_change, "
-                                                "key_rotation, trust_level_change}: a deleted genesis or close would reopen the chain (§8.1/§8.3; refused anywhere in the chain)"})
+            if d.get("original_action_type") == "lifecycle":
+                problems.append({"i": i, "why": "tombstone of a lifecycle record: lifecycle records carry no erasable content and a deleted genesis or close "
+                                                "would reopen the chain — refused anywhere in the chain (§8.1/§8.3; any original_event claim is written by the deleter)"})
+            if i == len(records) - 1:
+                problems.append({"i": i, "why": "tombstone as the last record: its tombstone_hash is bound to nothing and anything could follow — re-close the session"})
         elif "tombstone_hash" in r:
             problems.append({"i": i, "why": "tombstone_hash on a record that is not a tombstone"})
         # §8.3 close
@@ -1619,7 +1649,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     v.add_argument("chain", help="JSONL, one record per line, genesis first")
     v.add_argument("--key", action="append", default=[], help="kid=path (P-256 PEM, or raw/base64 ML-DSA-65 public key)")
     v.add_argument("--pubkey", help="P-256 public PEM: -03 fallback key (records without signer_kid)")
-    v.add_argument("--agent-kid", help="RFC 7638 thumbprint of the agent's key (independent recording check)")
+    v.add_argument("--agent-kid", help="RFC 7638 / AKP thumbprint of the agent's key: pins self-recorded records and tombstones to it, and forbids it in independent sessions")
     v.add_argument("--require-signatures", action="store_true")
     v.add_argument("--epochs", help="JSON array of epoch anchors (from anchor_epoch) to check batch objects against")
     v.add_argument("--tsa-ca", help="PEM trust anchor for RFC 3161 tokens (epoch anchors and external_timestamp)")
