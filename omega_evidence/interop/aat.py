@@ -319,6 +319,22 @@ _ISO2 = re.compile(r"^[A-Z]{2}\Z")
 _B64_STD = re.compile(r"^[A-Za-z0-9+/]+={0,2}\Z")
 
 
+def _hex64(v: Any) -> bool:
+    return isinstance(v, str) and bool(_HEX64.match(v))
+
+
+def _num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _uuid4_ok(v: Any) -> bool:
+    try:
+        u = uuid.UUID(str(v))
+        return isinstance(v, str) and u.version == 4 and str(u) == v
+    except ValueError:
+        return False
+
+
 # ── export from an omega AgentEvidenceLog ledger ─────────────────────────────────────────────
 def _rfc3339(ts: str) -> str:
     """Strict RFC 3339 (extended format with 'T', '-' and ':', numeric offset or 'Z'); output normalised to UTC
@@ -745,22 +761,6 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
 
 
 # ── verification (offline, fail-closed) ──────────────────────────────────────────────────────
-def _hex64(v: Any) -> bool:
-    return isinstance(v, str) and bool(_HEX64.match(v))
-
-
-def _num(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
-
-
-def _uuid4_ok(v: Any) -> bool:
-    try:
-        u = uuid.UUID(str(v))
-        return isinstance(v, str) and u.version == 4 and str(u) == v
-    except ValueError:
-        return False
-
-
 def _check_detail(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], warnings: List[Dict[str, Any]]) -> None:
     at = r.get("action_type")
     d = r.get("action_detail")
