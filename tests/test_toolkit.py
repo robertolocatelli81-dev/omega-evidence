@@ -1174,7 +1174,7 @@ class TestAAT04(unittest.TestCase):
         from omega_evidence.interop import aat
         with tempfile.TemporaryDirectory() as tmp:
             recs = self._chain(tmp, close=True)
-            t = json.loads(json.dumps(recs)); t[1] = aat.tombstone(t[1], "gdpr_art17", "2026-09-19T20:00:00Z")
+            t = json.loads(json.dumps(recs)); t[1] = aat.tombstone(t[1], "gdpr_art17", "2099-01-01T00:00:00Z")
             v = aat.verify_chain(t)
             self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["tombstones"], 1)
             self.assertEqual(t[2]["prev_hash"], t[1]["tombstone_hash"])
@@ -1231,7 +1231,7 @@ class TestAAT04(unittest.TestCase):
             forged[2] = {**{k: forged[2][k] for k in ("record_id", "timestamp", "agent_id", "agent_version", "session_id", "parent_record_id",
                                                      "prev_hash", "trust_level", "record_phase", "signature", "sig_alg", "signer_kid")},
                          "action_type": "lifecycle", "outcome": "success", "tombstone_hash": forged[3]["prev_hash"],
-                         "action_detail": {"event": "record_deleted", "deletion_reason": "attacker", "deleted_at": "2026-09-19T20:00:00Z",
+                         "action_detail": {"event": "record_deleted", "deletion_reason": "attacker", "deleted_at": "2099-01-01T00:00:00Z",
                                            "original_action_type": "tool_call"}}
             for kw in ({"keys": {kid: pub}}, {"keys": {kid: pub}, "require_signatures": True}, {"pubkey_pem": pub}):
                 v = aat.verify_chain(forged, **kw)
@@ -1240,7 +1240,7 @@ class TestAAT04(unittest.TestCase):
             self.assertFalse(aat.verify_chain(unsigned_tomb, keys={kid: pub})["ok"])
             self.assertFalse(aat.verify_chain(unsigned_tomb, require_signatures=True)["ok"])
             # legitimate deletion: tombstone signed anew by the deleting authority
-            good = json.loads(json.dumps(es)); good[2] = aat.tombstone(good[2], "gdpr_art17", "2026-09-19T20:00:00Z", key=priv2)
+            good = json.loads(json.dumps(es)); good[2] = aat.tombstone(good[2], "gdpr_art17", "2099-01-01T00:00:00Z", key=priv2)
             self.assertEqual(good[2]["signer_kid"], kid2); self.assertIn("original_signature", good[2]["action_detail"])
             v = aat.verify_chain(good, keys={kid: pub, kid2: pub2}, require_signatures=True)
             self.assertTrue(v["ok"], v["problems"]); self.assertEqual(v["tombstones"], 1); self.assertEqual(v["signatures_verified"], 5)
@@ -1249,7 +1249,7 @@ class TestAAT04(unittest.TestCase):
             self.assertFalse(aat.verify_chain(edited, keys={kid: pub, kid2: pub2})["ok"])       # tombstone content is signed
             # unsigned chain: tombstone accepted with the §9.3 warning
             plain = next(iter(aat.from_omega(entries, "1.0", close=True).values()))
-            plain[2] = aat.tombstone(plain[2], "gdpr_art17", "2026-09-19T20:00:00Z")
+            plain[2] = aat.tombstone(plain[2], "gdpr_art17", "2099-01-01T00:00:00Z")
             v = aat.verify_chain(plain); self.assertTrue(v["ok"], v["problems"]); self.assertTrue(any("unsigned tombstone" in w["why"] for w in v["warnings"]))
             # hostile inputs: problems, never exceptions (also through the CLI path from_jsonl)
             for mut in (lambda r: r[1].update({"action_type": ["tool_call"]}), lambda r: r[1].update({"timestamp": "2026-13-45T25:61:61Z"}),
@@ -1487,7 +1487,7 @@ class TestAAT04(unittest.TestCase):
             ks = {kid: pub, kidR: pubR}
             self.assertTrue(aat.verify_chain(nomode, keys=ks, agent_kid=kid)["ok"])
             # the agent tombstones record 1 with its own key and drops recording_component: still an independent session
-            t = json.loads(json.dumps(nomode)); t[1] = aat.tombstone(t[1], "x", "2026-09-19T21:00:00Z", key=priv); t[1].pop("recording_component", None)
+            t = json.loads(json.dumps(nomode)); t[1] = aat.tombstone(t[1], "x", "2099-01-01T00:00:00Z", key=priv); t[1].pop("recording_component", None)
             self.assertTrue(any("5.2" in p["why"] for p in aat.verify_chain(t, keys=ks, agent_kid=kid)["problems"]))
             # the agent appends a self-signed tail record without recording_component
             tail = json.loads(json.dumps(nomode)); extra = {k: v for k, v in tail[-1].items() if k not in ("signature", "sig_alg", "signer_kid", "recording_component")}
@@ -1615,8 +1615,8 @@ class TestAAT04(unittest.TestCase):
             with self.assertRaises(ValueError):
                 aat.from_omega(e2, "1.0")
             self.assertIn("DERIVED by the exporter", plain[1]["action_detail"]["record_phase_basis"])
-            t1 = json.loads(json.dumps(plain)); t1[1] = aat.tombstone(t1[1], "gdpr", "2026-09-19T22:00:00Z")
-            t2 = json.loads(json.dumps(t1)); t2[1] = aat.tombstone(t2[1], "gdpr (corrected reason)", "2026-09-19T22:30:00Z")
+            t1 = json.loads(json.dumps(plain)); t1[1] = aat.tombstone(t1[1], "gdpr", "2099-01-01T00:00:00Z")
+            t2 = json.loads(json.dumps(t1)); t2[1] = aat.tombstone(t2[1], "gdpr (corrected reason)", "2099-01-01T00:30:00Z")
             self.assertEqual(t2[1]["tombstone_hash"], t1[1]["tombstone_hash"]); self.assertEqual(t2[1]["action_detail"]["original_action_type"], "tool_call")
             self.assertTrue(aat.verify_chain(t2)["ok"], aat.verify_chain(t2)["problems"])
             with self.assertRaises(ValueError):
@@ -1657,11 +1657,11 @@ class TestAAT04(unittest.TestCase):
             moved = json.loads(json.dumps(es)); moved.insert(2, moved.pop()); moved = resign(moved, priv, start=1)
             self.assertTrue(any("session_end is not the last record" in p["why"] for p in aat.verify_chain(moved, keys=ks)["problems"]))
             # 3. deleting authorities: a foreign key in `keys` cannot tombstone a self-recorded record when agent_kid is pinned
-            t = json.loads(json.dumps(es)); t[2] = aat.tombstone(t[2], "x", "2026-09-19T22:00:00Z", key=privX)
+            t = json.loads(json.dumps(es)); t[2] = aat.tombstone(t[2], "x", "2099-01-01T00:00:00Z", key=privX)
             v = aat.verify_chain(t, keys=ks, agent_kid=kid); self.assertTrue(any("not a deleting authority" in p["why"] for p in v["problems"]))
             self.assertTrue(aat.verify_chain(t, keys=ks, agent_kid=kid, tombstone_kids=[kidX])["ok"])
             v = aat.verify_chain(t, keys=ks); self.assertTrue(v["ok"]); self.assertTrue(any("not pinned" in w["why"] for w in v["warnings"]))
-            ta = json.loads(json.dumps(es)); ta[2] = aat.tombstone(ta[2], "x", "2026-09-19T22:00:00Z", key=priv)
+            ta = json.loads(json.dumps(es)); ta[2] = aat.tombstone(ta[2], "x", "2099-01-01T00:00:00Z", key=priv)
             self.assertTrue(aat.verify_chain(ta, keys=ks, agent_kid=kid)["ok"])                    # the agent may delete its own
             # 4. key algorithm mismatch by message: a record claiming ML-DSA-65 under a P-256 kid
             alg = json.loads(json.dumps(es)); alg[-1]["sig_alg"] = "ML-DSA-65"
@@ -1669,7 +1669,7 @@ class TestAAT04(unittest.TestCase):
             # 5. signer_kid_classical == signer_kid on an unsigned-classical path; tombstoned genesis; close states unknown
             same = json.loads(json.dumps(es)); same[-1]["signer_kid_classical"] = same[-1]["signer_kid"]; same[-1]["signature_classical"] = same[-1]["signature"]; same[-1]["sig_alg"] = "ML-DSA-65"
             self.assertTrue(any("two DISTINCT keys" in p["why"] for p in aat.verify_chain(same, keys=ks)["problems"]))
-            g = json.loads(json.dumps(es)); g[0] = aat.tombstone(g[0], "x", "2026-09-19T22:00:00Z", key=priv)
+            g = json.loads(json.dumps(es)); g[0] = aat.tombstone(g[0], "x", "2099-01-01T00:00:00Z", key=priv)
             self.assertTrue(any("8.1" in p["why"] for p in aat.verify_chain(g, keys=ks)["problems"]))
             self.assertEqual(es[-1]["action_detail"]["session_outcome"], "unknown")
             from omega_evidence.pqbackends import mldsa
