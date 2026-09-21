@@ -136,7 +136,8 @@ def _check_timestamp(path: str, layers: List) -> str:
     layers.append(_layer("rfc3161", st, side.get("tsa", "")))
     vm = side.get("validation_material")     # LTV material captured at stamping time
     if isinstance(vm, dict) and vm.get("available"):
-        crls = [c for c in vm.get("crls_b64", []) if "crl_b64" in c]
+        raw_crls = vm.get("crls_b64", [])   # r3 (Opus): an int here was a TypeError traceback, no verdict (the three answered)
+        crls = [c for c in (raw_crls if isinstance(raw_crls, list) else []) if isinstance(c, dict) and "crl_b64" in c]
         layers.append(_layer("ltv-material", "SKIP",
                              f"captured: {vm.get('cert_count', 0)} cert(s), {len(crls)} CRL(s) "
                              "— TSA chain preserved for long-term validation"))
@@ -342,7 +343,7 @@ def main(argv=None) -> int:
     """`python -m omega_evidence.verifier <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]`
     prints the receipt as JSON; exit 0 only when `valid` (and, with a PQ requirement, `pq_protected`)."""
     import argparse
-    p = argparse.ArgumentParser(allow_abbrev=False, prog="omega-evidence-verify")
+    p = argparse.ArgumentParser(allow_abbrev=False, add_help=False, prog="omega-evidence-verify")   # r3: -h/--help exit 0 here, 2 in the three (usage on stderr documents the flags)
     p.add_argument("pack")
     p.add_argument("--ledger")
     p.add_argument("--trust-store")

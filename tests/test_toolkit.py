@@ -893,6 +893,13 @@ class TestNemesisRegressions(unittest.TestCase):
                 ledger.Ledger(os.path.join(tmp, "w.jsonl")).append({"note": "\ud800"})   # the producer refuses it too
             with self.assertRaises(ValueError):
                 canonical.sha3({"s": "\udc00"})
+            # review r3: LTV material typed (an int was a TypeError traceback); scope regexes ASCII like the three
+            pp, lp = anchored("vm"); dg = hashlib.sha256(Path(pp).read_bytes()).hexdigest()
+            Path(pp[:-5] + ".tsr.json").write_text('{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "validation_material": {"available": true, "crls_b64": 1}}' % dg, encoding="utf-8")
+            r = verify_pack(pp); self.assertIn(r["valid"], (True, False))
+            self.assertTrue(pack._honest_scope_declares_limit("does NOT\u00e9 prove x"))          # ASCII \b: boundary before é
+            self.assertTrue(pack._honest_scope_declares_limit("fully cert\u0131fied; does NOT prove x"))   # ı is not i in ASCII folding
+            self.assertFalse(pack._honest_scope_declares_limit("fully certified; does NOT prove x"))
             # a trust-store line that is not an object raised AttributeError out of Ledger._load
             pp = os.path.join(tmp, "signed.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
             idt = signing.Identity("acme"); pack.sign_pack(pp, idt)
@@ -907,7 +914,7 @@ class TestNemesisRegressions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pp = os.path.join(tmp, "p.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
             for extra in (["--ledger", ""], ["--ledger"], ["--ledger", "--require-pq"], ["--ledg", pp], [pp], ["--no-such-flag"],
-                          ["--"], ["--require-pq=false"]):
+                          ["--"], ["--require-pq=false"], ["--help"], ["-h"]):
                 out = subprocess.run([sys.executable, "-m", "omega_evidence", pp] + extra, capture_output=True, text=True)
                 self.assertEqual(out.returncode, 2, (extra, out.stdout, out.stderr))
                 self.assertEqual(out.stdout, "")

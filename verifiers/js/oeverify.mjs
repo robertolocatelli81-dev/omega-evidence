@@ -87,6 +87,24 @@ export function jsonNestingDepth(text) {
   }
   return max;
 }
+// a number token with '.', 'e' or 'E' outside a string: JSON.parse("1.0") is the integer 1 and canon() cannot see the lexeme
+// (a pack with "n":1.0 hashed as "n":1 verified PASS here alone — 0.8.3 review r3, Opus); Python's parse_float, Go and Java
+// refuse it on the text, so does this
+export function hasFloatLexeme(text) {
+  let inStr = false, esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === "-" || (ch >= "0" && ch <= "9")) {
+      let j = i + 1;
+      while (j < text.length && /[0-9.eE+\-]/.test(text[j])) j++;
+      if (/[.eE]/.test(text.slice(i, j))) return true;
+      i = j - 1;
+    }
+  }
+  return false;
+}
 export function hasLoneSurrogate(text) {
   let i = 0; const n = text.length, hex = (s) => (/^[0-9a-fA-F]{4}$/.test(s) ? parseInt(s, 16) : NaN);
   while (i < n) {
@@ -125,6 +143,7 @@ function parseStrict(text) {
   const t = text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
   const d = jsonNestingDepth(t); if (d > MAX_JSON_DEPTH) throw new Error("json_too_deep");
   if (hasLoneSurrogate(t)) throw new Error("lone_surrogate");
+  if (hasFloatLexeme(t)) throw new Error("float_lexeme");
   if (hasDuplicateKeys(t)) throw new Error("duplicate_key");
   const v = JSON.parse(t); canon(v);   // canon throws on floats / non-portable integers
   return v;

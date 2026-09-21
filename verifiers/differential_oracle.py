@@ -123,6 +123,20 @@ def build_cases(d):
     lone_p = cases["lone-surrogate"][0]; ld = json.load(open(lone_p)); ld["s"] = "\ud800"
     h = _hs.sha3_256(json.dumps({k: v for k, v in ld.items() if k != "pack_sha3"}, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
     ld["pack_sha3"] = h; open(lone_p, "w").write(json.dumps(ld)); open(lone_p[:-5] + ".ledger.jsonl", "w").close(); anchor_hash(lone_p, h)
+    # review r3 (Opus): a float LEXEME with an integer value — JSON.parse("1.0") is 1 and Node's canon() could not see it (PASS
+    # in Node alone, hashed as "n":1); the honest_scope regexes with Unicode \b / i≡ı folding in Python vs ASCII in the three
+    # ("does NOTé" and "certıfied": FAIL in Python, PASS in the three); typed LTV material (an int was a Python traceback)
+    def mk_text(name, dd, text):
+        p = os.path.join(d, name + ".json"); h = canonical.sha3({k: v for k, v in dd.items() if k != "pack_sha3"})
+        open(p, "w", encoding="utf-8").write(text.replace("%H", h)); anchor_hash(p, h); return p
+    cases["pack-float-1.0-hashed-as-1"] = (mk_text("f10", {"kind": "d", "honest_scope": "does NOT x", "n": 1}, '{"kind":"d","honest_scope":"does NOT x","n":1.0,"pack_sha3":"%H"}'), [], None)
+    cases["pack-exp-1E2-hashed-as-100"] = (mk_text("e12", {"kind": "d", "honest_scope": "does NOT x", "n": 100}, '{"kind":"d","honest_scope":"does NOT x","n":1E2,"pack_sha3":"%H"}'), [], None)
+    for nm, scope in (("scope-NOT-before-accented-letter", "does NOT\u00e9 prove x"), ("scope-dotless-i-overclaim", "fully cert\u0131fied; does NOT prove x")):
+        dd = {"kind": "d", "honest_scope": scope, "n": 1}
+        cases[nm] = (mk_text(nm, dd, json.dumps(dict(dd, pack_sha3="%H"), ensure_ascii=False)), [], None)
+    for nm, vm in (("tsr-vm-crls-int", '{"available": true, "crls_b64": 1}'), ("tsr-vm-crls-list-of-int", '{"available": true, "crls_b64": [1]}')):
+        tp = mk(nm); P.anchor_pack(tp, tp[:-5] + ".ledger.jsonl"); dg = _hs.sha256(open(tp, "rb").read()).hexdigest()
+        open(tp[:-5] + ".tsr.json", "w").write('{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "validation_material": %s}' % (dg, vm)); cases[nm] = (tp, [], None)
     bad8 = os.path.join(d, "bad8.json"); open(bad8, "wb").write(b'{"kind":"d","honest_scope":"does NOT x","s":"\xff","pack_sha3":"' + b"0" * 64 + b'"}'); cases["non-utf8"] = (bad8, [], None)   # not JSON anywhere: FAIL at pack-json
     # ledgers
     e = mk("empty-ledger"); open(e[:-5] + ".ledger.jsonl", "w").close(); cases["ledger-empty"] = (e, [], None)
@@ -270,7 +284,8 @@ def main():
     cli = {"cli-unknown-flag": ["--no-such-flag"], "cli-ledger-empty": ["--ledger", ""], "cli-ledger-missing-value": ["--ledger"],
            "cli-ledger-flag-as-value": ["--ledger", "--require-pq"], "cli-abbreviation": ["--ledg", valid], "cli-two-positionals": [valid],
            # review r1 (Opus): the pack path itself "" or "-" (an unset $PACK), the "--" terminator, a value on the boolean flag
-           "cli-empty-pack": ["--pack", ""], "cli-dash-pack": ["--pack", "-"], "cli-double-dash": ["--"], "cli-bool-eq-false": ["--require-pq=false"]}
+           "cli-empty-pack": ["--pack", ""], "cli-dash-pack": ["--pack", "-"], "cli-double-dash": ["--"], "cli-bool-eq-false": ["--require-pq=false"],
+           "cli-help": ["--help"], "cli-h": ["-h"]}   # r3 (Sonnet): argparse answered --help with exit 0 while the three said usage
     for name, extra in cli.items():
         row = {}
         for k, cmd in avail.items():
