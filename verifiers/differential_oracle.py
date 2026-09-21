@@ -68,8 +68,9 @@ def build_cases(d):
     bs = mk("trust-broken"); P.sign_pack(bs, idt); store_b = os.path.join(d, "trust_broken.jsonl"); trust.TrustRegistry(store_b).trust("acme", idt.public_key_b64)
     ln = json.loads(open(store_b).read().splitlines()[0]); ln["ts"] = "1999-01-01T00:00:00Z"; open(store_b, "w").write(json.dumps(ln, separators=(",", ":")) + "\n")
     cases["trust-broken-chain"] = (bs, ["--trust-store", store_b], None)
-    dk = mk("trust-dup"); P.sign_pack(dk, other); store_d = os.path.join(d, "trust_dup.jsonl"); trust.TrustRegistry(store_d).trust("acme", idt.public_key_b64)
-    txt = open(store_d).read(); txt = txt.replace('"pubkey":"' + idt.public_key_b64 + '"', '"pubkey":"' + idt.public_key_b64 + '","pubkey":"' + other.public_key_b64 + '"', 1)
+    acme2 = signing.Identity("acme")   # r10 (Opus): a SECOND key under the trusted name, so a last-wins replay pins it and says trusted-signed
+    dk = mk("trust-dup"); P.sign_pack(dk, acme2); store_d = os.path.join(d, "trust_dup.jsonl"); trust.TrustRegistry(store_d).trust("acme", idt.public_key_b64)
+    txt = open(store_d).read(); txt = txt.replace('"pubkey":"' + idt.public_key_b64 + '"', '"pubkey":"' + idt.public_key_b64 + '","pubkey":"' + acme2.public_key_b64 + '"', 1)
     e = json.loads(txt); e2 = {k: v for k, v in e.items() if k != "self_hash"}; import hashlib as _h; e["self_hash"] = _h.sha256(json.dumps(e2, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     txt = txt.replace(json.loads(open(store_d).read())["self_hash"], e["self_hash"]); open(store_d, "w").write(txt.rstrip("\n") + "\n")
     cases["trust-dup-key-line"] = (dk, ["--trust-store", store_d], None)
@@ -161,6 +162,10 @@ def build_cases(d):
     pid = signing.Identity("toString"); tsp = mk("proto-trust"); P.sign_pack(tsp, pid); st_p = os.path.join(d, "trust_proto.jsonl"); Lp_ = Ledger(st_p)
     Lp_.append({"action": "revoke", "signer_id": "__proto__", "reason": "x"}); Lp_.append({"action": "trust", "signer_id": "toString", "pubkey": pid.public_key_b64})
     cases["trust-revoke-proto-then-trust-toString"] = (tsp, ["--trust-store", st_p], None)
+    # r10 (Opus): a producer-made pack whose top-level key is "__proto__" (build_pack accepts it, hash correct): PASS in the four;
+    # 0.8.2 Node dropped the key while copying and said FAIL alone
+    pph = os.path.join(d, "proto-hashed.json"); P.write_pack(pph, P.build_pack("demo", {"__proto__": {"x": 1}, "claim": "x"}, SCOPE)); P.anchor_pack(pph, pph[:-5] + ".ledger.jsonl")
+    cases["pack-proto-key-hashed-by-producer"] = (pph, [], None)
     bad8 = os.path.join(d, "bad8.json"); open(bad8, "wb").write(b'{"kind":"d","honest_scope":"does NOT x","s":"\xff","pack_sha3":"' + b"0" * 64 + b'"}'); cases["non-utf8"] = (bad8, [], None)   # not JSON anywhere: FAIL at pack-json
     # ledgers
     e = mk("empty-ledger"); open(e[:-5] + ".ledger.jsonl", "w").close(); cases["ledger-empty"] = (e, [], None)

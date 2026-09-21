@@ -41,7 +41,9 @@ type Receipt struct {
 }
 
 var (
-	scopeLimit     = regexp.MustCompile(`\bNOT\b`)
+	scopeLimit = regexp.MustCompile(`\bNOT\b`)
+	// (?i) in RE2 is Unicode simple folding: harmless only while no keyword contains k or s (U+212A KELVIN SIGN, U+017F LONG S
+	// fold to them) — the other three fold ASCII only; keep the words free of k/s or spell the folding out (0.8.3 r10)
 	scopeOverclaim = regexp.MustCompile(`(?i)\b(accredited|certified|qualified|guaranteed)\b`)
 	scopeNegated   = regexp.MustCompile(`(?i)\bNOT\b[^.]{0,40}(accredit|certif|qualif|guarant)`)
 	hex64          = regexp.MustCompile(`^[0-9a-f]{64}$`)
