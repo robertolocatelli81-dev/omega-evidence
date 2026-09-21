@@ -53,7 +53,7 @@ anchored        valid ledger chain (integrity/time) — an RFC 3161 token is rec
 none            internal consistency only  →  rejected, cannot authenticate
 ```
 
-A bare fabricated pack (no ledger, no timestamp, no signature) **cannot pass**.
+A bare fabricated pack (no ledger, no signature) **cannot pass**.
 
 ## Quick start
 
