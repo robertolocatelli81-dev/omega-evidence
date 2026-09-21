@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -836,6 +837,45 @@ class TestNemesisRegressions(unittest.TestCase):
             pack.write_pack(pp2, pack.build_pack("d", {"y": 2}, "ref; NOT x"))
             pack.anchor_pack(pp2, pp2[:-5] + ".ledger.jsonl")
             self.assertTrue(verify_pack(pp2)["valid"])
+
+    def test_1b_hostile_ledger_bytes_are_a_fail_verdict_never_a_traceback(self):
+        # 21/09/2026 (propagated from the cra-evidence review): a raw non-UTF-8 byte in the ledger escaped as UnicodeDecodeError
+        # from Ledger.__init__ (no verdict, exit 1 traceback) while Go/JS answered FAIL; a raw byte where U+FFFD was hashed
+        # must be FAIL (a lossy decoder reads exactly the hashed text and says PASS); "__proto__" added without rehashing = FAIL
+        with tempfile.TemporaryDirectory() as tmp:
+            def anchored(name):
+                pp = os.path.join(tmp, name + ".json")
+                pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
+                pack.anchor_pack(pp, pp[:-5] + ".ledger.jsonl")
+                self.assertTrue(verify_pack(pp)["valid"])          # positive control: intact = PASS
+                return pp, pp[:-5] + ".ledger.jsonl"
+            pp, lp = anchored("raw")
+            Path(lp).write_bytes(Path(lp).read_bytes().replace(b'"ts"', b'"t\xffs"', 1))
+            r = verify_pack(pp)
+            self.assertFalse(r["valid"])
+            self.assertEqual([l["status"] for l in r["layers"] if l["layer"] == "ledger-chain"], ["FAIL"])
+            pp, lp = anchored("fffd")
+            e = json.loads(Path(lp).read_text(encoding="utf-8").splitlines()[0]); e["data"]["note"] = "\ufffd"; e.pop("self_hash")
+            e["self_hash"] = ledger._hash_entry(e)
+            Path(lp).write_bytes(json.dumps(e, ensure_ascii=False, separators=(",", ":")).encode("utf-8").replace("\ufffd".encode("utf-8"), b"\xff", 1) + b"\n")
+            self.assertFalse(verify_pack(pp)["valid"])
+            pp, lp = anchored("proto")
+            Path(lp).write_text('{"__proto__": {"evil": 1}, ' + Path(lp).read_text(encoding="utf-8")[1:], encoding="utf-8")
+            self.assertFalse(verify_pack(pp)["valid"])
+            pp, lp = anchored("list")
+            Path(lp).write_text("[1]\n", encoding="utf-8")
+            self.assertFalse(verify_pack(pp)["valid"])
+
+    def test_1c_cli_value_flags_refuse_empty_and_flag_like_values(self):
+        # one CLI grammar in the four verifiers: "" / a flag as value / an abbreviation / a second positional = usage exit 2
+        with tempfile.TemporaryDirectory() as tmp:
+            pp = os.path.join(tmp, "p.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
+            for extra in (["--ledger", ""], ["--ledger"], ["--ledger", "--require-pq"], ["--ledg", pp], [pp], ["--no-such-flag"]):
+                out = subprocess.run([sys.executable, "-m", "omega_evidence", pp] + extra, capture_output=True, text=True)
+                self.assertEqual(out.returncode, 2, (extra, out.stdout, out.stderr))
+                self.assertEqual(out.stdout, "")
+            out = subprocess.run([sys.executable, "-m", "omega_evidence", pp], capture_output=True, text=True)
+            self.assertEqual(out.returncode, 1); self.assertEqual(json.loads(out.stdout)["verdict"], "FAIL")   # bare pack: a verdict
 
     def test_2_classical_cosignature_is_never_pq_protected(self):
         with tempfile.TemporaryDirectory() as tmp:

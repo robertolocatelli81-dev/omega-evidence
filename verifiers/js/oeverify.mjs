@@ -131,18 +131,21 @@ function parseStrict(text) {
 }
 function readObject(path) {
   if (statSync(path).size > MAX_INPUT_BYTES) throw new Error("input_too_large");
-  const v = parseStrict(readFileSync(path, "utf-8"));
+  const v = parseStrict(readText(path));
   if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("not a JSON object");
   return v;
 }
 const sha3Hex = (b) => createHash("sha3-256").update(b).digest("hex");
 const sha256Hex = (b) => createHash("sha256").update(b).digest("hex");
-const withoutKey = (o, k) => { const c = {}; for (const key of Object.keys(o)) if (key !== k) c[key] = o[key]; return c; };
+const withoutKey = (o, k) => Object.fromEntries(Object.entries(o).filter(([key]) => key !== k));   // keeps an own "__proto__" key (c[key] = … would invoke the setter and DROP it: a ledger entry with that key added and self_hash untouched verified PASS here alone — 21/09/2026)
+const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });   // strict: one invalid byte is unreadable, never U+FFFD
+const readText = (path) => UTF8.decode(readFileSync(path));
 
 function ledgerEntries(path) {
   if (statSync(path).size > MAX_INPUT_BYTES) return { ok: false, entries: [] };
   const out = []; let ok = true, prev = "0".repeat(64), n = 0;
-  for (const ln of readFileSync(path, "utf-8").split("\n")) {
+  let ledgerText; try { ledgerText = readText(path); } catch { return { ok: false, entries: [] }; }
+  for (const ln of ledgerText.split("\n")) {
     if (!ln.replace(/[ \t\r]/g, "")) continue;
     let e; try { e = parseStrict(ln); if (!e || typeof e !== "object" || Array.isArray(e)) throw new Error("x"); } catch { ok = false; n++; continue; }
     const sh = e.self_hash, ph = e.prev_hash;
@@ -280,10 +283,18 @@ function finish(layers, trusted, signed, pqRequired) {
 }
 
 function main(argv) {
-  const opt = (f) => (argv.includes(f) ? argv[argv.indexOf(f) + 1] : "");
-  const pack = argv.find((a, i) => !a.startsWith("--") && (i === 0 || !["--ledger", "--trust-store", "--expect-pq-key"].includes(argv[i - 1])));
-  if (!pack) { console.error("usage: node oeverify.mjs <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]"); process.exit(2); }
-  const r = verifyPack(pack, { ledger: opt("--ledger"), trustStore: opt("--trust-store"), expectPQ: opt("--expect-pq-key"), requirePQ: argv.includes("--require-pq") });
+  // one grammar in the four CLIs (21/09/2026): an unknown flag, a value flag without a value or with "", a second positional = usage
+  const usage = () => { console.error("usage: node oeverify.mjs <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]"); process.exit(2); };
+  const VALUE = new Set(["--ledger", "--trust-store", "--expect-pq-key"]); const opts = {}; let pack = null;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--require-pq") { opts[a] = true; continue; }
+    if (VALUE.has(a)) { const v = argv[i + 1]; if (v === undefined || v === "" || v.startsWith("-")) usage(); opts[a] = v; i++; continue; }
+    if (a.startsWith("-") || pack !== null) usage();
+    pack = a;
+  }
+  if (!pack) usage();
+  const r = verifyPack(pack, { ledger: opts["--ledger"] ?? "", trustStore: opts["--trust-store"] ?? "", expectPQ: opts["--expect-pq-key"] ?? "", requirePQ: Boolean(opts["--require-pq"]) });
   console.log(JSON.stringify(r, null, 1));
   process.exit(r.verdict === "PASS" ? 0 : 1);
 }

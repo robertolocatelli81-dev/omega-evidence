@@ -85,8 +85,10 @@ def _check_ledger(path: str, ledger_path: Optional[str], layers: List) -> bool:
     try:
         lg = Ledger(lp)
         ok, bad = lg.verify()
-    except RuntimeError as e:
-        layers.append(_layer("ledger-chain", "FAIL", str(e)))
+    except (RuntimeError, ValueError, OSError, TypeError, AttributeError, RecursionError) as e:
+        # a non-UTF-8 byte, a non-object line or an unreadable file is a FAIL verdict, never a traceback (probe 21/09/2026:
+        # UnicodeDecodeError escaped from Ledger.__init__ while Go/JS answered FAIL)
+        layers.append(_layer("ledger-chain", "FAIL", f"{lp}: unreadable ledger ({type(e).__name__})"))
         return False
     if not ok:
         layers.append(_layer("ledger-chain", "FAIL", f"{lp}: broken chain"))
@@ -338,13 +340,17 @@ def main(argv=None) -> int:
     """`python -m omega_evidence.verifier <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]`
     prints the receipt as JSON; exit 0 only when `valid` (and, with a PQ requirement, `pq_protected`)."""
     import argparse
-    p = argparse.ArgumentParser(prog="omega-evidence-verify")
+    p = argparse.ArgumentParser(allow_abbrev=False, prog="omega-evidence-verify")
     p.add_argument("pack")
     p.add_argument("--ledger")
     p.add_argument("--trust-store")
     p.add_argument("--expect-pq-key", help="pinned ML-DSA-65 public key (base64): requires the hybrid layer")
     p.add_argument("--require-pq", action="store_true", help="require a pinned, valid post-quantum layer (trust registry)")
     a = p.parse_args(argv)
+    for flag in ("ledger", "trust_store", "expect_pq_key"):
+        v = getattr(a, flag)
+        if v is not None and (v == "" or v.startswith("-")):   # "" or a flag as a value would silently mean "not given" (one grammar in the four, 21/09/2026)
+            p.error(f"--{flag.replace('_', '-')} needs a value (got {v!r})")
     r = verify_pack(a.pack, a.ledger, a.trust_store, a.expect_pq_key, a.require_pq)
     r["verdict"] = "PASS" if r.get("valid") and (not (a.require_pq or a.expect_pq_key) or r.get("pq_protected") is True) else "FAIL"
     print(json.dumps(r, indent=1))

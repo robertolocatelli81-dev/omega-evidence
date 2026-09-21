@@ -73,10 +73,14 @@ public class OeVerify {
     }
     static int hexDigit(char c) { return (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10 : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1; }
 
-    static Object parse(byte[] text) throws Bad {
-        String s;
-        try { s = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(text)).toString(); }
+    // strict UTF-8: one malformed byte is unreadable, never U+FFFD (a lossy read verified PASS on a ledger entry whose
+    // self_hash was computed over U+FFFD while the file held the raw byte — found by the differential probe, 21/09/2026)
+    static String strictUtf8(byte[] text) throws Bad {
+        try { return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(text)).toString(); }
         catch (CharacterCodingException e) { throw new Bad("non-UTF-8 input"); }
+    }
+    static Object parse(byte[] text) throws Bad {
+        String s = strictUtf8(text);
         int d = nestingDepth(text);
         if (d > MAX_DEPTH) throw new Bad("json_too_deep: nesting " + d + " exceeds the acceptance-profile bound " + MAX_DEPTH);
         if (hasLoneSurrogate(text)) throw new Bad("lone_surrogate: unpaired UTF-16 surrogate escape is outside the acceptance profile");
@@ -248,7 +252,7 @@ public class OeVerify {
     }
     static Obj readObject(String path) throws Bad, IOException {
         byte[] raw = Files.readAllBytes(Path.of(path));
-        String t = new String(raw, StandardCharsets.UTF_8);   // trimmed of ASCII space/tab/CR/LF only
+        String t = strictUtf8(raw);   // strict decode; trimmed of ASCII space/tab/CR/LF only
         int a = 0, z = t.length(); while (a < z && " \t\r\n".indexOf(t.charAt(a)) >= 0) a++; while (z > a && " \t\r\n".indexOf(t.charAt(z - 1)) >= 0) z--;
         Object v = parse(t.substring(a, z).getBytes(StandardCharsets.UTF_8));
         if (!(v instanceof Obj)) throw new Bad("not a JSON object");
@@ -261,11 +265,11 @@ public class OeVerify {
         List<Obj> out = new ArrayList<>(); ok[0] = true;
         if (Files.size(Path.of(path)) > MAX_INPUT_BYTES) { ok[0] = false; return out; }
         String prev = GENESIS; int n = 0;
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(path), StandardCharsets.UTF_8))) {
-            StringBuilder sb = new StringBuilder(); int c;
-            List<String> lines = new ArrayList<>();
-            while ((c = br.read()) >= 0) { if (c == '\n') { lines.add(sb.toString()); sb.setLength(0); } else sb.append((char) c); }
-            if (sb.length() > 0) lines.add(sb.toString());
+        String all; try { all = strictUtf8(Files.readAllBytes(Path.of(path))); } catch (Bad e) { ok[0] = false; return out; }
+        {
+            List<String> lines = new ArrayList<>(); int start = 0;
+            for (int k = 0; k < all.length(); k++) if (all.charAt(k) == '\n') { lines.add(all.substring(start, k)); start = k + 1; }
+            if (start < all.length()) lines.add(all.substring(start));
             for (String ln : lines) {
                 boolean blank = true; for (char ch : ln.toCharArray()) if (ch != ' ' && ch != '\t' && ch != '\r') { blank = false; break; }
                 if (blank) continue;
@@ -306,6 +310,7 @@ public class OeVerify {
         try { run(args); }
         catch (Throwable t) { System.out.println("{\"valid\":false,\"verdict\":\"FAIL\",\"layers\":[{\"layer\":\"internal\",\"status\":\"FAIL\",\"detail\":\"" + t.getClass().getSimpleName() + "\"}]}"); System.exit(1); }
     }
+    static String val(String[] args, int k) { if (k >= args.length || args[k].isEmpty() || args[k].startsWith("-")) usage(); return args[k]; }   // "" or a flag as a value: usage (21/09/2026)
     static void usage() { System.err.println("usage: java OeVerify.java <pack.json> [-ledger L] [-trust-store T] [-expect-pq-key B64] [-require-pq]"); System.exit(2); }
     static void run(String[] args) throws Exception {
         String pack = null, ledger = "", trust = "", epq = ""; boolean reqPQ = false;
@@ -313,8 +318,8 @@ public class OeVerify {
             String a = args[k];
             try {
                 switch (a) {
-                    case "-ledger": ledger = args[++k]; break; case "-trust-store": trust = args[++k]; break;
-                    case "-expect-pq-key": epq = args[++k]; break; case "-require-pq": reqPQ = true; break;
+                    case "-ledger": ledger = val(args, ++k); break; case "-trust-store": trust = val(args, ++k); break;
+                    case "-expect-pq-key": epq = val(args, ++k); break; case "-require-pq": reqPQ = true; break;
                     default: if (a.startsWith("-") || pack != null) { usage(); return; } pack = a;
                 }
             } catch (ArrayIndexOutOfBoundsException e) { usage(); return; }

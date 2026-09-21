@@ -113,6 +113,23 @@ def build_cases(d):
     u = mk("unrelated-ledger"); L = Ledger(u[:-5] + ".ledger.jsonl"); L.append({"anchored_pack_sha3": "0" * 64}); cases["ledger-unrelated"] = (u, [], None)
     tl = mk("tampered-ledger"); P.anchor_pack(tl, tl[:-5] + ".ledger.jsonl"); lines = open(tl[:-5] + ".ledger.jsonl").read().splitlines(); ee = json.loads(lines[0]); ee["ts"] = "1999-01-01T00:00:00Z"; open(tl[:-5] + ".ledger.jsonl", "w").write(json.dumps(ee, separators=(",", ":")) + "\n"); cases["ledger-tampered"] = (tl, [], None)
     fl = mk("float-ledger"); P.anchor_pack(fl, fl[:-5] + ".ledger.jsonl"); ln = json.loads(open(fl[:-5] + ".ledger.jsonl").read().splitlines()[0]); ln["data"]["x"] = 1.5; open(fl[:-5] + ".ledger.jsonl", "w").write(json.dumps(ln, separators=(",", ":")) + "\n"); cases["ledger-float"] = (fl, [], None)
+    # 21/09/2026, propagated from the cra-evidence review: an own "__proto__" key added without rehashing (JS dropped it while
+    # copying and said PASS alone), a raw non-UTF-8 byte where U+FFFD was hashed (a lossy decoder reads exactly the hashed text:
+    # Java said PASS alone), a raw byte in a key (Python raised UnicodeDecodeError instead of a verdict), a ledger line that is not
+    # an object. Every one is FAIL in the four verifiers.
+    from omega_evidence.ledger import _hash_entry as _he
+    pp = mk("proto-pack"); txt = open(pp).read(); open(pp, "w").write('{"__proto__": {"evil": 1}, ' + txt[1:]); cases["pack-proto-key-hash-untouched"] = (pp, [], None)
+    pl = mk("proto-ledger"); P.anchor_pack(pl, pl[:-5] + ".ledger.jsonl"); lpp = pl[:-5] + ".ledger.jsonl"; txt = open(lpp).read()
+    open(lpp, "w").write('{"__proto__": {"evil": 1}, ' + txt[1:]); cases["ledger-proto-key-hash-untouched"] = (pl, [], None)
+    ff = mk("fffd-ledger"); P.anchor_pack(ff, ff[:-5] + ".ledger.jsonl"); lpf = ff[:-5] + ".ledger.jsonl"
+    ent = json.loads(open(lpf).read().splitlines()[0]); ent["data"]["note"] = "\ufffd"; ent.pop("self_hash"); ent["self_hash"] = _he(ent)
+    open(lpf, "wb").write(json.dumps(ent, ensure_ascii=False, separators=(",", ":")).encode("utf-8").replace("\ufffd".encode("utf-8"), b"\xff", 1) + b"\n")
+    cases["ledger-raw-byte-hashed-as-fffd"] = (ff, [], None)
+    fp = mk("fffd-pack"); dd = json.load(open(fp)); dd["note"] = "\ufffd"; dd.pop("pack_sha3"); dd["pack_sha3"] = canonical.sha3(dd)
+    open(fp, "wb").write(json.dumps(dd, ensure_ascii=False).encode("utf-8").replace("\ufffd".encode("utf-8"), b"\xff", 1)); cases["pack-raw-byte-hashed-as-fffd"] = (fp, [], None)
+    rb = mk("raw-ledger"); P.anchor_pack(rb, rb[:-5] + ".ledger.jsonl"); lpr = rb[:-5] + ".ledger.jsonl"; bb = open(lpr, "rb").read()
+    open(lpr, "wb").write(bb.replace(b'"ts"', b'"t\xffs"', 1)); cases["ledger-raw-byte-in-key"] = (rb, [], None)
+    ll = mk("list-ledger"); P.anchor_pack(ll, ll[:-5] + ".ledger.jsonl"); open(ll[:-5] + ".ledger.jsonl", "w").write("[1]\n"); cases["ledger-line-not-object"] = (ll, [], None)
     rot = mk("rotated"); P.sign_pack(rot, idt); store_r = os.path.join(d, "trust_rot.jsonl"); tr2 = trust.TrustRegistry(store_r); tr2.trust("acme", other.public_key_b64); tr2.rotate("acme", idt.public_key_b64)
     cases["trust-rotated"] = (rot, ["--trust-store", store_r], None)
     rev = mk("revoked"); P.sign_pack(rev, idt); store_v = os.path.join(d, "trust_rev.jsonl"); tr3 = trust.TrustRegistry(store_v); tr3.trust("acme", idt.public_key_b64); tr3.revoke("acme", "x")
@@ -211,7 +228,31 @@ def main():
         if bad:
             diffs += 1
         print(f"  [{'OK ' if not bad else 'DIFF'}] {name:34} {res}")
-    print(f"disagreements: {diffs}/{len(cases)} (declared Node divergences: {declared})")
+    # CLI grammar (21/09/2026, found on cra-evidence): an unknown flag, a value flag without a value / with "" / with a flag as
+    # value, an abbreviation, a second positional = usage error (exit 2, no verdict) in EVERY CLI — never a verdict with the
+    # constraint silently dropped (Node gave a verdict on all of them)
+    valid = cases["bare"][0]
+    cli = {"cli-unknown-flag": ["--no-such-flag"], "cli-ledger-empty": ["--ledger", ""], "cli-ledger-missing-value": ["--ledger"],
+           "cli-ledger-flag-as-value": ["--ledger", "--require-pq"], "cli-abbreviation": ["--ledg", valid], "cli-two-positionals": [valid]}
+    for name, extra in cli.items():
+        row = {}
+        for k, cmd in avail.items():
+            gs = k in ("go", "java")
+            ex = [(a.replace("--", "-", 1) if gs and a.startswith("--") else a) for a in extra]
+            args = list(cmd) + (ex + [valid] if gs else [valid] + ex)
+            try:
+                out = subprocess.run(args, capture_output=True, text=True, timeout=60)
+                try:
+                    row[k] = "verdict:" + str(json.loads(out.stdout).get("verdict"))
+                except Exception:  # noqa: BLE001
+                    row[k] = "usage" if out.returncode == 2 else f"exit{out.returncode}"
+            except Exception:  # noqa: BLE001
+                row[k] = "CRASH"
+        ok = all(v == "usage" for v in row.values())
+        if not ok:
+            diffs += 1
+        print(f"  [{'OK ' if ok else 'DIFF'}] {name:34} expect usage(exit 2): {row}")
+    print(f"disagreements: {diffs}/{len(cases) + len(cli)} (declared Node divergences: {declared})")
     shutil.rmtree(tmp, ignore_errors=True)
     return 1 if diffs else 0
 

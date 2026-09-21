@@ -2,6 +2,7 @@
 package main
 
 import (
+	"strings"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -20,6 +21,12 @@ func main() {
 		os.Exit(2)
 	}
 	flag.Parse()
+	flag.Visit(func(f *flag.Flag) { // a value flag given with "" (or a flag as its value): usage (one grammar in the four, 21/09/2026)
+		if v := f.Value.String(); v == "" || strings.HasPrefix(v, "-") {
+			fmt.Fprintf(os.Stderr, "usage: -%s needs a value (got %q)\n", f.Name, v)
+			os.Exit(2)
+		}
+	})
 	if flag.NArg() != 1 {
 		flag.Usage()
 	}

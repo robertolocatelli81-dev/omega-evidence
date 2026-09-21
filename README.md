@@ -21,7 +21,7 @@ but do not derive from, this toolkit.
 pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
 
 # or straight from the tagged source
-pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.8.2
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.8.3
 ```
 
 Release artifacts (`.whl` / `.tar.gz`) are attached to each
@@ -232,8 +232,9 @@ demands the same `(verdict, pq_protected, authenticated)` from Python, Go, Java 
 packs, lenient base64, uppercase digests, unknown or non-string algorithms, classical algorithm declared as PQ,
 overclaimed or missing `honest_scope`, duplicate keys, floats, nesting beyond 512, lone surrogates, non-UTF-8,
 empty / unrelated / tampered / float ledgers, rotated and revoked signers, stripped / foreign / invalid post-quantum
-layers): 0 disagreements on 57 cases with 4 verifiers (19 September 2026); on a Node without ML-DSA the two Node
-divergences are declared, not hidden. RFC 3161 sidecars are verified by the Python reference
+layers, and — since 0.8.3 — an own `__proto__` key added without rehashing, a raw non-UTF-8 byte where U+FFFD was hashed,
+a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 63 pack cases plus 6 CLI-grammar cases
+with 4 verifiers (21 September 2026); on a Node without ML-DSA the two Node divergences are declared, not hidden. RFC 3161 sidecars are verified by the Python reference
 only (the others report SKIP). The ledger profile is the cryptovalid one, so cryptovalid's five verifiers also
 accept omega-evidence ledgers unchanged (measured 16/09/2026).
 
@@ -291,6 +292,27 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 `drop_pq=True`. Without `cryptography` ≥ 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0; the backend is
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
+
+### 0.8.3 — verifier hygiene from the cra-evidence review (21 September 2026)
+
+Twelve review rounds on cra-evidence 0.3.0, whose verifiers are re-implementations of these, found defect classes in
+shared code. Measured here on 21/09/2026 with a four-verifier probe before the fix and with the differential oracle after
+it (69 cases, 0 disagreements); the same oracle run against the pre-fix verifiers is red on 8 cases:
+
+- **Node dropped an own `__proto__` key while copying** (`c[k] = …` invokes the prototype setter): a ledger entry with
+  such a key added and its `self_hash` untouched verified PASS in Node alone. `Object.fromEntries` keeps the key.
+- **Node and Java decoded a non-UTF-8 file lossily**: a ledger entry whose `self_hash` was computed over U+FFFD while the
+  file held the raw byte verified PASS in both (a lossy decoder reads exactly the hashed text). Strict UTF-8 decoding in
+  both; a malformed byte is a `FAIL` verdict.
+- **The Python reference raised `UnicodeDecodeError`** (a traceback, no verdict) on a raw byte anywhere in the ledger,
+  while Go and Node answered FAIL. `verify_pack` now reports `ledger-chain: FAIL` for an unreadable ledger.
+- **One CLI grammar in the four**: an unknown flag, a value flag with `""` / without a value / with a flag as its value, an
+  abbreviated flag or a second positional are a usage error (exit 2, no verdict) everywhere. Before, Node gave a verdict on
+  five of the six (`--trust-store "$STORE"` with the variable unset verified with no trust store) and an uncaught `ENOENT`
+  on the path `--require-pq` for the sixth, Go and Java took `""` as "not given" and a flag as a path, Python accepted abbreviations.
+
+No verdict changed on an in-profile pack; `python -m omega_evidence pack.json --ledger ""` is the one command whose
+outcome changed (usage error instead of a FAIL verdict).
 
 ### Breaking changes in 0.8.0 / 0.8.1 / 0.8.2
 
