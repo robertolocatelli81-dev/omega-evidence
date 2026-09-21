@@ -303,7 +303,8 @@ Twelve review rounds on cra-evidence 0.3.0, whose verifiers are re-implementatio
 shared code; a review round on this release (Opus, Sonnet, Haiku — Gemini Pro out of credits) found more of the same
 class here. Measured on 21/09/2026 with a four-verifier probe before each fix and with the differential oracle after
 (98 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
-v0.8.2) is red on 42 cases, and against a deliberately lenient Python (loose parser, no scope check) on 9:
+v0.8.2) is red on 42 cases, and against a deliberately lenient Python (loose parser, no scope check, no reserved-tag /
+surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21/09/2026) on 11:
 
 - **Node dropped an own `__proto__` key while copying** (`c[k] = …` invokes the prototype setter): a pack or ledger
   entry with such a key added and its hash untouched verified PASS in Node alone. `Object.fromEntries` keeps the key.
@@ -365,7 +366,12 @@ Verdicts that changed on in-profile input (measured, the positive-control table)
 `scope-NOT-before-accented-letter`, `scope-dotless-i-overclaim`, `ledger-anchor-top-level`, `pack-reserved-tag-key-*` (×2)
 FAIL→PASS; `ledger-anchor-under-data-data`, `trust-entry-without-data`, `ledger-lone-surrogate-entry` PASS→FAIL — each
 toward the verdict of the other three; a 0.8.2-written ledger entry holding a lone surrogate now FAILs everywhere. Node
-on one (`scope-astral-21-…` FAIL→PASS). Nothing produced by the 0.8.3 producer API changes verdict. Two Go files carried an `AGPL-3.0-or-later`
+on four: `scope-astral-21-…` and `trust-revoke-proto-then-trust-toString` FAIL→PASS, `pack-proto-key-hash-untouched`
+and `ledger-proto-key-hash-untouched` PASS→FAIL (well-formed JSON with a hash that does not cover the added key). On the
+two non-UTF-8 files hashed over U+FFFD, Node and Java PASS→FAIL (criterion for the lists above: well-formed JSON input;
+the count is read off the positive-control table). Nothing that both the 0.8.2 and the 0.8.3 producer API accept changes
+verdict; the 0.8.3 producer additionally accepts an `honest_scope` such as `"does NOTé prove x"` (ASCII word rule), which
+the 0.8.2 Python verifier would refuse. Two Go files carried an `AGPL-3.0-or-later`
 SPDX header in this Apache-2.0 repository (the author's own code): corrected to `Apache-2.0`.
 
 ### Breaking changes in 0.8.0 / 0.8.1 / 0.8.2

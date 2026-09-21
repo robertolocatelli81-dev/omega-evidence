@@ -23,6 +23,7 @@ except Exception:  # noqa: BLE001
     HAVE_PQ = False
 
 SCOPE = "Proves integrity; does NOT prove the claim."
+PY_CWD = None   # set from OEVERIFY_PYTHONPATH (ablation)
 
 
 def build_cases(d):
@@ -60,7 +61,7 @@ def build_cases(d):
         cases[nm] = (p, [], None)
     un = mk("sig-alg-unknown-sha3-number"); P.sign_pack(un, idt); sp = un[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["sig_alg"] = "rsa-pss"; json.dump(sd, open(sp, "w"))
     dd = json.load(open(un)); dd["pack_sha3"] = 5; json.dump(dd, open(un, "w")); cases["sig-alg-unknown-sha3-number"] = (un, [], None)
-    # timestamp sidecar shapes (the token itself is verified by the reference only; shape and binding by all)
+    # timestamp sidecar shapes (the token is verified by none of the four inside the verdict; shape and binding by all)
     tl = mk("tsr-list"); P.sign_pack(tl, idt); open(tl[:-5] + ".tsr.json", "w").write("[1]"); cases["tsr-list"] = (tl, [], None)
     tm = mk("tsr-mismatch"); P.sign_pack(tm, idt); json.dump({"digest_sha256": "0" * 64, "tsa": "x", "tsr_b64": "AA=="}, open(tm[:-5] + ".tsr.json", "w")); cases["tsr-digest-mismatch"] = (tm, [], None)
     # trust store shapes: a broken chain and a line with a duplicated key (strict profile: refused, never a pin)
@@ -244,7 +245,7 @@ def build_cases(d):
 def run(cmd, path, flags, go_style):
     args = list(cmd) + ([f.replace("--", "-", 1) for f in flags] + [path] if go_style else [path] + flags)
     try:
-        out = subprocess.run(args, capture_output=True, text=True, timeout=60)
+        out = subprocess.run(args, capture_output=True, text=True, timeout=60, cwd=PY_CWD if cmd[0] == sys.executable else None)
         r = json.loads(out.stdout)
         return (r["verdict"], r.get("pq_protected"), r.get("authenticated"))
     except Exception:  # noqa: BLE001
@@ -253,6 +254,10 @@ def run(cmd, path, flags, go_style):
 
 def main():
     avail = {"python": [sys.executable, "-m", "omega_evidence"], "js": ["node", os.path.join(HERE, "js", "oeverify.mjs")]}
+    global PY_CWD
+    if os.environ.get("OEVERIFY_PYTHONPATH"):   # r9: run the Python verifier from another tree (the lax ablation, verifiers/lax_python_ablation.sh)
+        PY_CWD = os.environ["OEVERIFY_PYTHONPATH"]   # cwd, so that `-m omega_evidence` resolves THAT tree, not this one
+        print(f"  python verifier taken from OEVERIFY_PYTHONPATH={PY_CWD} (ablation)")
     tmp = tempfile.mkdtemp()
     go = os.environ.get("OEVERIFY_GO")
     if not go and shutil.which("go"):
@@ -330,7 +335,7 @@ def main():
             else:
                 args = list(cmd) + (ex + [valid] if gs else [valid] + ex)
             try:
-                out = subprocess.run(args, capture_output=True, text=True, timeout=60)
+                out = subprocess.run(args, capture_output=True, text=True, timeout=60, cwd=PY_CWD if cmd[0] == sys.executable else None)
                 try:
                     row[k] = "verdict:" + str(json.loads(out.stdout).get("verdict"))
                 except Exception:  # noqa: BLE001
