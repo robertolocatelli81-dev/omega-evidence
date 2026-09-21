@@ -152,6 +152,14 @@ def build_cases(d):
     cases["trust-entry-without-data"] = (tw, ["--trust-store", st_w], None)
     dd = {"kind": "d", "honest_scope": "guaranteed; does NOT " + "\U0001F600" * 21 + " guarantee x", "n": 1}
     cases["scope-astral-21-between-NOT-and-guarant"] = (mk_text("astral", dd, json.dumps(dict(dd, pack_sha3="%H"), ensure_ascii=False)), [], None)
+    # review r5 (Opus): the reserved type-tag key is a producer rule — Python's verifier refused it (pack-sha3 FAIL alone);
+    # Node's trust state was a plain {} (a revoke of "__proto__" then a trust of "toString" read Object.prototype: FAIL alone)
+    for nm, body in (("pack-reserved-tag-key-top-level", {"kind": "d", "honest_scope": "does NOT x", "__omega_reserved_type__": "Decimal", "value": "1"}),
+                     ("pack-reserved-tag-key-nested", {"kind": "d", "honest_scope": "does NOT x", "x": {"__omega_reserved_type__": 1}})):
+        rp = os.path.join(d, nm + ".json"); hh = _lax_sha3(body); open(rp, "w").write(json.dumps(dict(body, pack_sha3=hh))); anchor_hash(rp, hh); cases[nm] = (rp, [], None)
+    pid = signing.Identity("toString"); tsp = mk("proto-trust"); P.sign_pack(tsp, pid); st_p = os.path.join(d, "trust_proto.jsonl"); Lp_ = Ledger(st_p)
+    Lp_.append({"action": "revoke", "signer_id": "__proto__", "reason": "x"}); Lp_.append({"action": "trust", "signer_id": "toString", "pubkey": pid.public_key_b64})
+    cases["trust-revoke-proto-then-trust-toString"] = (tsp, ["--trust-store", st_p], None)
     bad8 = os.path.join(d, "bad8.json"); open(bad8, "wb").write(b'{"kind":"d","honest_scope":"does NOT x","s":"\xff","pack_sha3":"' + b"0" * 64 + b'"}'); cases["non-utf8"] = (bad8, [], None)   # not JSON anywhere: FAIL at pack-json
     # ledgers
     e = mk("empty-ledger"); open(e[:-5] + ".ledger.jsonl", "w").close(); cases["ledger-empty"] = (e, [], None)
@@ -300,7 +308,8 @@ def main():
            "cli-ledger-flag-as-value": ["--ledger", "--require-pq"], "cli-abbreviation": ["--ledg", valid], "cli-two-positionals": [valid],
            # review r1 (Opus): the pack path itself "" or "-" (an unset $PACK), the "--" terminator, a value on the boolean flag
            "cli-empty-pack": ["--pack", ""], "cli-dash-pack": ["--pack", "-"], "cli-double-dash": ["--"], "cli-bool-eq-false": ["--require-pq=false"],
-           "cli-help": ["--help"], "cli-h": ["-h"]}   # r3 (Sonnet): argparse answered --help with exit 0 while the three said usage
+           "cli-help": ["--help"], "cli-h": ["-h"],
+           "cli-one-dash-abbreviation": ["-ledg", valid], "cli-one-dash-short": ["-l", valid]}   # r5: argparse resolved -l / -ledg by prefix (a verdict in Python alone)   # r3 (Sonnet): argparse answered --help with exit 0 while the three said usage
     cli["cli-other-dash-spelling-verdict"] = ["--other-dash"]   # r4 (Sonnet): -ledger in Python/Node, --ledger in Go/Java → a verdict, the same flag
     for name, extra in cli.items():
         row = {}

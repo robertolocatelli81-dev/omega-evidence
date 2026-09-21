@@ -233,9 +233,9 @@ packs, lenient base64, uppercase digests, unknown or non-string algorithms, clas
 overclaimed or missing `honest_scope`, duplicate keys, floats, nesting beyond 512, lone surrogates, non-UTF-8,
 empty / unrelated / tampered / float ledgers, rotated and revoked signers, stripped / foreign / invalid post-quantum
 layers, and — since 0.8.3 — an own `__proto__` key added without rehashing, a raw non-UTF-8 byte where U+FFFD was hashed,
-a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 80 pack cases plus 13 CLI-grammar cases
+a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 83 pack cases plus 15 CLI-grammar cases
 with 4 verifiers (21 September 2026); the hostile pack cases are anchored with the hash a lenient verifier would accept,
-so the named layer decides; on a Node without ML-DSA the two Node divergences are declared, not hidden. RFC 3161 sidecars are verified by the Python reference
+so the named layer decides (except `non-utf8`, which is not JSON for any decoder and only detects a crash); on a Node without ML-DSA the two Node divergences are declared, not hidden. RFC 3161 sidecars are verified by the Python reference
 only (the others report SKIP). The ledger profile is the cryptovalid one, so cryptovalid's five verifiers also
 accept omega-evidence ledgers unchanged (measured 16/09/2026).
 
@@ -299,8 +299,8 @@ very function registered) the layer is reported present-but-unverifiable (never 
 Twelve review rounds on cra-evidence 0.3.0, whose verifiers are re-implementations of these, found defect classes in
 shared code; a review round on this release (Opus, Sonnet, Haiku — Gemini Pro out of credits) found more of the same
 class here. Measured on 21/09/2026 with a four-verifier probe before each fix and with the differential oracle after
-(93 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
-v0.8.2) is red on 37 cases, and against a deliberately lenient Python (loose parser, no scope check) on 9:
+(98 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
+v0.8.2) is red on 42 cases, and against a deliberately lenient Python (loose parser, no scope check) on 9:
 
 - **Node dropped an own `__proto__` key while copying** (`c[k] = …` invokes the prototype setter): a pack or ledger
   entry with such a key added and its hash untouched verified PASS in Node alone. `Object.fromEntries` keeps the key.
@@ -331,6 +331,16 @@ v0.8.2) is red on 37 cases, and against a deliberately lenient Python (loose par
 - **Node's `[^.]{0,40}` counted UTF-16 code units** (no `u` flag): 21 astral characters between `NOT` and `guarant`
   were 42 units in Node and 21 code points elsewhere, so the negation was seen by three verifiers and not by Node.
   Astral characters are folded to one placeholder unit before the three scope tests.
+- **The reserved type-tag key was a verifier rule in Python only** (round 5, Opus): a pack carrying
+  `__omega_reserved_type__` (top-level or nested) was `pack-sha3 FAIL` in Python and PASS in the three, which hash the
+  text as it is. The key is a producer rule (an object must not forge the tag the encoder emits for `Decimal`); the
+  verifier now hashes what it read (`sha3(obj, from_text=True)`), the producer still refuses it.
+- **Node's trust state was a plain `{}`**: a signer id such as `toString` or `__proto__` read through `Object.prototype`
+  (a chain-valid store with a revoke of `__proto__` then a trust of `toString`: FAIL in Node alone, and the process
+  prototype polluted). `Object.create(null)` now.
+- **Python resolved `-l` / `-ledg` by prefix** once `-ledger` was registered as an option string in round 4
+  (`allow_abbrev=False` guards the `--` branch only): a verdict in Python alone. Only the `--` forms are registered and
+  the exact one-dash spellings are mapped before parsing.
 - **The Python reference read the RFC 3161 sidecar with the loose `json.loads`**: a `.tsr.json` with a float or a
   duplicate key beside a correct digest was PASS in Python and FAIL in Go, Java and Node. Strict parser there too.
 - **Node crashed with an uncaught `ENOENT`** on a `--ledger` path that does not exist (the other three: FAIL).
@@ -344,7 +354,9 @@ v0.8.2) is red on 37 cases, and against a deliberately lenient Python (loose par
 
 Declared, not aligned: Go's `flag` stops at the first positional, so `oeverify pack.json -ledger L` is a usage error
 in Go and a verdict in Python, Java and Node (put flags first); Node and Java refuse an input over 256 MiB and Go a ledger line
-over 64 MiB while Python has no bound — a valid file beyond those sizes verifies in some of the four only.
+over 64 MiB while Python has no bound — a valid file beyond those sizes verifies in some of the four only. Not measured:
+Ed25519 decoding of non-canonical or small-order points in a sidecar (the four backends — pure Python, OpenSSL, Go's
+`edwards25519`, SunEC — have their own rules; no such vectors are in the oracle yet).
 
 No verdict changed on an in-profile pack with a well-formed command line. Two Go files carried an `AGPL-3.0-or-later`
 SPDX header in this Apache-2.0 repository (the author's own code): corrected to `Apache-2.0`.

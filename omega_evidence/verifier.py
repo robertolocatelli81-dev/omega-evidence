@@ -97,8 +97,11 @@ def _check_ledger(path: str, ledger_path: Optional[str], layers: List) -> bool:
     # A valid chain is not enough: the pack must actually be RECORDED in the ledger.
     # An empty or unrelated ledger must NOT anchor a fabricated pack.
     try:
-        pk = json.loads(open(path, encoding="utf-8").read())
-    except (OSError, ValueError):
+        from .ledger import loads_strict
+        pk = loads_strict(open(path, encoding="utf-8").read())   # r5 (Sonnet): the same parser as the integrity layer
+        if not isinstance(pk, dict):
+            pk = {}
+    except (OSError, ValueError, RecursionError):
         pk = {}
     pack_sha3 = pk.get("pack_sha3", "")
     entries = list(lg.raw_entries())   # r4: the whole entry, as Go/Java/Node read it
@@ -202,9 +205,10 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
         layers.append(_layer("producer-signature", "FAIL", f"malformed sidecar: {e}"))
         return "FAIL", False, False
     try:
-        pack = json.loads(open(path, encoding="utf-8").read())
+        from .ledger import loads_strict
+        pack = loads_strict(open(path, encoding="utf-8").read())   # r5 (Sonnet): the same parser as the integrity layer
         current = pack.get("pack_sha3", "") if isinstance(pack, dict) else ""
-    except (OSError, ValueError):            # verify_pack returns before this on a bad pack; belt for direct callers
+    except (OSError, ValueError, RecursionError):   # verify_pack returns before this on a bad pack; belt for direct callers
         layers.append(_layer("producer-signature", "FAIL", "pack unreadable"))
         return "FAIL", False, False
     # The classical layer is Ed25519 ONLY — the same rule as the Go/Java/JS verifiers (council 16/09 r1: a
@@ -309,7 +313,7 @@ def verify_pack(path: str, ledger_path: Optional[str] = None,
 
     declared = pack.get("pack_sha3", "")
     try:
-        computed = sha3({k: v for k, v in pack.items() if k != "pack_sha3"})
+        computed = sha3({k: v for k, v in pack.items() if k != "pack_sha3"}, from_text=True)   # r5: the text as read, like the three
     except (ValueError, TypeError, RecursionError) as e:
         computed = None
         layers.append(_layer("pack-sha3", "FAIL", f"not canonicalisable: {e.__class__.__name__}"))
@@ -345,14 +349,18 @@ def main(argv=None) -> int:
     import argparse
     p = argparse.ArgumentParser(allow_abbrev=False, add_help=False, prog="omega-evidence-verify")   # r3: -h/--help exit 0 here, 2 in the three (usage on stderr documents the flags)
     p.add_argument("pack")
-    p.add_argument("--ledger", "-ledger")            # r4: one dash or two, the same flag in the four CLIs
-    p.add_argument("--trust-store", "-trust-store")
-    p.add_argument("--expect-pq-key", "-expect-pq-key", help="pinned ML-DSA-65 public key (base64): requires the hybrid layer")
-    p.add_argument("--require-pq", "-require-pq", action="store_true", help="require a pinned, valid post-quantum layer (trust registry)")
+    p.add_argument("--ledger")
+    p.add_argument("--trust-store")
+    p.add_argument("--expect-pq-key", help="pinned ML-DSA-65 public key (base64): requires the hybrid layer")
+    p.add_argument("--require-pq", action="store_true", help="require a pinned, valid post-quantum layer (trust registry)")
     raw = list(sys.argv[1:] if argv is None else argv)
-    if "--" in raw or any(x.startswith(("--require-pq=", "-require-pq=")) for x in raw):   # no "--" terminator, no value on the boolean flag (one grammar in the four)
+    # r4/r5: one dash or two is the same flag in the four CLIs — the EXACT single-dash spellings are mapped here (registering
+    # "-ledger" as an option string would let argparse resolve "-l" / "-ledg" by prefix even with allow_abbrev=False)
+    ONE_DASH = {"-ledger": "--ledger", "-trust-store": "--trust-store", "-expect-pq-key": "--expect-pq-key", "-require-pq": "--require-pq"}
+    raw = [ONE_DASH.get(x.split("=", 1)[0], x.split("=", 1)[0]) + ("=" + x.split("=", 1)[1] if "=" in x else "") if x.split("=", 1)[0] in ONE_DASH else x for x in raw]
+    if "--" in raw or any(x.startswith("--require-pq=") for x in raw):   # no "--" terminator, no value on the boolean flag (one grammar in the four)
         p.error("unexpected argument")
-    a = p.parse_args(argv)
+    a = p.parse_args(raw)
     if a.pack == "" or a.pack.startswith("-"):   # an unset $PACK must not be read as a path
         p.error(f"pack path needs a value (got {a.pack!r})")
     for flag in ("ledger", "trust_store", "expect_pq_key"):

@@ -267,15 +267,20 @@ class Ledger:
         # 0.7.0: the same acceptance profile as the cryptovalid verifiers (Python/JS/Go/Rust/Java agree):
         # LF-only lines, blank = ASCII space/tab/CR, strict JSON, sequential idx, content → self_hash → prev link
         n = 0
-        with open(self.path, encoding="utf-8", errors="surrogateescape", newline="\n") as fh:
-            for i, line in enumerate(fh):
+        try:   # r5 (Sonnet): strict decode here too (surrogateescape never raised); a non-UTF-8 file is a broken chain
+            with open(self.path, "rb") as fh:
+                lines = fh.read().decode("utf-8").split("\n")
+        except (OSError, UnicodeDecodeError):
+            return False, [0]
+        if True:
+            for i, line in enumerate(lines):
                 if not line.strip(" \t\r\n"):
                     continue
                 try:
                     e = loads_strict(line.strip(" \t\r\n"))
                     if not isinstance(e, dict):
                         raise ValueError("entry is not an object")
-                except ValueError:
+                except (ValueError, RecursionError):
                     bad.append(i)
                     n += 1
                     continue

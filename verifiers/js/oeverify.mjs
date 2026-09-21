@@ -182,7 +182,7 @@ function ledgerEntries(path) {
 const anchors = (e, digest) => e.anchored_pack_sha3 === digest || (e.data && typeof e.data === "object" && e.data.anchored_pack_sha3 === digest);
 
 function trustState(path) {
-  const { ok, entries } = ledgerEntries(path); const st = {};
+  const { ok, entries } = ledgerEntries(path); const st = Object.create(null);   // r5 (Opus): with {} a signer_id "toString" or "__proto__" read through Object.prototype (a revoke of "__proto__" then a trust of "toString" was FAIL here alone, and polluted the prototype)
   if (!ok) return { ok, st };
   for (const e of entries) {
     const d = e.data; if (!d || typeof d !== "object" || Array.isArray(d)) return { ok: false, st };   // council r2: malformed record = broken store

@@ -915,6 +915,14 @@ class TestNemesisRegressions(unittest.TestCase):
             e0 = json.loads(Path(st2).read_text(encoding="utf-8").splitlines()[0])
             Path(st2).write_text(Path(st2).read_text(encoding="utf-8") + json.dumps(entry(1, e0["self_hash"], {}), separators=(",", ":")) + "\n", encoding="utf-8")
             r = verify_pack(pp, trust_store=st2); self.assertFalse(r["valid"]); self.assertFalse(r["authenticated"])
+            # review r5: the reserved type-tag key in a pack read from text is data (the three hash it as it is)
+            body = {"kind": "d", "honest_scope": "does NOT x", "__omega_reserved_type__": "Decimal", "value": "1"}
+            h = hashlib.sha3_256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            pp = os.path.join(tmp, "reserved.json"); Path(pp).write_text(json.dumps(dict(body, pack_sha3=h)), encoding="utf-8")
+            ledger.Ledger(pp[:-5] + ".ledger.jsonl").append({"anchored_pack_sha3": h})
+            self.assertTrue(verify_pack(pp)["valid"])
+            with self.assertRaises(ValueError):
+                canonical.sha3(body)                                   # the producer still refuses to forge the tag
             # a trust-store line that is not an object raised AttributeError out of Ledger._load
             pp = os.path.join(tmp, "signed.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
             idt = signing.Identity("acme"); pack.sign_pack(pp, idt)
@@ -929,7 +937,7 @@ class TestNemesisRegressions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pp = os.path.join(tmp, "p.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
             for extra in (["--ledger", ""], ["--ledger"], ["--ledger", "--require-pq"], ["--ledg", pp], [pp], ["--no-such-flag"],
-                          ["--"], ["--require-pq=false"], ["--help"], ["-h"]):
+                          ["--"], ["--require-pq=false"], ["--help"], ["-h"], ["-ledg", pp], ["-l", pp], ["-r"]):
                 out = subprocess.run([sys.executable, "-m", "omega_evidence", pp] + extra, capture_output=True, text=True)
                 self.assertEqual(out.returncode, 2, (extra, out.stdout, out.stderr))
                 self.assertEqual(out.stdout, "")

@@ -59,7 +59,7 @@ def _default(o: Any) -> Any:
 _SAFE_INT = (1 << 53) - 1
 
 
-def _reject_reserved(obj: Any) -> None:
+def _reject_reserved(obj: Any, allow_tag: bool = False) -> None:
     """Refuse any input dict that carries the reserved type-tag key: it is reserved
     for the toolkit's own injective type-tagging, so a forged tag dict raises rather
     than silently colliding with a genuine typed value.
@@ -73,7 +73,7 @@ def _reject_reserved(obj: Any) -> None:
     if isinstance(obj, int) and not isinstance(obj, bool) and abs(obj) > _SAFE_INT:
         raise ValueError("canonical_json: integer outside the portable range +/-(2^53-1)")
     if isinstance(obj, dict):
-        if _TAG in obj:
+        if _TAG in obj and not allow_tag:
             raise ValueError("canonical_json: input uses the reserved type-tag key")
         for k, v in obj.items():
             # FIX NEMESIS re-attack: JSON coerces non-string keys to strings
@@ -81,23 +81,26 @@ def _reject_reserved(obj: Any) -> None:
             # rather than let them collapse — keeps hashing injective.
             if not isinstance(k, str):
                 raise ValueError(f"canonical_json: non-string key {k!r} is not injective")
-            _reject_reserved(k)
-            _reject_reserved(v)
+            _reject_reserved(k, allow_tag)
+            _reject_reserved(v, allow_tag)
     elif isinstance(obj, (list, tuple, set, frozenset)):
         for v in obj:
-            _reject_reserved(v)
+            _reject_reserved(v, allow_tag)
 
 
-def canonical_json(obj: Any) -> bytes:
-    """Deterministic canonical serialisation of a JSON-like object."""
-    _reject_reserved(obj)
+def canonical_json(obj: Any, allow_tag: bool = False) -> bytes:
+    """Deterministic canonical serialisation of a JSON-like object. `allow_tag=True` for an object decoded from JSON TEXT
+    (verifier side): the reserved type-tag key is a producer rule (a Python object must not forge the tag the encoder emits
+    for Decimal etc.); in text no collision with a typed value is possible, and Go/Java/Node hash such a document as it is —
+    the Python reference refused it, pack-sha3 FAIL alone (0.8.3 r5, Opus)."""
+    _reject_reserved(obj, allow_tag)
     return json.dumps(obj, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=True, allow_nan=False, default=_default).encode("utf-8")
 
 
-def sha3(obj: Any) -> str:
-    """SHA3-256 of the canonical serialisation (hex)."""
-    return hashlib.sha3_256(canonical_json(obj)).hexdigest()
+def sha3(obj: Any, from_text: bool = False) -> str:
+    """SHA3-256 of the canonical serialisation (hex); `from_text=True` on the verifier side (see canonical_json)."""
+    return hashlib.sha3_256(canonical_json(obj, allow_tag=from_text)).hexdigest()
 
 
 def sha256_bytes(data: bytes) -> str:
