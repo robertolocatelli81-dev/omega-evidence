@@ -233,7 +233,7 @@ packs, lenient base64, uppercase digests, unknown or non-string algorithms, clas
 overclaimed or missing `honest_scope`, duplicate keys, floats, nesting beyond 512, lone surrogates, non-UTF-8,
 empty / unrelated / tampered / float ledgers, rotated and revoked signers, stripped / foreign / invalid post-quantum
 layers, and — since 0.8.3 — an own `__proto__` key added without rehashing, a raw non-UTF-8 byte where U+FFFD was hashed,
-a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 84 pack cases plus 15 CLI-grammar cases
+a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 85 pack cases plus 15 CLI-grammar cases
 with 4 verifiers (21 September 2026); the hostile pack cases are anchored with the hash a lenient verifier would accept,
 so the named layer decides (except `non-utf8` and `ledger-raw-byte-in-key`, which only detect a crash — a lossy decoder fails them on the hash anyway; the lossy-decoder cases are the two `…-hashed-as-fffd`); on a Node without ML-DSA the two Node divergences are declared, not hidden. None of the four verifies the RFC 3161 token inside the
 pack verdict: `verify_pack` checks the sidecar's shape and its digest→pack binding and reports the layer as SKIP with the
@@ -302,9 +302,9 @@ very function registered) the layer is reported present-but-unverifiable (never 
 Twelve review rounds on cra-evidence 0.3.0, whose verifiers are re-implementations of these, found defect classes in
 shared code; a review round on this release (Opus, Sonnet, Haiku — Gemini Pro out of credits) found more of the same
 class here. Measured on 21/09/2026 with a four-verifier probe before each fix and with the differential oracle after
-(99 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
-v0.8.2) is red on 43 cases, and against a deliberately lenient Python (loose parser, no scope check, no reserved-tag /
-surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21/09/2026) on 12:
+(100 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
+v0.8.2) is red on 44 cases, and against a deliberately lenient Python (loose parser, no scope check, no reserved-tag /
+surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21/09/2026) on 13:
 
 - **Node dropped an own `__proto__` key while copying** (`c[k] = …` invokes the prototype setter): a pack or ledger
   entry with such a key added and its hash untouched verified PASS in Node alone. `Object.fromEntries` keeps the key.
@@ -363,18 +363,23 @@ Ed25519 decoding of non-canonical or small-order points in a sidecar (the four b
 `edwards25519`, SunEC — have their own rules; no such vectors are in the oracle yet).
 
 Verdicts that changed, counted by script from the positive-control table (criterion: well-formed JSON input; a
-crash→verdict is listed apart). **Python, eleven**: `scope-NOT-before-accented-letter`, `scope-dotless-i-overclaim`,
+crash→verdict is listed apart). **Python, twelve**: `scope-NOT-before-accented-letter`, `scope-dotless-i-overclaim`,
 `ledger-anchor-top-level`, `pack-reserved-tag-key-top-level`, `pack-reserved-tag-key-nested` FAIL→PASS;
 `lone-surrogate`, `ledger-lone-surrogate-entry`, `ledger-anchor-under-data-data`, `trust-entry-without-data`,
-`tsr-float-beside-good-digest`, `tsr-dup-key-beside-good-digest` PASS→FAIL — each toward the verdict of the other three; and
+`tsr-float-beside-good-digest`, `tsr-dup-key-beside-good-digest`, `scope-overclaim-glued-to-accented-letter` PASS→FAIL — each toward the verdict of the other three; and
 seven inputs that were a traceback now get a verdict (two of them non-UTF-8 files). **Node, seven**: `scope-astral-21-…`,
 `trust-revoke-proto-then-trust-toString`, `pack-proto-key-hashed-by-producer` (a pack the producer API makes, with a
 top-level `__proto__` key) FAIL→PASS; `pack-float-1.0-hashed-as-1`, `pack-exp-1E2-hashed-as-100`,
 `pack-proto-key-hash-untouched`, `ledger-proto-key-hash-untouched` PASS→FAIL; plus one crash→verdict (`ledger-path-missing`).
-**Go and Java: none** on well-formed JSON. On the two non-UTF-8 files hashed over U+FFFD, Node and Java PASS→FAIL. So one
-producer-made input changes verdict: a pack whose body has a top-level `__proto__` key was FAIL in 0.8.2 Node alone and
-is PASS everywhere now; the 0.8.3 producer additionally accepts an `honest_scope` such as `"does NOTé prove x"` (ASCII
-word rule), which the 0.8.2 Python verifier refused.
+**Go and Java: none** on well-formed JSON (Java: one usage→verdict, `cli-eq-form-verdict`, counted under the CLI
+paragraph). On the two non-UTF-8 files hashed over U+FFFD, Node and Java PASS→FAIL.
+
+Three classes of input that the **0.8.2 producer API** wrote change verdict: (1) a pack whose body has a top-level
+`__proto__` key — Node FAIL→PASS; (2) a ledger entry holding a lone surrogate (`Ledger.append` accepted it, `json.dumps`
+wrote `"\ud800"`) — Python PASS→FAIL, the three already failed it; (3) an `honest_scope` with an overclaim keyword glued
+to a non-ASCII letter, e.g. `"écertified. Does NOT prove y"` — Python PASS→FAIL (Unicode `\b` saw no word boundary before
+`certified`; ASCII does), the three already failed it, and the 0.8.3 producer refuses it (measured on v0.8.2, 21/09/2026).
+The 0.8.3 producer additionally accepts scopes such as `"does NOTé prove x"` that the 0.8.2 Python verifier refused.
 
 Two Go files carried an `AGPL-3.0-or-later` SPDX header in this Apache-2.0 repository (the author's own code): corrected to
 `Apache-2.0`.

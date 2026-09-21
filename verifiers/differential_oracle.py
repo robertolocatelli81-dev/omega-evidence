@@ -133,7 +133,8 @@ def build_cases(d):
         open(p, "w", encoding="utf-8").write(text.replace("%H", h)); anchor_hash(p, h); return p
     cases["pack-float-1.0-hashed-as-1"] = (mk_text("f10", {"kind": "d", "honest_scope": "does NOT x", "n": 1}, '{"kind":"d","honest_scope":"does NOT x","n":1.0,"pack_sha3":"%H"}'), [], None)
     cases["pack-exp-1E2-hashed-as-100"] = (mk_text("e12", {"kind": "d", "honest_scope": "does NOT x", "n": 100}, '{"kind":"d","honest_scope":"does NOT x","n":1E2,"pack_sha3":"%H"}'), [], None)
-    for nm, scope in (("scope-NOT-before-accented-letter", "does NOT\u00e9 prove x"), ("scope-dotless-i-overclaim", "fully cert\u0131fied; does NOT prove x")):
+    for nm, scope in (("scope-NOT-before-accented-letter", "does NOT\u00e9 prove x"), ("scope-dotless-i-overclaim", "fully cert\u0131fied; does NOT prove x"),
+                      ("scope-overclaim-glued-to-accented-letter", "\u00e9certified. Does NOT prove y")):   # r12: the stricter direction — 0.8.2 Python (Unicode \b) saw no overclaim, PASS alone; the 0.8.2 producer wrote it
         dd = {"kind": "d", "honest_scope": scope, "n": 1}
         cases[nm] = (mk_text(nm, dd, json.dumps(dict(dd, pack_sha3="%H"), ensure_ascii=False)), [], None)
     for nm, vm in (("tsr-vm-crls-int", '{"available": true, "crls_b64": 1}'), ("tsr-vm-crls-list-of-int", '{"available": true, "crls_b64": [1]}')):

@@ -143,7 +143,7 @@ func ledgerEntries(path string) ([]*Object, bool) {
 		if perr != nil || idx.String() != fmt.Sprint(n) || ph != prev || sh != sum {
 			ok = false
 		}
-		if sh != "" {
+		if sh != "" { // a missing self_hash keeps prev here (Python/Node/Java set ""); only reachable after ok is already false, so no verdict differs (r12)
 			prev = sh
 		}
 		out = append(out, e)
