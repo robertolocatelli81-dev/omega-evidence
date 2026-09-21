@@ -233,9 +233,9 @@ packs, lenient base64, uppercase digests, unknown or non-string algorithms, clas
 overclaimed or missing `honest_scope`, duplicate keys, floats, nesting beyond 512, lone surrogates, non-UTF-8,
 empty / unrelated / tampered / float ledgers, rotated and revoked signers, stripped / foreign / invalid post-quantum
 layers, and — since 0.8.3 — an own `__proto__` key added without rehashing, a raw non-UTF-8 byte where U+FFFD was hashed,
-a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 85 pack cases plus 17 CLI-grammar cases
+a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 86 pack cases plus 17 CLI-grammar cases
 with 4 verifiers (21 September 2026); the hostile pack cases are anchored with the hash a lenient verifier would accept,
-so the named layer decides (except `non-utf8` and `ledger-raw-byte-in-key`, which only detect a crash — a lossy decoder fails them on the hash anyway; the lossy-decoder cases are the two `…-hashed-as-fffd`); on a Node without ML-DSA the two Node divergences are declared, not hidden. None of the four verifies the RFC 3161 token inside the
+so the named layer decides (except `non-utf8` and `ledger-raw-byte-in-key`, which only detect a crash — a lossy decoder fails them on the hash anyway; the lossy-decoder cases are the two `…-hashed-as-fffd`); the signed-sidecar shape cases are anchored too, so a layer SKIP and a layer FAIL give different verdicts; on a Node without ML-DSA the two Node divergences are declared, not hidden. None of the four verifies the RFC 3161 token inside the
 pack verdict: `verify_pack` checks the sidecar's shape and its digest→pack binding and reports the layer as SKIP with the
 reason (round 6, Opus: the earlier sentence "verified by the Python reference only" was not true of the code — no trust
 anchor reaches `verify_pack`); the cryptographic check exists as `timestamp.verify(tsr_b64, digest, ca_file=<TSA roots>)`
@@ -302,7 +302,7 @@ very function registered) the layer is reported present-but-unverifiable (never 
 Twelve review rounds on cra-evidence 0.3.0, whose verifiers are re-implementations of these, found defect classes in
 shared code; a review round on this release (Opus, Sonnet, Haiku — Gemini Pro out of credits) found more of the same
 class here. Measured on 21/09/2026 with a four-verifier probe before each fix and with the differential oracle after
-(102 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
+(103 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
 v0.8.2) is red on 46 cases, and against a deliberately lenient Python (loose parser, no scope check, no reserved-tag /
 surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21/09/2026) on 13:
 
@@ -359,10 +359,11 @@ surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21
   Go and Java took `""` as "not given" and a flag as a path, Python accepted `--ledg` and crashed on it.
 
 Declared, not aligned: Go's `flag` stops at the first positional, so `oeverify pack.json -ledger L` is a usage error
-in Go and a verdict in Python, Java and Node (put flags first); Node and Java refuse an input over 256 MiB and Go a ledger line
-over 64 MiB while Python has no bound — a valid file beyond those sizes verifies in some of the four only. Not measured:
+in Go and a verdict in Python, Java and Node (put flags first); Node and Java refuse an input over 256 MiB, Go bounds only a
+ledger line (64 MiB; its pack and sidecar reads are unbounded) and Python has no bound — a valid file beyond those sizes verifies in some of the four only. Not measured:
 Ed25519 decoding of non-canonical or small-order points in a sidecar (the four backends — pure Python, OpenSSL, Go's
-`edwards25519`, SunEC — have their own rules; no such vectors are in the oracle yet).
+`edwards25519`, SunEC — have their own rules; no such vectors are in the oracle yet). Go's `(?i)` in the scope regexes is Unicode simple folding (the other three fold
+ASCII only): harmless while no keyword contains `k` or `s` (KELVIN SIGN, LONG S fold to them) — a caveat for whoever adds a word.
 
 Verdicts that changed, counted by script from the positive-control table (criterion: well-formed JSON input; a
 crash→verdict is listed apart). **Python, twelve**: `scope-NOT-before-accented-letter`, `scope-dotless-i-overclaim`,

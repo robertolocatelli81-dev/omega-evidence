@@ -44,12 +44,12 @@ def build_cases(d):
     t = mk("tampered"); P.sign_pack(t, idt); dd = json.load(open(t)); dd["claim"] = "y"; json.dump(dd, open(t, "w"))
     cases["tampered"] = (t, [], None)
     # sidecar hostile shapes
-    for nm, mut in (("sig-space", lambda sd: dict(sd, signature_b64=sd["signature_b64"][:8] + " " + sd["signature_b64"][8:])),
+    for nm, mut in (("sig-space", lambda sd: dict(sd, signature_b64=sd["signature_b64"][:8] + " " + sd["signature_b64"][8:])),   # r14: all anchored — SKIP vs FAIL of the layer shows in the verdict
                     ("sig-digest-upper", lambda sd: dict(sd, signed_pack_sha3=sd["signed_pack_sha3"].upper())),
                     ("sig-alg-unknown", lambda sd: dict(sd, sig_alg="rsa-pss")),
                     ("pq-alg-int", lambda sd: dict(sd, pq_sig_alg=123)),
                     ("pq-alg-classical", lambda sd: dict(sd, pq_sig_alg="ed25519", pq_public_key_b64=sd["public_key_b64"], pq_signature_b64=sd["signature_b64"]))):
-        p = mk(nm); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
+        p = mk(nm); P.anchor_pack(p, p[:-5] + ".ledger.jsonl"); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
         cases[nm] = (p, [], None)
     cases["pq-alg-classical-required"] = (cases["pq-alg-classical"][0], ["--require-pq"], None)
     # council 16/09 r1: sig_alg shapes and a classical-layer sidecar that declares a PQ alg only
@@ -57,7 +57,7 @@ def build_cases(d):
                     ("sig-alg-list", lambda sd: dict(sd, sig_alg=["x"])),
                     ("sig-alg-pq-only", lambda sd: {"signer_id": "acme", "sig_alg": "ml-dsa-65", "signed_pack_sha3": sd["signed_pack_sha3"],
                                                     "public_key_b64": "A" * 2604, "signature_b64": "A" * 4412})):
-        p = mk(nm); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
+        p = mk(nm); P.anchor_pack(p, p[:-5] + ".ledger.jsonl"); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
         cases[nm] = (p, [], None)
     un = mk("sig-alg-unknown-sha3-number"); P.sign_pack(un, idt); sp = un[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["sig_alg"] = "rsa-pss"; json.dump(sd, open(sp, "w"))
     dd = json.load(open(un)); dd["pack_sha3"] = 5; json.dump(dd, open(un, "w")); cases["sig-alg-unknown-sha3-number"] = (un, [], None)
@@ -80,6 +80,7 @@ def build_cases(d):
                     ("sig-signer-id-missing", lambda sd: {k: v for k, v in sd.items() if k != "signer_id"})):
         p = mk(nm); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
         cases[nm] = (p, ["--trust-store", store], None)
+    cases["sig-signer-id-missing-required-pq"] = (cases["sig-signer-id-missing"][0], ["--require-pq"], None)   # r14 (Sonnet): the early-return branch in Go under the PQ requirement
     sdk = mk("sig-dup-key"); P.sign_pack(sdk, idt); sp = sdk[:-5] + ".sig.json"; txt = open(sp).read().rstrip().rstrip("}")
     open(sp, "w").write(txt + ', "public_key_b64": "' + idt.public_key_b64 + '"}'); cases["sig-dup-key"] = (sdk, [], None)   # r8: the SAME value twice — a last-wins parser verifies and says PASS; strict = malformed
     def _store_with(name, edit):
@@ -95,7 +96,7 @@ def build_cases(d):
     up = mk("upper-signed"); dd = json.load(open(up)); dd["pack_sha3"] = dd["pack_sha3"].upper(); json.dump(dd, open(up, "w")); P.sign_pack(up, idt)
     P.add_pq_signature(up, "ml-dsa-65", base64.b64encode(b"\x01" * 1952).decode(), base64.b64encode(b"\x02" * 3309).decode())
     cases["sig-digest-upper-signed-with-pq"] = (up, [], None)
-    cases["unsigned-required-pq"] = (cases["bare"][0], ["--require-pq"], None)
+    cases["unsigned-required-pq"] = (cases["anchored"][0], ["--require-pq"], None)   # r14: anchored (PASS without the flag) — a verifier ignoring the requirement says PASS
     # honest scope variants and pack shapes — every one ANCHORED with the hash a lenient verifier would accept (review r2,
     # Opus: a bare pack is FAIL whatever the verifier does with floats / duplicate keys / depth / scope, so the case could
     # not fail); hashes computed with json.dumps directly where the toolkit itself refuses the content
@@ -195,7 +196,7 @@ def build_cases(d):
     open(lpl, "w").write(json.dumps(ent, separators=(",", ":")) + "\n"); cases["ledger-lone-surrogate-entry"] = (ls_, [], None)   # r2: Python 0.8.2 wrote and accepted it
     rb = mk("raw-ledger"); P.anchor_pack(rb, rb[:-5] + ".ledger.jsonl"); lpr = rb[:-5] + ".ledger.jsonl"; bb = open(lpr, "rb").read()
     open(lpr, "wb").write(bb.replace(b'"ts"', b'"t\xffs"', 1)); cases["ledger-raw-byte-in-key"] = (rb, [], None)
-    ll = mk("list-ledger"); P.anchor_pack(ll, ll[:-5] + ".ledger.jsonl"); open(ll[:-5] + ".ledger.jsonl", "w").write("[1]\n"); cases["ledger-line-not-object"] = (ll, [], None)
+    ll = mk("list-ledger"); P.anchor_pack(ll, ll[:-5] + ".ledger.jsonl"); open(ll[:-5] + ".ledger.jsonl", "a").write("[1]\n"); cases["ledger-line-not-object"] = (ll, [], None)   # r14: APPENDED — a verifier that skips the line says PASS
     # review r1 (Opus, 21/09): a missing --ledger path was an uncaught ENOENT in Node; the .tsr.json sidecar was read with the
     # LOOSE json.loads in Python (a float / duplicate key beside a matching digest: PASS in Python, FAIL in the other three;
     # 100000 "[" a RecursionError traceback); a trust-store line that is not an object raised AttributeError in Python
