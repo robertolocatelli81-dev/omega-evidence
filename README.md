@@ -233,7 +233,7 @@ packs, lenient base64, uppercase digests, unknown or non-string algorithms, clas
 overclaimed or missing `honest_scope`, duplicate keys, floats, nesting beyond 512, lone surrogates, non-UTF-8,
 empty / unrelated / tampered / float ledgers, rotated and revoked signers, stripped / foreign / invalid post-quantum
 layers, and — since 0.8.3 — an own `__proto__` key added without rehashing, a raw non-UTF-8 byte where U+FFFD was hashed,
-a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 85 pack cases plus 15 CLI-grammar cases
+a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 85 pack cases plus 17 CLI-grammar cases
 with 4 verifiers (21 September 2026); the hostile pack cases are anchored with the hash a lenient verifier would accept,
 so the named layer decides (except `non-utf8` and `ledger-raw-byte-in-key`, which only detect a crash — a lossy decoder fails them on the hash anyway; the lossy-decoder cases are the two `…-hashed-as-fffd`); on a Node without ML-DSA the two Node divergences are declared, not hidden. None of the four verifies the RFC 3161 token inside the
 pack verdict: `verify_pack` checks the sidecar's shape and its digest→pack binding and reports the layer as SKIP with the
@@ -302,8 +302,8 @@ very function registered) the layer is reported present-but-unverifiable (never 
 Twelve review rounds on cra-evidence 0.3.0, whose verifiers are re-implementations of these, found defect classes in
 shared code; a review round on this release (Opus, Sonnet, Haiku — Gemini Pro out of credits) found more of the same
 class here. Measured on 21/09/2026 with a four-verifier probe before each fix and with the differential oracle after
-(100 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
-v0.8.2) is red on 44 cases, and against a deliberately lenient Python (loose parser, no scope check, no reserved-tag /
+(102 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
+v0.8.2) is red on 46 cases, and against a deliberately lenient Python (loose parser, no scope check, no reserved-tag /
 surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21/09/2026) on 13:
 
 - **Node dropped an own `__proto__` key while copying** (`c[k] = …` invokes the prototype setter): a pack or ledger
@@ -350,7 +350,9 @@ surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21
 - **Node crashed with an uncaught `ENOENT`** on a `--ledger` path that does not exist (the other three: FAIL).
 - **One CLI grammar in the four.** Usage error (exit 2, no verdict) everywhere for: an unknown flag; a value flag with
   `""`, without a value, or with a flag as its value; an abbreviated flag; a second positional; a pack path `""` or
-  `-`; the `--` terminator; `--require-pq=false`; `-h`/`--help` (round 3: argparse answered it with exit 0). `--flag=value` is accepted by all four (argparse and Go's `flag` did
+  `-`; the `--` terminator; `--require-pq=false`; `-h`/`--help` (round 3: argparse answered it with exit 0); a value flag
+  repeated with a bad value first (round 13: Go's `flag.Visit` and argparse checked the final value only — `-ledger
+  -require-pq -ledger L` ran in Go with the post-quantum requirement silently eaten as a value). `--flag=value` is accepted by all four (argparse and Go's `flag` did
   natively; Java and Node now do), and so is one dash or two (`-ledger` / `--ledger`: Go's `flag` took both, Java one,
   Python and Node two — round 4, Sonnet). Before: `python -m omega_evidence anchored.json --ledger ""` was **PASS** with the
   operator's ledger silently replaced by the sidecar (measured on v0.8.2), Node gave a verdict on an unknown flag,

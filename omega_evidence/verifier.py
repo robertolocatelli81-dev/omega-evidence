@@ -361,6 +361,21 @@ def main(argv=None) -> int:
     raw = [ONE_DASH.get(x.split("=", 1)[0], x.split("=", 1)[0]) + ("=" + x.split("=", 1)[1] if "=" in x else "") if x.split("=", 1)[0] in ONE_DASH else x for x in raw]
     if "--" in raw or any(x.startswith("--require-pq=") for x in raw):   # no "--" terminator, no value on the boolean flag (one grammar in the four)
         p.error("unexpected argument")
+    VALUE = ("--ledger", "--trust-store", "--expect-pq-key")
+    i = 0
+    while i < len(raw):   # r13 (Opus): validate EVERY occurrence — argparse keeps the last value, so `--ledger "" --ledger L` slipped through
+        tok = raw[i]
+        if tok in VALUE:
+            v = raw[i + 1] if i + 1 < len(raw) else None
+            if v is None or v == "" or v.startswith("-"):
+                p.error(f"{tok} needs a value (got {v!r})")
+            i += 2
+            continue
+        if tok.split("=", 1)[0] in VALUE:
+            v = tok.split("=", 1)[1]
+            if v == "" or v.startswith("-"):
+                p.error(f"{tok.split('=', 1)[0]} needs a value (got {v!r})")
+        i += 1
     a = p.parse_args(raw)
     if a.pack == "" or a.pack.startswith("-"):   # an unset $PACK must not be read as a path
         p.error(f"pack path needs a value (got {a.pack!r})")

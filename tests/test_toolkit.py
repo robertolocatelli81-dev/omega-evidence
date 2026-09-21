@@ -937,7 +937,8 @@ class TestNemesisRegressions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pp = os.path.join(tmp, "p.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
             for extra in (["--ledger", ""], ["--ledger"], ["--ledger", "--require-pq"], ["--ledg", pp], [pp], ["--no-such-flag"],
-                          ["--"], ["--require-pq=false"], ["--help"], ["-h"], ["-ledg", pp], ["-l", pp], ["-r"]):
+                          ["--"], ["--require-pq=false"], ["--help"], ["-h"], ["-ledg", pp], ["-l", pp], ["-r"],
+                          ["--ledger", "", "--ledger", pp], ["--ledger", "--require-pq", "--ledger", pp], ["--ledger=", "--ledger", pp]):   # r13: every occurrence
                 out = subprocess.run([sys.executable, "-m", "omega_evidence", pp] + extra, capture_output=True, text=True)
                 self.assertEqual(out.returncode, 2, (extra, out.stdout, out.stderr))
                 self.assertEqual(out.stdout, "")

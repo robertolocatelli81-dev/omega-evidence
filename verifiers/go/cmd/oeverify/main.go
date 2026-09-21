@@ -20,9 +20,34 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: oeverify [-ledger L] [-trust-store T] [-expect-pq-key B64] [-require-pq] <pack.json>")
 		os.Exit(2)
 	}
-	for _, a := range os.Args[1:] { // no "--" terminator, no value on the boolean flag: the other three CLIs refuse them (one grammar in the four)
+	args := os.Args[1:]
+	for i := 0; i < len(args); i++ { // no "--" terminator, no value on the boolean flag: the other three CLIs refuse them (one grammar in the four)
+		a := args[i]
 		if a == "--" || strings.HasPrefix(a, "-require-pq=") || strings.HasPrefix(a, "--require-pq=") {
 			flag.Usage()
+		}
+		name := strings.TrimLeft(a, "-")
+		if strings.Count(a, "-")-strings.Count(name, "-") > 2 || name == a {
+			continue
+		}
+		if eq := strings.IndexByte(name, '='); eq >= 0 { // -flag=value: the value must be non-empty and not flag-like
+			if k, v := name[:eq], name[eq+1:]; (k == "ledger" || k == "trust-store" || k == "expect-pq-key") && (v == "" || strings.HasPrefix(v, "-")) {
+				fmt.Fprintf(os.Stderr, "usage: -%s needs a value (got %q)\n", k, v)
+				os.Exit(2)
+			}
+			continue
+		}
+		if name == "ledger" || name == "trust-store" || name == "expect-pq-key" { // r13 (Opus): EVERY occurrence — flag.Visit sees the final value only,
+			if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "-") { // so `-ledger -require-pq -ledger L` ate the boolean flag
+				fmt.Fprintf(os.Stderr, "usage: -%s needs a value (got %q)\n", name, func() string {
+					if i+1 < len(args) {
+						return args[i+1]
+					}
+					return ""
+				}())
+				os.Exit(2)
+			}
+			i++
 		}
 	}
 	flag.Parse()

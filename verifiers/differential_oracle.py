@@ -320,7 +320,9 @@ def main():
            # review r1 (Opus): the pack path itself "" or "-" (an unset $PACK), the "--" terminator, a value on the boolean flag
            "cli-empty-pack": ["--pack", ""], "cli-dash-pack": ["--pack", "-"], "cli-double-dash": ["--"], "cli-bool-eq-false": ["--require-pq=false"],
            "cli-help": ["--help"], "cli-h": ["-h"],
-           "cli-one-dash-abbreviation": ["-ledg", valid], "cli-one-dash-short": ["-l", valid]}   # r5: argparse resolved -l / -ledg by prefix (a verdict in Python alone)   # r3 (Sonnet): argparse answered --help with exit 0 while the three said usage
+           "cli-one-dash-abbreviation": ["-ledg", valid], "cli-one-dash-short": ["-l", valid],
+           # r13 (Opus): a REPEATED value flag — Go's flag.Visit and argparse saw the final value only (Go even ate -require-pq as a value)
+           "cli-repeated-flag-empty-first": ["--ledger", "", "--ledger", valid], "cli-repeated-flag-as-value-first": ["--ledger", "--require-pq", "--ledger", valid]}   # r5: argparse resolved -l / -ledg by prefix (a verdict in Python alone)   # r3 (Sonnet): argparse answered --help with exit 0 while the three said usage
     cli["cli-other-dash-spelling-verdict"] = ["--other-dash"]   # r4 (Sonnet): -ledger in Python/Node, --ledger in Go/Java → a verdict, the same flag
     for name, extra in cli.items():
         row = {}
