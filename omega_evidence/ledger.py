@@ -77,10 +77,10 @@ def _nesting_depth(text: str) -> int:
 
 
 def _hex4(s: str, i: int):
-    try:
-        return int(s[i:i + 4], 16) if len(s[i:i + 4]) == 4 else None
-    except ValueError:
+    h = s[i:i + 4]
+    if len(h) != 4 or any(c not in "0123456789abcdefABCDEF" for c in h):   # r6: int(x, 16) would take " d80" / "+d80" / "d_80"
         return None
+    return int(h, 16)
 
 
 def _has_lone_surrogate(text: str) -> bool:

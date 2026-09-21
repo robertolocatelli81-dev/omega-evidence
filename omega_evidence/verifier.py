@@ -136,7 +136,7 @@ def _check_timestamp(path: str, layers: List) -> str:
     from .timestamp import verify
     r = verify(side.get("tsr_b64", ""), current)
     st = "PASS" if r.get("verified") is True else ("SKIP" if r.get("verified") is None else "FAIL")
-    layers.append(_layer("rfc3161", st, side.get("tsa", "")))
+    layers.append(_layer("rfc3161", st, (str(side.get("tsa", "")) + " — " + str(r.get("note", ""))).strip(" —")))   # r6: say WHY it is SKIP
     vm = side.get("validation_material")     # LTV material captured at stamping time
     if isinstance(vm, dict) and vm.get("available"):
         raw_crls = vm.get("crls_b64", [])   # r3 (Opus): an int here was a TypeError traceback, no verdict (the three answered)

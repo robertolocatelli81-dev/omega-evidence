@@ -235,8 +235,11 @@ empty / unrelated / tampered / float ledgers, rotated and revoked signers, strip
 layers, and — since 0.8.3 — an own `__proto__` key added without rehashing, a raw non-UTF-8 byte where U+FFFD was hashed,
 a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 83 pack cases plus 15 CLI-grammar cases
 with 4 verifiers (21 September 2026); the hostile pack cases are anchored with the hash a lenient verifier would accept,
-so the named layer decides (except `non-utf8`, which is not JSON for any decoder and only detects a crash); on a Node without ML-DSA the two Node divergences are declared, not hidden. RFC 3161 sidecars are verified by the Python reference
-only (the others report SKIP). The ledger profile is the cryptovalid one, so cryptovalid's five verifiers also
+so the named layer decides (except `non-utf8`, which is not JSON for any decoder and only detects a crash); on a Node without ML-DSA the two Node divergences are declared, not hidden. None of the four verifies the RFC 3161 token inside the
+pack verdict: `verify_pack` checks the sidecar's shape and its digest→pack binding and reports the layer as SKIP with the
+reason (round 6, Opus: the earlier sentence "verified by the Python reference only" was not true of the code — no trust
+anchor reaches `verify_pack`); the cryptographic check exists as `timestamp.verify(tsr_b64, digest, ca_file=<TSA roots>)`
+for the operator. The ledger profile is the cryptovalid one, so cryptovalid's five verifiers also
 accept omega-evidence ledgers unchanged (measured 16/09/2026).
 
 ```
