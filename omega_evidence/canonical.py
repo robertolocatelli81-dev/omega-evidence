@@ -66,6 +66,8 @@ def _reject_reserved(obj: Any) -> None:
     0.7.0 (one number profile in the family, so independent verifiers in Go/Java/JS agree byte for byte):
     floats are refused (use a string or Decimal — Python's repr is not portable) and integers must lie within
     ±(2^53-1) (exact in every JSON implementation)."""
+    if isinstance(obj, str) and any(0xD800 <= ord(ch) <= 0xDFFF for ch in obj):   # 0.8.3 r2: the profile refuses it
+        raise ValueError("canonical_json: lone surrogate in a string is outside the acceptance profile")
     if isinstance(obj, float):
         raise ValueError("canonical_json: floats are not portable (use a string or Decimal)")
     if isinstance(obj, int) and not isinstance(obj, bool) and abs(obj) > _SAFE_INT:
@@ -79,6 +81,7 @@ def _reject_reserved(obj: Any) -> None:
             # rather than let them collapse — keeps hashing injective.
             if not isinstance(k, str):
                 raise ValueError(f"canonical_json: non-string key {k!r} is not injective")
+            _reject_reserved(k)
             _reject_reserved(v)
     elif isinstance(obj, (list, tuple, set, frozenset)):
         for v in obj:

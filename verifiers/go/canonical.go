@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Roberto Locatelli
 //
 // Package oeverify — Go verifier of omega-evidence packs and ledgers (the cryptovalid acceptance profile:

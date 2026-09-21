@@ -76,11 +76,51 @@ def _nesting_depth(text: str) -> int:
     return mx
 
 
+def _hex4(s: str, i: int):
+    try:
+        return int(s[i:i + 4], 16) if len(s[i:i + 4]) == 4 else None
+    except ValueError:
+        return None
+
+
+def _has_lone_surrogate(text: str) -> bool:
+    """Linear scan of the raw JSON text for a \\uD800-\\uDBFF escape not followed by \\uDC00-\\uDFFF, or a low
+    surrogate escape on its own — the rule Go/Java/Node apply (prescan.go HasLoneSurrogate). 0.8.3 review r2 (Opus):
+    the Python reference had no such rule, so an anchored pack holding "\\ud800" was PASS here and FAIL in the three."""
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] != "\\":
+            i += 1
+            continue
+        if i + 1 < n and text[i + 1] == "u" and i + 5 < n:
+            cp = _hex4(text, i + 2)
+            if cp is None:            # malformed escape: the decoder refuses it, not this rule
+                i += 2
+                continue
+            if 0xD800 <= cp <= 0xDBFF:
+                if i + 7 >= n or text[i + 6] != "\\" or text[i + 7] != "u":
+                    return True
+                lo = _hex4(text, i + 8)
+                if lo is None or not (0xDC00 <= lo <= 0xDFFF):
+                    return True
+                i += 12
+                continue
+            if 0xDC00 <= cp <= 0xDFFF:
+                return True
+            i += 6
+            continue
+        i += 2                        # any other escape (\\", \\\\, \\n ...): skip the pair
+    return False
+
+
 def loads_strict(text: str):
     """The family's acceptance profile (cryptovalid CONFORMANCE): no duplicate keys, no floats, integers within
-    ±(2^53-1), nesting <= 512 by linear pre-scan, no NaN/Infinity. Same rule as the Go/Java/JS verifiers."""
+    ±(2^53-1), nesting <= 512 by linear pre-scan, no NaN/Infinity, no lone UTF-16 surrogate escape. Same rule as the
+    Go/Java/JS verifiers."""
     if _nesting_depth(text) > _MAX_DEPTH:
         raise ValueError(f"json_too_deep: nesting exceeds {_MAX_DEPTH}")
+    if _has_lone_surrogate(text):
+        raise ValueError("lone_surrogate: unpaired UTF-16 surrogate escape is outside the acceptance profile")
     return json.loads(text, object_pairs_hook=_reject_dup, parse_float=_no_float, parse_int=_bounded_int,
                       parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"JSON constant {c}")))
 
@@ -88,6 +128,8 @@ def loads_strict(text: str):
 def _check_portable(obj) -> None:
     if isinstance(obj, float):
         raise ValueError("floats are not portable in a ledger entry (use a string)")
+    if isinstance(obj, str) and any(0xD800 <= ord(ch) <= 0xDFFF for ch in obj):
+        raise ValueError("lone surrogate in a string is outside the acceptance profile (the three other verifiers refuse it)")
     if isinstance(obj, int) and not isinstance(obj, bool) and abs(obj) > _SAFE_INT:
         raise ValueError("integer outside the portable range +/-(2^53-1)")
     if isinstance(obj, dict):
@@ -164,25 +206,25 @@ class Ledger:
         if not os.path.exists(self.path):
             return
         prev = GENESIS
-        try:
-            fh = open(self.path, encoding="utf-8")
-        except OSError as e:
+        try:   # 0.8.3 review: a non-UTF-8 byte (UnicodeDecodeError), an unreadable file (OSError) — one exception type out
+            with open(self.path, "rb") as fh:   # of here, RuntimeError, for every caller (verifier, trust store, agent, pack)
+                lines = fh.read().decode("utf-8").split("\n")   # LF only, like verify(): splitlines() would also split on U+2028
+        except (OSError, UnicodeDecodeError) as e:
             raise RuntimeError(f"ledger unreadable: {e}") from e
-        with fh:
-            for i, line in enumerate(fh):
-                line = line.strip()
-                if not line:
-                    continue
-                try:   # 0.8.3 review (Opus): a non-object line raised AttributeError and a non-UTF-8 byte UnicodeDecodeError
-                    entry = loads_strict(line)   # out of every caller (verifier, trust store): one exception type, RuntimeError
-                    if not isinstance(entry, dict):
-                        raise ValueError("ledger line is not a JSON object")
-                except (ValueError, RecursionError) as e:
-                    raise RuntimeError(f"ledger corrotto alla riga {i + 1}: {e}") from e
-                if entry.get("prev_hash") != prev or entry.get("self_hash") != _hash_entry(entry):
-                    raise RuntimeError(f"ledger corrotto alla riga {i + 1}: catena rotta")
-                prev = entry["self_hash"]
-                self._count += 1
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:   # 0.8.3 review (Opus): a non-object line raised AttributeError, a non-JSON line JSONDecodeError
+                entry = loads_strict(line)
+                if not isinstance(entry, dict):
+                    raise ValueError("ledger line is not a JSON object")
+            except (ValueError, RecursionError) as e:
+                raise RuntimeError(f"ledger corrotto alla riga {i + 1}: {e}") from e
+            if entry.get("prev_hash") != prev or entry.get("self_hash") != _hash_entry(entry):
+                raise RuntimeError(f"ledger corrotto alla riga {i + 1}: catena rotta")
+            prev = entry["self_hash"]
+            self._count += 1
         self._last = prev
 
     def append(self, data: Dict) -> Dict:

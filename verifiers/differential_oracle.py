@@ -94,20 +94,36 @@ def build_cases(d):
     P.add_pq_signature(up, "ml-dsa-65", base64.b64encode(b"\x01" * 1952).decode(), base64.b64encode(b"\x02" * 3309).decode())
     cases["sig-digest-upper-signed-with-pq"] = (up, [], None)
     cases["unsigned-required-pq"] = (cases["bare"][0], ["--require-pq"], None)
-    # honest scope variants
-    def mk_scope(name, scope):   # build_pack refuses a bad scope: forge it after, with a consistent pack_sha3
+    # honest scope variants and pack shapes — every one ANCHORED with the hash a lenient verifier would accept (review r2,
+    # Opus: a bare pack is FAIL whatever the verifier does with floats / duplicate keys / depth / scope, so the case could
+    # not fail); hashes computed with json.dumps directly where the toolkit itself refuses the content
+    import hashlib as _hs
+    def _lax_sha3(dd):
+        return _hs.sha3_256(json.dumps({k: v for k, v in dd.items() if k != "pack_sha3"}, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+    def anchor_hash(p, h):
+        Ledger(p[:-5] + ".ledger.jsonl").append({"anchored_pack_sha3": h})
+    def mk_scope(name, scope):   # build_pack refuses a bad scope: forge it after, with a consistent pack_sha3, anchored
         p = mk(name); dd = json.load(open(p)); dd["honest_scope"] = scope
-        dd["pack_sha3"] = canonical.sha3({k: v for k, v in dd.items() if k != "pack_sha3"}); json.dump(dd, open(p, "w")); return p
+        dd["pack_sha3"] = canonical.sha3({k: v for k, v in dd.items() if k != "pack_sha3"}); json.dump(dd, open(p, "w")); anchor_hash(p, dd["pack_sha3"]); return p
     cases["scope-note-only"] = (mk_scope("scope-note", "NOTE: this proves everything, cannot fail"), [], None)
     cases["scope-not-accredited"] = (mk_scope("scope-notacc", "NOT accredited; proves integrity only"), [], None)
     cases["scope-certified-overclaim"] = (mk_scope("scope-cert", "fully certified evidence; does NOT prove x"), [], None)
-    # pack shapes
-    dup = os.path.join(d, "dupkey.json"); open(dup, "w").write(open(cases["bare"][0]).read().rstrip().rstrip("}") + ',"n":1}'); cases["dup-key"] = (dup, [], None)
-    flt = os.path.join(d, "float.json"); dd = json.load(open(cases["bare"][0])); dd["n"] = 1.5; json.dump(dd, open(flt, "w")); cases["float"] = (flt, [], None)
-    up = os.path.join(d, "upper.json"); dd = json.load(open(cases["bare"][0])); dd["pack_sha3"] = dd["pack_sha3"].upper(); json.dump(dd, open(up, "w")); cases["sha3-upper"] = (up, [], None)
-    deep = os.path.join(d, "deep.json"); open(deep, "w").write('{"kind":"d","honest_scope":"does NOT x","deep":' + "[" * 600 + "]" * 600 + ',"pack_sha3":"' + "0" * 64 + '"}'); cases["deep-600"] = (deep, [], None)
-    lone = os.path.join(d, "lone.json"); open(lone, "w").write('{"kind":"d","honest_scope":"does NOT x","s":"\\ud800","pack_sha3":"' + "0" * 64 + '"}'); cases["lone-surrogate"] = (lone, [], None)
-    bad8 = os.path.join(d, "bad8.json"); open(bad8, "wb").write(b'{"kind":"d","honest_scope":"does NOT x","s":"\xff","pack_sha3":"' + b"0" * 64 + b'"}'); cases["non-utf8"] = (bad8, [], None)
+    def mk_hostile(name, mutate, text=None):
+        p = mk(name); dd = json.load(open(p)); mutate(dd); h = _lax_sha3(dd); dd["pack_sha3"] = h
+        open(p, "w").write(text(dd) if text else json.dumps(dd)); anchor_hash(p, h.lower()); return p
+    # duplicate key: the same value twice — a last-wins parser hashes the same content and says PASS
+    cases["dup-key"] = (mk_hostile("dupkey", lambda dd: None, text=lambda dd: json.dumps(dd).rstrip().rstrip("}") + ',"n":1}'), [], None)
+    cases["float"] = (mk_hostile("float", lambda dd: dd.__setitem__("n", 1.5)), [], None)
+    cases["sha3-upper"] = (mk_hostile("upper", lambda dd: None, text=lambda dd: json.dumps(dict(dd, pack_sha3=dd["pack_sha3"].upper()))), [], None)
+    deep_v = json.loads("[" * 600 + "]" * 600)
+    cases["deep-600"] = (mk_hostile("deep", lambda dd: dd.__setitem__("deep", deep_v)), [], None)
+    cases["lone-surrogate"] = (mk_hostile("lone", lambda dd: None, text=lambda dd: json.dumps(dd).rstrip().rstrip("}") + ',"s":"\\ud800"}'), [], None)
+    # (lone-surrogate: the hash is over the content WITHOUT "s" — a verifier that keeps the escape hashes differently and
+    # says FAIL for the wrong reason; so the anchored hash is computed WITH it, below)
+    lone_p = cases["lone-surrogate"][0]; ld = json.load(open(lone_p)); ld["s"] = "\ud800"
+    h = _hs.sha3_256(json.dumps({k: v for k, v in ld.items() if k != "pack_sha3"}, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+    ld["pack_sha3"] = h; open(lone_p, "w").write(json.dumps(ld)); open(lone_p[:-5] + ".ledger.jsonl", "w").close(); anchor_hash(lone_p, h)
+    bad8 = os.path.join(d, "bad8.json"); open(bad8, "wb").write(b'{"kind":"d","honest_scope":"does NOT x","s":"\xff","pack_sha3":"' + b"0" * 64 + b'"}'); cases["non-utf8"] = (bad8, [], None)   # not JSON anywhere: FAIL at pack-json
     # ledgers
     e = mk("empty-ledger"); open(e[:-5] + ".ledger.jsonl", "w").close(); cases["ledger-empty"] = (e, [], None)
     u = mk("unrelated-ledger"); L = Ledger(u[:-5] + ".ledger.jsonl"); L.append({"anchored_pack_sha3": "0" * 64}); cases["ledger-unrelated"] = (u, [], None)
@@ -130,6 +146,9 @@ def build_cases(d):
     open(fp, "wb").write(json.dumps(dd, ensure_ascii=False).encode("utf-8").replace("\ufffd".encode("utf-8"), b"\xff", 1))
     Ledger(fp[:-5] + ".ledger.jsonl").append({"anchored_pack_sha3": dd["pack_sha3"]})   # anchored by the hash over U+FFFD: a lossy reader says PASS
     cases["pack-raw-byte-hashed-as-fffd"] = (fp, [], None)
+    ls_ = mk("lone-ledger"); P.anchor_pack(ls_, ls_[:-5] + ".ledger.jsonl"); lpl = ls_[:-5] + ".ledger.jsonl"
+    ent = json.loads(open(lpl).read().splitlines()[0]); ent["data"]["note"] = "\ud800"; ent.pop("self_hash"); ent["self_hash"] = _he(ent)
+    open(lpl, "w").write(json.dumps(ent, separators=(",", ":")) + "\n"); cases["ledger-lone-surrogate-entry"] = (ls_, [], None)   # r2: Python 0.8.2 wrote and accepted it
     rb = mk("raw-ledger"); P.anchor_pack(rb, rb[:-5] + ".ledger.jsonl"); lpr = rb[:-5] + ".ledger.jsonl"; bb = open(lpr, "rb").read()
     open(lpr, "wb").write(bb.replace(b'"ts"', b'"t\xffs"', 1)); cases["ledger-raw-byte-in-key"] = (rb, [], None)
     ll = mk("list-ledger"); P.anchor_pack(ll, ll[:-5] + ".ledger.jsonl"); open(ll[:-5] + ".ledger.jsonl", "w").write("[1]\n"); cases["ledger-line-not-object"] = (ll, [], None)
@@ -256,7 +275,7 @@ def main():
         row = {}
         for k, cmd in avail.items():
             gs = k in ("go", "java")
-            ex = [(a.replace("--", "-", 1) if gs and a.startswith("--") else a) for a in extra]
+            ex = [(a.replace("--", "-", 1) if gs and a.startswith("--") and a != "--" else a) for a in extra]   # the exact "--" is sent as is (r2: Sonnet/Opus)
             # Go/Java take flags before the positional: a bare value flag is run LAST with nothing after it (otherwise the
             # pack path would be eaten as its value and the usage error would come from the missing positional — review
             # 21/09, Sonnet); there the missing-value path is the flag library's own ("flag needs an argument") and Java's

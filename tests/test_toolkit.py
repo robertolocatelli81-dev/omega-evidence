@@ -851,6 +851,8 @@ class TestNemesisRegressions(unittest.TestCase):
                 return pp, pp[:-5] + ".ledger.jsonl"
             pp, lp = anchored("raw")
             Path(lp).write_bytes(Path(lp).read_bytes().replace(b'"ts"', b'"t\xffs"', 1))
+            with self.assertRaises(RuntimeError):      # one exception type out of Ledger for every caller (r2)
+                ledger.Ledger(lp)
             r = verify_pack(pp)
             self.assertFalse(r["valid"])
             self.assertEqual([l["status"] for l in r["layers"] if l["layer"] == "ledger-chain"], ["FAIL"])
@@ -876,6 +878,21 @@ class TestNemesisRegressions(unittest.TestCase):
                 r = verify_pack(pp)
                 self.assertFalse(r["valid"], name)
                 self.assertEqual([l["status"] for l in r["layers"] if l["layer"] == "rfc3161"], ["FAIL"], name)
+            # review r2 (Opus): the Python reference had no lone-surrogate rule — an anchored pack holding "\\ud800" with a
+            # correct hash, and a ledger entry the 0.8.2 producer itself wrote, were PASS here and FAIL in Go/Java/Node
+            pp, lp = anchored("lone")
+            dd = json.loads(Path(pp).read_text(encoding="utf-8")); dd["s"] = "\ud800"; dd.pop("pack_sha3")
+            h = hashlib.sha3_256(json.dumps(dd, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+            dd["pack_sha3"] = h; Path(pp).write_text(json.dumps(dd), encoding="utf-8")
+            ledger.Ledger(lp).append({"anchored_pack_sha3": h})
+            r = verify_pack(pp); self.assertFalse(r["valid"]); self.assertEqual([l["status"] for l in r["layers"] if l["layer"] == "pack-json"], ["FAIL"])
+            with self.assertRaises(ValueError):
+                ledger.loads_strict('{"s": "\\ud800"}')
+            ledger.loads_strict('{"s": "\\ud83d\\ude00"}')                      # a proper pair is fine
+            with self.assertRaises(ValueError):
+                ledger.Ledger(os.path.join(tmp, "w.jsonl")).append({"note": "\ud800"})   # the producer refuses it too
+            with self.assertRaises(ValueError):
+                canonical.sha3({"s": "\udc00"})
             # a trust-store line that is not an object raised AttributeError out of Ledger._load
             pp = os.path.join(tmp, "signed.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
             idt = signing.Identity("acme"); pack.sign_pack(pp, idt)
