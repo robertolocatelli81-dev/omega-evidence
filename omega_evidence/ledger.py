@@ -212,7 +212,7 @@ class Ledger:
         except (OSError, UnicodeDecodeError) as e:
             raise RuntimeError(f"ledger unreadable: {e}") from e
         for i, line in enumerate(lines):
-            line = line.strip()
+            line = line.strip(" \t\r\n")   # blank = ASCII space/tab/CR only, the rule of verify() and of the three (r6, Sonnet)
             if not line:
                 continue
             try:   # 0.8.3 review (Opus): a non-object line raised AttributeError, a non-JSON line JSONDecodeError
@@ -272,7 +272,7 @@ class Ledger:
                 lines = fh.read().decode("utf-8").split("\n")
         except (OSError, UnicodeDecodeError):
             return False, [0]
-        if True:
+        if lines is not None:
             for i, line in enumerate(lines):
                 if not line.strip(" \t\r\n"):
                     continue

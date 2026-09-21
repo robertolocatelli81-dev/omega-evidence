@@ -896,7 +896,7 @@ class TestNemesisRegressions(unittest.TestCase):
             # review r3: LTV material typed (an int was a TypeError traceback); scope regexes ASCII like the three
             pp, lp = anchored("vm"); dg = hashlib.sha256(Path(pp).read_bytes()).hexdigest()
             Path(pp[:-5] + ".tsr.json").write_text('{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "validation_material": {"available": true, "crls_b64": 1}}' % dg, encoding="utf-8")
-            r = verify_pack(pp); self.assertIn(r["valid"], (True, False))
+            r = verify_pack(pp); self.assertTrue(r["valid"])   # a verdict (PASS: anchored, timestamp SKIP), never a TypeError
             self.assertTrue(pack._honest_scope_declares_limit("does NOT\u00e9 prove x"))          # ASCII \b: boundary before é
             self.assertTrue(pack._honest_scope_declares_limit("fully cert\u0131fied; does NOT prove x"))   # ı is not i in ASCII folding
             self.assertFalse(pack._honest_scope_declares_limit("fully certified; does NOT prove x"))
