@@ -37,7 +37,7 @@ class TrustRegistry:
     def __init__(self, ledger_path: str):
         try:
             self._ledger = Ledger(ledger_path)
-        except RuntimeError as e:                  # a broken chain is a broken store, one exception type for callers
+        except (RuntimeError, ValueError, RecursionError) as e:   # a broken chain is a broken store, one exception type for callers
             raise ValueError(f"trust store broken: {e}") from e
         self._lock = threading.Lock()
         self._state: Dict[str, Dict[str, Any]] = {}

@@ -2,11 +2,11 @@
 package main
 
 import (
-	"strings"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	oe "github.com/robertolocatelli81-dev/omega-evidence/verifiers/go"
 )
@@ -20,6 +20,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: oeverify [-ledger L] [-trust-store T] [-expect-pq-key B64] [-require-pq] <pack.json>")
 		os.Exit(2)
 	}
+	for _, a := range os.Args[1:] { // no "--" terminator, no value on the boolean flag: the other three CLIs refuse them (one grammar in the four)
+		if a == "--" || strings.HasPrefix(a, "-require-pq=") || strings.HasPrefix(a, "--require-pq=") {
+			flag.Usage()
+		}
+	}
 	flag.Parse()
 	flag.Visit(func(f *flag.Flag) { // a value flag given with "" (or a flag as its value): usage (one grammar in the four, 21/09/2026)
 		if v := f.Value.String(); v == "" || strings.HasPrefix(v, "-") {
@@ -27,7 +32,7 @@ func main() {
 			os.Exit(2)
 		}
 	})
-	if flag.NArg() != 1 {
+	if flag.NArg() != 1 || flag.Arg(0) == "" || strings.HasPrefix(flag.Arg(0), "-") { // an unset $PACK is not a path
 		flag.Usage()
 	}
 	r := oe.VerifyPack(flag.Arg(0), *ledger, *trust, *pq, *req)

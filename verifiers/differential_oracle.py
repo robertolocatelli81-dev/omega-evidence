@@ -115,10 +115,11 @@ def build_cases(d):
     fl = mk("float-ledger"); P.anchor_pack(fl, fl[:-5] + ".ledger.jsonl"); ln = json.loads(open(fl[:-5] + ".ledger.jsonl").read().splitlines()[0]); ln["data"]["x"] = 1.5; open(fl[:-5] + ".ledger.jsonl", "w").write(json.dumps(ln, separators=(",", ":")) + "\n"); cases["ledger-float"] = (fl, [], None)
     # 21/09/2026, propagated from the cra-evidence review: an own "__proto__" key added without rehashing (JS dropped it while
     # copying and said PASS alone), a raw non-UTF-8 byte where U+FFFD was hashed (a lossy decoder reads exactly the hashed text:
-    # Java said PASS alone), a raw byte in a key (Python raised UnicodeDecodeError instead of a verdict), a ledger line that is not
+    # JS and Java said PASS), a raw byte in a key (Python raised UnicodeDecodeError instead of a verdict), a ledger line that is not
     # an object. Every one is FAIL in the four verifiers.
     from omega_evidence.ledger import _hash_entry as _he
-    pp = mk("proto-pack"); txt = open(pp).read(); open(pp, "w").write('{"__proto__": {"evil": 1}, ' + txt[1:]); cases["pack-proto-key-hash-untouched"] = (pp, [], None)
+    pp = mk("proto-pack"); P.anchor_pack(pp, pp[:-5] + ".ledger.jsonl")   # anchored FIRST: a bare pack is FAIL whatever its hash (review r1, Opus)
+    txt = open(pp).read(); open(pp, "w").write('{"__proto__": {"evil": 1}, ' + txt[1:]); cases["pack-proto-key-hash-untouched"] = (pp, [], None)
     pl = mk("proto-ledger"); P.anchor_pack(pl, pl[:-5] + ".ledger.jsonl"); lpp = pl[:-5] + ".ledger.jsonl"; txt = open(lpp).read()
     open(lpp, "w").write('{"__proto__": {"evil": 1}, ' + txt[1:]); cases["ledger-proto-key-hash-untouched"] = (pl, [], None)
     ff = mk("fffd-ledger"); P.anchor_pack(ff, ff[:-5] + ".ledger.jsonl"); lpf = ff[:-5] + ".ledger.jsonl"
@@ -126,10 +127,25 @@ def build_cases(d):
     open(lpf, "wb").write(json.dumps(ent, ensure_ascii=False, separators=(",", ":")).encode("utf-8").replace("\ufffd".encode("utf-8"), b"\xff", 1) + b"\n")
     cases["ledger-raw-byte-hashed-as-fffd"] = (ff, [], None)
     fp = mk("fffd-pack"); dd = json.load(open(fp)); dd["note"] = "\ufffd"; dd.pop("pack_sha3"); dd["pack_sha3"] = canonical.sha3(dd)
-    open(fp, "wb").write(json.dumps(dd, ensure_ascii=False).encode("utf-8").replace("\ufffd".encode("utf-8"), b"\xff", 1)); cases["pack-raw-byte-hashed-as-fffd"] = (fp, [], None)
+    open(fp, "wb").write(json.dumps(dd, ensure_ascii=False).encode("utf-8").replace("\ufffd".encode("utf-8"), b"\xff", 1))
+    Ledger(fp[:-5] + ".ledger.jsonl").append({"anchored_pack_sha3": dd["pack_sha3"]})   # anchored by the hash over U+FFFD: a lossy reader says PASS
+    cases["pack-raw-byte-hashed-as-fffd"] = (fp, [], None)
     rb = mk("raw-ledger"); P.anchor_pack(rb, rb[:-5] + ".ledger.jsonl"); lpr = rb[:-5] + ".ledger.jsonl"; bb = open(lpr, "rb").read()
     open(lpr, "wb").write(bb.replace(b'"ts"', b'"t\xffs"', 1)); cases["ledger-raw-byte-in-key"] = (rb, [], None)
     ll = mk("list-ledger"); P.anchor_pack(ll, ll[:-5] + ".ledger.jsonl"); open(ll[:-5] + ".ledger.jsonl", "w").write("[1]\n"); cases["ledger-line-not-object"] = (ll, [], None)
+    # review r1 (Opus, 21/09): a missing --ledger path was an uncaught ENOENT in Node; the .tsr.json sidecar was read with the
+    # LOOSE json.loads in Python (a float / duplicate key beside a matching digest: PASS in Python, FAIL in the other three;
+    # 100000 "[" a RecursionError traceback); a trust-store line that is not an object raised AttributeError in Python
+    import hashlib as _hl
+    cases["ledger-path-missing"] = (cases["anchored"][0], ["--ledger", os.path.join(d, "no-such.ledger.jsonl")], None)
+    for nm, body in (("tsr-float-beside-good-digest", '{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "x": 1.5}'),
+                     ("tsr-dup-key-beside-good-digest", '{"digest_sha256": "%s", "digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA=="}'),
+                     ("tsr-deep", "[" * 100000)):
+        tp = mk(nm); P.anchor_pack(tp, tp[:-5] + ".ledger.jsonl"); dg = _hl.sha256(open(tp, "rb").read()).hexdigest()
+        open(tp[:-5] + ".tsr.json", "w").write(body.replace("%s", dg)); cases[nm] = (tp, [], None)
+    tn = mk("trust-line-list"); P.sign_pack(tn, idt); st_n = os.path.join(d, "trust_line_list.jsonl"); open(st_n, "w").write(open(store).read() + "[1]\n")
+    cases["trust-line-not-object"] = (tn, ["--trust-store", st_n], None)
+    cases["cli-eq-form-verdict"] = (cases["anchored"][0], ["--ledger=" + cases["anchored"][0][:-5] + ".ledger.jsonl"], None)   # --flag=value is accepted by all four (argparse and Go flag do natively)
     rot = mk("rotated"); P.sign_pack(rot, idt); store_r = os.path.join(d, "trust_rot.jsonl"); tr2 = trust.TrustRegistry(store_r); tr2.trust("acme", other.public_key_b64); tr2.rotate("acme", idt.public_key_b64)
     cases["trust-rotated"] = (rot, ["--trust-store", store_r], None)
     rev = mk("revoked"); P.sign_pack(rev, idt); store_v = os.path.join(d, "trust_rev.jsonl"); tr3 = trust.TrustRegistry(store_v); tr3.trust("acme", idt.public_key_b64); tr3.revoke("acme", "x")
@@ -233,13 +249,24 @@ def main():
     # constraint silently dropped (Node gave a verdict on all of them)
     valid = cases["bare"][0]
     cli = {"cli-unknown-flag": ["--no-such-flag"], "cli-ledger-empty": ["--ledger", ""], "cli-ledger-missing-value": ["--ledger"],
-           "cli-ledger-flag-as-value": ["--ledger", "--require-pq"], "cli-abbreviation": ["--ledg", valid], "cli-two-positionals": [valid]}
+           "cli-ledger-flag-as-value": ["--ledger", "--require-pq"], "cli-abbreviation": ["--ledg", valid], "cli-two-positionals": [valid],
+           # review r1 (Opus): the pack path itself "" or "-" (an unset $PACK), the "--" terminator, a value on the boolean flag
+           "cli-empty-pack": ["--pack", ""], "cli-dash-pack": ["--pack", "-"], "cli-double-dash": ["--"], "cli-bool-eq-false": ["--require-pq=false"]}
     for name, extra in cli.items():
         row = {}
         for k, cmd in avail.items():
             gs = k in ("go", "java")
             ex = [(a.replace("--", "-", 1) if gs and a.startswith("--") else a) for a in extra]
-            args = list(cmd) + (ex + [valid] if gs else [valid] + ex)
+            # Go/Java take flags before the positional: a bare value flag is run LAST with nothing after it (otherwise the
+            # pack path would be eaten as its value and the usage error would come from the missing positional — review
+            # 21/09, Sonnet); there the missing-value path is the flag library's own ("flag needs an argument") and Java's
+            # bounds guard, while the "" and flag-as-value cases are the ones that exercise flag.Visit / val()
+            if gs and name == "cli-ledger-missing-value":
+                args = list(cmd) + ex
+            elif extra[0] == "--pack":   # the positional itself is the hostile value ("--pack" is a marker of this table, not a flag)
+                args = list(cmd) + [extra[1]]
+            else:
+                args = list(cmd) + (ex + [valid] if gs else [valid] + ex)
             try:
                 out = subprocess.run(args, capture_output=True, text=True, timeout=60)
                 try:

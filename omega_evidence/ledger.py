@@ -164,12 +164,21 @@ class Ledger:
         if not os.path.exists(self.path):
             return
         prev = GENESIS
-        with open(self.path, encoding="utf-8") as fh:
+        try:
+            fh = open(self.path, encoding="utf-8")
+        except OSError as e:
+            raise RuntimeError(f"ledger unreadable: {e}") from e
+        with fh:
             for i, line in enumerate(fh):
                 line = line.strip()
                 if not line:
                     continue
-                entry = json.loads(line)
+                try:   # 0.8.3 review (Opus): a non-object line raised AttributeError and a non-UTF-8 byte UnicodeDecodeError
+                    entry = loads_strict(line)   # out of every caller (verifier, trust store): one exception type, RuntimeError
+                    if not isinstance(entry, dict):
+                        raise ValueError("ledger line is not a JSON object")
+                except (ValueError, RecursionError) as e:
+                    raise RuntimeError(f"ledger corrotto alla riga {i + 1}: {e}") from e
                 if entry.get("prev_hash") != prev or entry.get("self_hash") != _hash_entry(entry):
                     raise RuntimeError(f"ledger corrotto alla riga {i + 1}: catena rotta")
                 prev = entry["self_hash"]

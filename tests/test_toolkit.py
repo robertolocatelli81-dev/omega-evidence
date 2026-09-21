@@ -865,17 +865,43 @@ class TestNemesisRegressions(unittest.TestCase):
             pp, lp = anchored("list")
             Path(lp).write_text("[1]\n", encoding="utf-8")
             self.assertFalse(verify_pack(pp)["valid"])
+            # review r1 (Opus): the .tsr.json sidecar was read with the loose json.loads — a float / duplicate key beside a
+            # correct digest was PASS in Python alone; a 100000-deep sidecar a RecursionError traceback
+            for name, body in (("tsrf", '{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "x": 1.5}'),
+                               ("tsrd", '{"digest_sha256": "%s", "digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA=="}'),
+                               ("tsrdeep", "[" * 100000)):
+                pp, lp = anchored(name)
+                dg = hashlib.sha256(Path(pp).read_bytes()).hexdigest()
+                Path(pp[:-5] + ".tsr.json").write_text(body.replace("%s", dg), encoding="utf-8")
+                r = verify_pack(pp)
+                self.assertFalse(r["valid"], name)
+                self.assertEqual([l["status"] for l in r["layers"] if l["layer"] == "rfc3161"], ["FAIL"], name)
+            # a trust-store line that is not an object raised AttributeError out of Ledger._load
+            pp = os.path.join(tmp, "signed.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
+            idt = signing.Identity("acme"); pack.sign_pack(pp, idt)
+            st = os.path.join(tmp, "trust.jsonl"); trust.TrustRegistry(st).trust("acme", idt.public_key_b64)
+            self.assertTrue(verify_pack(pp, trust_store=st)["authenticated"])     # positive control
+            Path(st).write_text(Path(st).read_text(encoding="utf-8") + "[1]\n", encoding="utf-8")
+            r = verify_pack(pp, trust_store=st)
+            self.assertFalse(r["valid"]); self.assertFalse(r["authenticated"])
 
     def test_1c_cli_value_flags_refuse_empty_and_flag_like_values(self):
         # one CLI grammar in the four verifiers: "" / a flag as value / an abbreviation / a second positional = usage exit 2
         with tempfile.TemporaryDirectory() as tmp:
             pp = os.path.join(tmp, "p.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
-            for extra in (["--ledger", ""], ["--ledger"], ["--ledger", "--require-pq"], ["--ledg", pp], [pp], ["--no-such-flag"]):
+            for extra in (["--ledger", ""], ["--ledger"], ["--ledger", "--require-pq"], ["--ledg", pp], [pp], ["--no-such-flag"],
+                          ["--"], ["--require-pq=false"]):
                 out = subprocess.run([sys.executable, "-m", "omega_evidence", pp] + extra, capture_output=True, text=True)
                 self.assertEqual(out.returncode, 2, (extra, out.stdout, out.stderr))
                 self.assertEqual(out.stdout, "")
+            for bad_pack in ("", "-"):     # an unset $PACK is not a path (review r1)
+                out = subprocess.run([sys.executable, "-m", "omega_evidence", bad_pack], capture_output=True, text=True)
+                self.assertEqual(out.returncode, 2, (bad_pack, out.stdout, out.stderr)); self.assertEqual(out.stdout, "")
+            pack.anchor_pack(pp, pp[:-5] + ".ledger.jsonl")     # --flag=value is accepted, as in Go/Java/Node
+            out = subprocess.run([sys.executable, "-m", "omega_evidence", pp, "--ledger=" + pp[:-5] + ".ledger.jsonl"], capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr); self.assertEqual(json.loads(out.stdout)["verdict"], "PASS")
             out = subprocess.run([sys.executable, "-m", "omega_evidence", pp], capture_output=True, text=True)
-            self.assertEqual(out.returncode, 1); self.assertEqual(json.loads(out.stdout)["verdict"], "FAIL")   # bare pack: a verdict
+            self.assertEqual(out.returncode, 0); self.assertEqual(json.loads(out.stdout)["verdict"], "PASS")   # a well-formed command line: a verdict
 
     def test_2_classical_cosignature_is_never_pq_protected(self):
         with tempfile.TemporaryDirectory() as tmp:

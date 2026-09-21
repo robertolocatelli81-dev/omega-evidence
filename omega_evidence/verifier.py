@@ -32,6 +32,7 @@ A bare fabricated pack (no ledger, no timestamp, no signature) cannot pass. A SE
 from __future__ import annotations
 
 import json
+import sys
 import os
 import re as _re
 from datetime import datetime, timezone
@@ -118,10 +119,11 @@ def _check_timestamp(path: str, layers: List) -> str:
         layers.append(_layer("rfc3161", "SKIP", "no RFC 3161 sidecar"))
         return "SKIP"
     try:
-        side = json.loads(open(ts_side, encoding="utf-8").read())
-        if not isinstance(side, dict):
+        from .ledger import loads_strict
+        side = loads_strict(open(ts_side, encoding="utf-8").read())   # 0.8.3 review (Opus): json.loads let a float / duplicate
+        if not isinstance(side, dict):                                # key sidecar through (PASS in Python, FAIL in the other three)
             raise ValueError("sidecar is not a JSON object")
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         layers.append(_layer("rfc3161", "FAIL", f"malformed sidecar: {e}"))
         return "FAIL"
     current = sha256_bytes(open(path, "rb").read())
@@ -346,7 +348,12 @@ def main(argv=None) -> int:
     p.add_argument("--trust-store")
     p.add_argument("--expect-pq-key", help="pinned ML-DSA-65 public key (base64): requires the hybrid layer")
     p.add_argument("--require-pq", action="store_true", help="require a pinned, valid post-quantum layer (trust registry)")
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if "--" in raw or any(x.startswith("--require-pq=") for x in raw):   # no "--" terminator, no value on the boolean flag (one grammar in the four)
+        p.error("unexpected argument")
     a = p.parse_args(argv)
+    if a.pack == "" or a.pack.startswith("-"):   # an unset $PACK must not be read as a path
+        p.error(f"pack path needs a value (got {a.pack!r})")
     for flag in ("ledger", "trust_store", "expect_pq_key"):
         v = getattr(a, flag)
         if v is not None and (v == "" or v.startswith("-")):   # "" or a flag as a value would silently mean "not given" (one grammar in the four, 21/09/2026)

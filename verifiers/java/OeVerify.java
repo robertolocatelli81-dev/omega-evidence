@@ -251,6 +251,7 @@ public class OeVerify {
         return true;
     }
     static Obj readObject(String path) throws Bad, IOException {
+        if (Files.size(Path.of(path)) > MAX_INPUT_BYTES) throw new Bad("input exceeds " + MAX_INPUT_BYTES + " bytes");
         byte[] raw = Files.readAllBytes(Path.of(path));
         String t = strictUtf8(raw);   // strict decode; trimmed of ASCII space/tab/CR/LF only
         int a = 0, z = t.length(); while (a < z && " \t\r\n".indexOf(t.charAt(a)) >= 0) a++; while (z > a && " \t\r\n".indexOf(t.charAt(z - 1)) >= 0) z--;
@@ -315,12 +316,15 @@ public class OeVerify {
     static void run(String[] args) throws Exception {
         String pack = null, ledger = "", trust = "", epq = ""; boolean reqPQ = false;
         for (int k = 0; k < args.length; k++) {
-            String a = args[k];
+            String a = args[k]; String v = null; int eq = a.indexOf('=');
+            if (eq > 0 && a.startsWith("-")) { v = a.substring(eq + 1); a = a.substring(0, eq); }   // -flag=value (one grammar in the four)
             try {
                 switch (a) {
-                    case "-ledger": ledger = val(args, ++k); break; case "-trust-store": trust = val(args, ++k); break;
-                    case "-expect-pq-key": epq = val(args, ++k); break; case "-require-pq": reqPQ = true; break;
-                    default: if (a.startsWith("-") || pack != null) { usage(); return; } pack = a;
+                    case "-ledger": ledger = v != null ? val(new String[]{v}, 0) : val(args, ++k); break;
+                    case "-trust-store": trust = v != null ? val(new String[]{v}, 0) : val(args, ++k); break;
+                    case "-expect-pq-key": epq = v != null ? val(new String[]{v}, 0) : val(args, ++k); break;
+                    case "-require-pq": if (v != null) { usage(); return; } reqPQ = true; break;
+                    default: if (a.startsWith("-") || a.isEmpty() || pack != null || v != null) { usage(); return; } pack = a;
                 }
             } catch (ArrayIndexOutOfBoundsException e) { usage(); return; }
         }

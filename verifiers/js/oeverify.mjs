@@ -142,9 +142,9 @@ const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });   // st
 const readText = (path) => UTF8.decode(readFileSync(path));
 
 function ledgerEntries(path) {
-  if (statSync(path).size > MAX_INPUT_BYTES) return { ok: false, entries: [] };
   const out = []; let ok = true, prev = "0".repeat(64), n = 0;
-  let ledgerText; try { ledgerText = readText(path); } catch { return { ok: false, entries: [] }; }
+  let ledgerText;   // a missing / unreadable / oversized / non-UTF-8 file is a broken ledger, never an uncaught ENOENT (0.8.3 review)
+  try { if (statSync(path).size > MAX_INPUT_BYTES) return { ok: false, entries: [] }; ledgerText = readText(path); } catch { return { ok: false, entries: [] }; }
   for (const ln of ledgerText.split("\n")) {
     if (!ln.replace(/[ \t\r]/g, "")) continue;
     let e; try { e = parseStrict(ln); if (!e || typeof e !== "object" || Array.isArray(e)) throw new Error("x"); } catch { ok = false; n++; continue; }
@@ -286,10 +286,13 @@ function main(argv) {
   // one grammar in the four CLIs (21/09/2026): an unknown flag, a value flag without a value or with "", a second positional = usage
   const usage = () => { console.error("usage: node oeverify.mjs <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]"); process.exit(2); };
   const VALUE = new Set(["--ledger", "--trust-store", "--expect-pq-key"]); const opts = {}; let pack = null;
+  const badValue = (v) => v === undefined || v === "" || v.startsWith("-");
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--require-pq") { opts[a] = true; continue; }
-    if (VALUE.has(a)) { const v = argv[i + 1]; if (v === undefined || v === "" || v.startsWith("-")) usage(); opts[a] = v; i++; continue; }
+    if (VALUE.has(a)) { const v = argv[i + 1]; if (badValue(v)) usage(); opts[a] = v; i++; continue; }
+    const eq = a.indexOf("=");   // --flag=value, the form Python's argparse and Go's flag accept (one grammar in the four)
+    if (eq > 0 && VALUE.has(a.slice(0, eq))) { const v = a.slice(eq + 1); if (badValue(v)) usage(); opts[a.slice(0, eq)] = v; continue; }
     if (a.startsWith("-") || pack !== null) usage();
     pack = a;
   }
