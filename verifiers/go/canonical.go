@@ -208,7 +208,9 @@ func writeString(b *bytes.Buffer, s string) {
 	b.WriteByte('"')
 }
 
-// Payload is the canonical form of an entry without self_hash / signature / signer.
+// Payload is the canonical form of an entry without self_hash / signature / signer — the CRYPTOVALID attestation set, kept
+// from the shared code. NOT the omega-evidence profile (which drops self_hash only; pack.go uses without(e, "self_hash")):
+// do not use it for an omega-evidence ledger (0.8.3 r11).
 func Payload(entry *Object) ([]byte, error) {
 	cp := &Object{Vals: map[string]any{}}
 	for _, k := range entry.Keys {

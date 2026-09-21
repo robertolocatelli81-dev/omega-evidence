@@ -235,7 +235,7 @@ empty / unrelated / tampered / float ledgers, rotated and revoked signers, strip
 layers, and — since 0.8.3 — an own `__proto__` key added without rehashing, a raw non-UTF-8 byte where U+FFFD was hashed,
 a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 84 pack cases plus 15 CLI-grammar cases
 with 4 verifiers (21 September 2026); the hostile pack cases are anchored with the hash a lenient verifier would accept,
-so the named layer decides (except `non-utf8`, hash of zeros: it only detects a crash; the lossy-decoder case is `pack-raw-byte-hashed-as-fffd`); on a Node without ML-DSA the two Node divergences are declared, not hidden. None of the four verifies the RFC 3161 token inside the
+so the named layer decides (except `non-utf8` and `ledger-raw-byte-in-key`, which only detect a crash — a lossy decoder fails them on the hash anyway; the lossy-decoder cases are the two `…-hashed-as-fffd`); on a Node without ML-DSA the two Node divergences are declared, not hidden. None of the four verifies the RFC 3161 token inside the
 pack verdict: `verify_pack` checks the sidecar's shape and its digest→pack binding and reports the layer as SKIP with the
 reason (round 6, Opus: the earlier sentence "verified by the Python reference only" was not true of the code — no trust
 anchor reaches `verify_pack`); the cryptographic check exists as `timestamp.verify(tsr_b64, digest, ca_file=<TSA roots>)`
@@ -367,7 +367,7 @@ crash→verdict is listed apart). **Python, eleven**: `scope-NOT-before-accented
 `ledger-anchor-top-level`, `pack-reserved-tag-key-top-level`, `pack-reserved-tag-key-nested` FAIL→PASS;
 `lone-surrogate`, `ledger-lone-surrogate-entry`, `ledger-anchor-under-data-data`, `trust-entry-without-data`,
 `tsr-float-beside-good-digest`, `tsr-dup-key-beside-good-digest` PASS→FAIL — each toward the verdict of the other three; and
-seven inputs that were a traceback now get a verdict. **Node, seven**: `scope-astral-21-…`,
+seven inputs that were a traceback now get a verdict (two of them non-UTF-8 files). **Node, seven**: `scope-astral-21-…`,
 `trust-revoke-proto-then-trust-toString`, `pack-proto-key-hashed-by-producer` (a pack the producer API makes, with a
 top-level `__proto__` key) FAIL→PASS; `pack-float-1.0-hashed-as-1`, `pack-exp-1E2-hashed-as-100`,
 `pack-proto-key-hash-untouched`, `ledger-proto-key-hash-untouched` PASS→FAIL; plus one crash→verdict (`ledger-path-missing`).
@@ -376,23 +376,8 @@ producer-made input changes verdict: a pack whose body has a top-level `__proto_
 is PASS everywhere now; the 0.8.3 producer additionally accepts an `honest_scope` such as `"does NOTé prove x"` (ASCII
 word rule), which the 0.8.2 Python verifier refused.
 
-Declared, not aligned: Go's `flag` stops at the first positional, so `oeverify pack.json -ledger L` is a usage error
-in Go and a verdict in Python, Java and Node (put flags first); Node and Java refuse an input over 256 MiB and Go a ledger line
-over 64 MiB while Python has no bound — a valid file beyond those sizes verifies in some of the four only. Not measured:
-Ed25519 decoding of non-canonical or small-order points in a sidecar (the four backends — pure Python, OpenSSL, Go's
-`edwards25519`, SunEC — have their own rules; no such vectors are in the oracle yet).
-
-Verdicts that changed on in-profile input (measured, the positive-control table): the Python reference on eight —
-`scope-NOT-before-accented-letter`, `scope-dotless-i-overclaim`, `ledger-anchor-top-level`, `pack-reserved-tag-key-*` (×2)
-FAIL→PASS; `ledger-anchor-under-data-data`, `trust-entry-without-data`, `ledger-lone-surrogate-entry` PASS→FAIL — each
-toward the verdict of the other three; a 0.8.2-written ledger entry holding a lone surrogate now FAILs everywhere. Node
-on four: `scope-astral-21-…` and `trust-revoke-proto-then-trust-toString` FAIL→PASS, `pack-proto-key-hash-untouched`
-and `ledger-proto-key-hash-untouched` PASS→FAIL (well-formed JSON with a hash that does not cover the added key). On the
-two non-UTF-8 files hashed over U+FFFD, Node and Java PASS→FAIL (criterion for the lists above: well-formed JSON input;
-the count is read off the positive-control table). Nothing that both the 0.8.2 and the 0.8.3 producer API accept changes
-verdict; the 0.8.3 producer additionally accepts an `honest_scope` such as `"does NOTé prove x"` (ASCII word rule), which
-the 0.8.2 Python verifier would refuse. Two Go files carried an `AGPL-3.0-or-later`
-SPDX header in this Apache-2.0 repository (the author's own code): corrected to `Apache-2.0`.
+Two Go files carried an `AGPL-3.0-or-later` SPDX header in this Apache-2.0 repository (the author's own code): corrected to
+`Apache-2.0`.
 
 ### Breaking changes in 0.8.0 / 0.8.1 / 0.8.2
 
