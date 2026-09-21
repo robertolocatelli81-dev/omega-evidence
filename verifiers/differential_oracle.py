@@ -79,7 +79,7 @@ def build_cases(d):
         p = mk(nm); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
         cases[nm] = (p, ["--trust-store", store], None)
     sdk = mk("sig-dup-key"); P.sign_pack(sdk, idt); sp = sdk[:-5] + ".sig.json"; txt = open(sp).read().rstrip().rstrip("}")
-    open(sp, "w").write(txt + ', "public_key_b64": "' + other.public_key_b64 + '"}'); cases["sig-dup-key"] = (sdk, [], None)
+    open(sp, "w").write(txt + ', "public_key_b64": "' + idt.public_key_b64 + '"}'); cases["sig-dup-key"] = (sdk, [], None)   # r8: the SAME value twice — a last-wins parser verifies and says PASS; strict = malformed
     def _store_with(name, edit):
         pth = mk(name); P.sign_pack(pth, idt); st_ = os.path.join(d, name + "_trust.jsonl"); trust.TrustRegistry(st_).trust("acme", idt.public_key_b64)
         e = json.loads(open(st_).read().splitlines()[0]); edit(e); e["self_hash"] = _hash_entry(e); open(st_, "w").write(json.dumps(e, separators=(",", ":")) + "\n")
@@ -165,7 +165,7 @@ def build_cases(d):
     e = mk("empty-ledger"); open(e[:-5] + ".ledger.jsonl", "w").close(); cases["ledger-empty"] = (e, [], None)
     u = mk("unrelated-ledger"); L = Ledger(u[:-5] + ".ledger.jsonl"); L.append({"anchored_pack_sha3": "0" * 64}); cases["ledger-unrelated"] = (u, [], None)
     tl = mk("tampered-ledger"); P.anchor_pack(tl, tl[:-5] + ".ledger.jsonl"); lines = open(tl[:-5] + ".ledger.jsonl").read().splitlines(); ee = json.loads(lines[0]); ee["ts"] = "1999-01-01T00:00:00Z"; open(tl[:-5] + ".ledger.jsonl", "w").write(json.dumps(ee, separators=(",", ":")) + "\n"); cases["ledger-tampered"] = (tl, [], None)
-    fl = mk("float-ledger"); P.anchor_pack(fl, fl[:-5] + ".ledger.jsonl"); ln = json.loads(open(fl[:-5] + ".ledger.jsonl").read().splitlines()[0]); ln["data"]["x"] = 1.5; open(fl[:-5] + ".ledger.jsonl", "w").write(json.dumps(ln, separators=(",", ":")) + "\n"); cases["ledger-float"] = (fl, [], None)
+    fl = mk("float-ledger"); P.anchor_pack(fl, fl[:-5] + ".ledger.jsonl"); ln = json.loads(open(fl[:-5] + ".ledger.jsonl").read().splitlines()[0]); ln["data"]["x"] = 1.5; ln.pop("self_hash"); ln["self_hash"] = _hs.sha256(json.dumps({k: v for k, v in ln.items()}, sort_keys=True, separators=(",", ":")).encode()).hexdigest(); open(fl[:-5] + ".ledger.jsonl", "w").write(json.dumps(ln, separators=(",", ":")) + "\n"); cases["ledger-float"] = (fl, [], None)   # r8: self_hash over the float content — a float-tolerant verifier says PASS, the four FAIL
     # 21/09/2026, propagated from the cra-evidence review: an own "__proto__" key added without rehashing (JS dropped it while
     # copying and said PASS alone), a raw non-UTF-8 byte where U+FFFD was hashed (a lossy decoder reads exactly the hashed text:
     # JS and Java said PASS), a raw byte in a key (Python raised UnicodeDecodeError instead of a verdict), a ledger line that is not

@@ -235,7 +235,7 @@ empty / unrelated / tampered / float ledgers, rotated and revoked signers, strip
 layers, and — since 0.8.3 — an own `__proto__` key added without rehashing, a raw non-UTF-8 byte where U+FFFD was hashed,
 a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 83 pack cases plus 15 CLI-grammar cases
 with 4 verifiers (21 September 2026); the hostile pack cases are anchored with the hash a lenient verifier would accept,
-so the named layer decides (except `non-utf8`, which is not JSON for any decoder and only detects a crash); on a Node without ML-DSA the two Node divergences are declared, not hidden. None of the four verifies the RFC 3161 token inside the
+so the named layer decides (except `non-utf8`, hash of zeros: it only detects a crash; the lossy-decoder case is `pack-raw-byte-hashed-as-fffd`); on a Node without ML-DSA the two Node divergences are declared, not hidden. None of the four verifies the RFC 3161 token inside the
 pack verdict: `verify_pack` checks the sidecar's shape and its digest→pack binding and reports the layer as SKIP with the
 reason (round 6, Opus: the earlier sentence "verified by the Python reference only" was not true of the code — no trust
 anchor reaches `verify_pack`); the cryptographic check exists as `timestamp.verify(tsr_b64, digest, ca_file=<TSA roots>)`
@@ -361,7 +361,11 @@ over 64 MiB while Python has no bound — a valid file beyond those sizes verifi
 Ed25519 decoding of non-canonical or small-order points in a sidecar (the four backends — pure Python, OpenSSL, Go's
 `edwards25519`, SunEC — have their own rules; no such vectors are in the oracle yet).
 
-No verdict changed on an in-profile pack with a well-formed command line. Two Go files carried an `AGPL-3.0-or-later`
+Verdicts that changed on in-profile input (measured, the positive-control table): the Python reference on eight —
+`scope-NOT-before-accented-letter`, `scope-dotless-i-overclaim`, `ledger-anchor-top-level`, `pack-reserved-tag-key-*` (×2)
+FAIL→PASS; `ledger-anchor-under-data-data`, `trust-entry-without-data`, `ledger-lone-surrogate-entry` PASS→FAIL — each
+toward the verdict of the other three; a 0.8.2-written ledger entry holding a lone surrogate now FAILs everywhere. Node
+on one (`scope-astral-21-…` FAIL→PASS). Nothing produced by the 0.8.3 producer API changes verdict. Two Go files carried an `AGPL-3.0-or-later`
 SPDX header in this Apache-2.0 repository (the author's own code): corrected to `Apache-2.0`.
 
 ### Breaking changes in 0.8.0 / 0.8.1 / 0.8.2

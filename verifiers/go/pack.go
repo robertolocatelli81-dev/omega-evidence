@@ -279,7 +279,6 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 	}
 	// timestamp sidecar: declared, not verified here
 	// (shape and content-binding ARE checked, like the reference: an object whose digest_sha256 is the pack bytes)
-	tsStatus := "SKIP"
 	if tp := sidecarPath(packPath, ".tsr.json"); fileExists(tp) {
 		ts, e := readObject(tp)
 		packBytes, e2 := os.ReadFile(packPath)
@@ -288,7 +287,7 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 		} else if dg, _ := str(ts, "digest_sha256"); dg != sha256Hex(packBytes) {
 			add("timestamp", "FAIL", "pack changed after stamping")
 		} else {
-			add("timestamp", "SKIP", "RFC 3161 token present: not verified by this verifier (use the Python reference)")
+			add("timestamp", "SKIP", "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator")
 		}
 	} else {
 		add("timestamp", "SKIP", "no timestamp sidecar")
@@ -331,6 +330,10 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 				if !sidOK || sid == "" { // council r2: signer_id must be a non-empty string in all four verifiers
 					add("producer-signature", "FAIL", "malformed sidecar fields: signer_id must be a non-empty string")
 					sigStatus = "FAIL"
+					if requirePQ || expectedPQ != "" { // 0.8.3 r8: the receipt carries the same layers as the other three
+						add("pq-signature", "FAIL", "post-quantum layer required but the pack carries no valid classical signature (hybrid = both)")
+					}
+					add("authenticity", "FAIL", "no anchor and no signature: cannot authenticate")
 					return finish(r, declared, false, false, "", requirePQ || expectedPQ != "")
 				}
 				add("producer-signature", "PASS", "signed by "+sid+" (ed25519)")
@@ -383,7 +386,7 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 		add("authenticity", "PASS", "trusted-signed")
 	case sigStatus == "PASS":
 		add("authenticity", "PASS", "signed (identity not checked against a registry)")
-	case ledgerOK || tsStatus == "PASS":
+	case ledgerOK: // 0.8.3 r8: "|| tsStatus == PASS" was dead (the token is never verified here)
 		add("authenticity", "PASS", "anchored (integrity/time, not identity)")
 	default:
 		add("authenticity", "FAIL", "no anchor and no signature: cannot authenticate")

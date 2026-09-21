@@ -219,7 +219,7 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
     let ts = null; try { ts = readObject(sidecar(packPath, ".tsr.json")); } catch { ts = null; }
     if (!ts) add("timestamp", "FAIL", "malformed sidecar");
     else if (ts.digest_sha256 !== sha256Hex(readFileSync(packPath))) add("timestamp", "FAIL", "pack changed after stamping");
-    else add("timestamp", "SKIP", "RFC 3161 token present: not verified by this verifier (use the Python reference)");
+    else add("timestamp", "SKIP", "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
   } else add("timestamp", "SKIP", "no timestamp sidecar");
   let sigStatus = "SKIP", trusted = false, trustFailed = false;
   const sp = sidecar(packPath, ".sig.json");

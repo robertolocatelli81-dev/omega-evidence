@@ -367,7 +367,7 @@ public class OeVerify {
             Obj ts = null; try { ts = readObject(sidecar(packPath, ".tsr.json")); } catch (Exception e) { ts = null; }
             if (ts == null) add.accept(new String[]{"timestamp", "FAIL"}, "malformed sidecar");
             else if (!sha("SHA-256", Files.readAllBytes(Path.of(packPath))).equals(str(ts, "digest_sha256"))) add.accept(new String[]{"timestamp", "FAIL"}, "pack changed after stamping");
-            else add.accept(new String[]{"timestamp", "SKIP"}, "RFC 3161 token present: not verified by this verifier (use the Python reference)");
+            else add.accept(new String[]{"timestamp", "SKIP"}, "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
         }
         else add.accept(new String[]{"timestamp", "SKIP"}, "no timestamp sidecar");
         // producer signature

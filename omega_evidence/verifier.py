@@ -278,7 +278,7 @@ def _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, t
         layers.append(_layer("authenticity", "PASS", "trusted-signed"))
     elif sig_status == "PASS":
         layers.append(_layer("authenticity", "PASS", "signed (identity not checked against a registry)"))
-    elif ledger_ok:   # r7 (Opus): the "or ts_status == PASS" branch was dead (never PASS here) and absent from the three
+    elif ledger_ok:   # r7/r8: the "or ts_status == PASS" branch was dead (never PASS here); removed from Go too in r8
         layers.append(_layer("authenticity", "PASS", "anchored (integrity/time, not identity) — ledger"))
     else:
         layers.append(_layer("authenticity", "FAIL", "no anchor and no signature: cannot authenticate"))
