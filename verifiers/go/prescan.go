@@ -43,9 +43,14 @@ func NestingDepth(text []byte) int {
 // HasLoneSurrogate reports an unpaired \uD800-\uDFFF escape (same scan as verifier.has_lone_surrogate).
 // Go's json decoder would silently replace it with U+FFFD, Python/JS keep it: the profile refuses it.
 func HasLoneSurrogate(text []byte) bool {
-	hex4 := func(b []byte) (int64, bool) {
+	hex4 := func(b []byte) (int64, bool) { // exactly four hex digits (r9: ParseInt would take a sign)
 		if len(b) < 4 {
 			return 0, false
+		}
+		for _, c := range b[:4] {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return 0, false
+			}
 		}
 		v, err := strconv.ParseInt(string(b[:4]), 16, 32)
 		return v, err == nil

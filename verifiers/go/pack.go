@@ -333,7 +333,7 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 					if requirePQ || expectedPQ != "" { // 0.8.3 r8: the receipt carries the same layers as the other three
 						add("pq-signature", "FAIL", "post-quantum layer required but the pack carries no valid classical signature (hybrid = both)")
 					}
-					add("authenticity", "FAIL", "no anchor and no signature: cannot authenticate")
+					add("authenticity", "FAIL", "producer signature present but invalid") // r9 (Sonnet): the ledger may be fine here
 					return finish(r, declared, false, false, "", requirePQ || expectedPQ != "")
 				}
 				add("producer-signature", "PASS", "signed by "+sid+" (ed25519)")
