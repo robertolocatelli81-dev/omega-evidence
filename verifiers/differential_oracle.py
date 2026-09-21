@@ -137,6 +137,21 @@ def build_cases(d):
     for nm, vm in (("tsr-vm-crls-int", '{"available": true, "crls_b64": 1}'), ("tsr-vm-crls-list-of-int", '{"available": true, "crls_b64": [1]}')):
         tp = mk(nm); P.anchor_pack(tp, tp[:-5] + ".ledger.jsonl"); dg = _hs.sha256(open(tp, "rb").read()).hexdigest()
         open(tp[:-5] + ".tsr.json", "w").write('{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "validation_material": %s}' % (dg, vm)); cases[nm] = (tp, [], None)
+    # review r4 (Opus): the anchoring rule reads the ENTRY in the three and read `data` in Python (a top-level
+    # anchored_pack_sha3: PASS in the three, FAIL in Python; data.data.anchored_pack_sha3: the reverse); a trust-store entry
+    # without "data" was skipped by Python and a broken store for the three; Node's `[^.]{0,40}` counted UTF-16 units
+    from omega_evidence.ledger import GENESIS as _G, _hash_entry as _he4
+    def _entry(idx, prev, extra):
+        e = {"idx": idx, "ts": "2026-09-21T00:00:00+00:00", "prev_hash": prev}; e.update(extra); e["self_hash"] = _he4(e); return e
+    for nm, mk_extra in (("ledger-anchor-top-level", lambda H: {"data": {}, "anchored_pack_sha3": H}),
+                         ("ledger-anchor-under-data-data", lambda H: {"data": {"data": {"anchored_pack_sha3": H}}})):
+        ap = mk(nm); H = json.load(open(ap))["pack_sha3"]
+        open(ap[:-5] + ".ledger.jsonl", "w").write(json.dumps(_entry(0, _G, mk_extra(H)), separators=(",", ":")) + "\n"); cases[nm] = (ap, [], None)
+    tw = mk("trust-no-data"); P.sign_pack(tw, idt); st_w = os.path.join(d, "trust_no_data.jsonl"); trust.TrustRegistry(st_w).trust("acme", idt.public_key_b64)
+    e0 = json.loads(open(st_w).read().splitlines()[0]); open(st_w, "a").write(json.dumps(_entry(1, e0["self_hash"], {}), separators=(",", ":")) + "\n")
+    cases["trust-entry-without-data"] = (tw, ["--trust-store", st_w], None)
+    dd = {"kind": "d", "honest_scope": "guaranteed; does NOT " + "\U0001F600" * 21 + " guarantee x", "n": 1}
+    cases["scope-astral-21-between-NOT-and-guarant"] = (mk_text("astral", dd, json.dumps(dict(dd, pack_sha3="%H"), ensure_ascii=False)), [], None)
     bad8 = os.path.join(d, "bad8.json"); open(bad8, "wb").write(b'{"kind":"d","honest_scope":"does NOT x","s":"\xff","pack_sha3":"' + b"0" * 64 + b'"}'); cases["non-utf8"] = (bad8, [], None)   # not JSON anywhere: FAIL at pack-json
     # ledgers
     e = mk("empty-ledger"); open(e[:-5] + ".ledger.jsonl", "w").close(); cases["ledger-empty"] = (e, [], None)
@@ -286,6 +301,7 @@ def main():
            # review r1 (Opus): the pack path itself "" or "-" (an unset $PACK), the "--" terminator, a value on the boolean flag
            "cli-empty-pack": ["--pack", ""], "cli-dash-pack": ["--pack", "-"], "cli-double-dash": ["--"], "cli-bool-eq-false": ["--require-pq=false"],
            "cli-help": ["--help"], "cli-h": ["-h"]}   # r3 (Sonnet): argparse answered --help with exit 0 while the three said usage
+    cli["cli-other-dash-spelling-verdict"] = ["--other-dash"]   # r4 (Sonnet): -ledger in Python/Node, --ledger in Go/Java → a verdict, the same flag
     for name, extra in cli.items():
         row = {}
         for k, cmd in avail.items():
@@ -299,6 +315,9 @@ def main():
                 args = list(cmd) + ex
             elif extra[0] == "--pack":   # the positional itself is the hostile value ("--pack" is a marker of this table, not a flag)
                 args = list(cmd) + [extra[1]]
+            elif extra[0] == "--other-dash":
+                lp_ = cases["anchored"][0][:-5] + ".ledger.jsonl"; ap_ = cases["anchored"][0]
+                args = list(cmd) + (["--ledger", lp_, ap_] if gs else [ap_, "-ledger", lp_])
             else:
                 args = list(cmd) + (ex + [valid] if gs else [valid] + ex)
             try:
@@ -309,10 +328,11 @@ def main():
                     row[k] = "usage" if out.returncode == 2 else f"exit{out.returncode}"
             except Exception:  # noqa: BLE001
                 row[k] = "CRASH"
-        ok = all(v == "usage" for v in row.values())
+        want = "verdict:PASS" if name.endswith("-verdict") else "usage"
+        ok = all(v == want for v in row.values())
         if not ok:
             diffs += 1
-        print(f"  [{'OK ' if ok else 'DIFF'}] {name:34} expect usage(exit 2): {row}")
+        print(f"  [{'OK ' if ok else 'DIFF'}] {name:34} expect {want if want != 'usage' else 'usage(exit 2)'}: {row}")
     print(f"disagreements: {diffs}/{len(cases) + len(cli)} (declared Node divergences: {declared})")
     shutil.rmtree(tmp, ignore_errors=True)
     return 1 if diffs else 0

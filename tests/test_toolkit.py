@@ -900,6 +900,21 @@ class TestNemesisRegressions(unittest.TestCase):
             self.assertTrue(pack._honest_scope_declares_limit("does NOT\u00e9 prove x"))          # ASCII \b: boundary before é
             self.assertTrue(pack._honest_scope_declares_limit("fully cert\u0131fied; does NOT prove x"))   # ı is not i in ASCII folding
             self.assertFalse(pack._honest_scope_declares_limit("fully certified; does NOT prove x"))
+            # review r4 (Opus): the anchoring rule reads the ENTRY (top-level or data.anchored_pack_sha3) like the three; a
+            # trust-store entry without "data" is a broken store, not a skipped line
+            from omega_evidence.ledger import GENESIS, _hash_entry
+            def entry(idx, prev, extra):
+                e = {"idx": idx, "ts": "2026-09-21T00:00:00+00:00", "prev_hash": prev}; e.update(extra); e["self_hash"] = _hash_entry(e); return e
+            for name, extra, want in (("top", lambda H: {"data": {}, "anchored_pack_sha3": H}, True),
+                                      ("dd", lambda H: {"data": {"data": {"anchored_pack_sha3": H}}}, False)):
+                pp = os.path.join(tmp, name + ".json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x")); H = json.loads(Path(pp).read_text())["pack_sha3"]
+                Path(pp[:-5] + ".ledger.jsonl").write_text(json.dumps(entry(0, GENESIS, extra(H)), separators=(",", ":")) + "\n", encoding="utf-8")
+                self.assertEqual(verify_pack(pp)["valid"], want, name)
+            idt = signing.Identity("acme"); pp = os.path.join(tmp, "signed2.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x")); pack.sign_pack(pp, idt)
+            st2 = os.path.join(tmp, "trust2.jsonl"); trust.TrustRegistry(st2).trust("acme", idt.public_key_b64)
+            e0 = json.loads(Path(st2).read_text(encoding="utf-8").splitlines()[0])
+            Path(st2).write_text(Path(st2).read_text(encoding="utf-8") + json.dumps(entry(1, e0["self_hash"], {}), separators=(",", ":")) + "\n", encoding="utf-8")
+            r = verify_pack(pp, trust_store=st2); self.assertFalse(r["valid"]); self.assertFalse(r["authenticated"])
             # a trust-store line that is not an object raised AttributeError out of Ledger._load
             pp = os.path.join(tmp, "signed.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
             idt = signing.Identity("acme"); pack.sign_pack(pp, idt)
@@ -921,9 +936,10 @@ class TestNemesisRegressions(unittest.TestCase):
             for bad_pack in ("", "-"):     # an unset $PACK is not a path (review r1)
                 out = subprocess.run([sys.executable, "-m", "omega_evidence", bad_pack], capture_output=True, text=True)
                 self.assertEqual(out.returncode, 2, (bad_pack, out.stdout, out.stderr)); self.assertEqual(out.stdout, "")
-            pack.anchor_pack(pp, pp[:-5] + ".ledger.jsonl")     # --flag=value is accepted, as in Go/Java/Node
-            out = subprocess.run([sys.executable, "-m", "omega_evidence", pp, "--ledger=" + pp[:-5] + ".ledger.jsonl"], capture_output=True, text=True)
-            self.assertEqual(out.returncode, 0, out.stderr); self.assertEqual(json.loads(out.stdout)["verdict"], "PASS")
+            pack.anchor_pack(pp, pp[:-5] + ".ledger.jsonl")     # --flag=value and -flag (one dash) are accepted, as in Go/Java/Node
+            for extra in (["--ledger=" + pp[:-5] + ".ledger.jsonl"], ["-ledger", pp[:-5] + ".ledger.jsonl"]):
+                out = subprocess.run([sys.executable, "-m", "omega_evidence", pp] + extra, capture_output=True, text=True)
+                self.assertEqual(out.returncode, 0, out.stderr); self.assertEqual(json.loads(out.stdout)["verdict"], "PASS")
             out = subprocess.run([sys.executable, "-m", "omega_evidence", pp], capture_output=True, text=True)
             self.assertEqual(out.returncode, 0); self.assertEqual(json.loads(out.stdout)["verdict"], "PASS")   # a well-formed command line: a verdict
 

@@ -135,7 +135,11 @@ export const TIP_KIND = "cryptovalid_tip/1";
 const SPKI = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_INPUT_BYTES = 256 * 1024 * 1024;
 const SCOPE_LIMIT = /\bNOT\b/, SCOPE_OVERCLAIM = /\b(accredited|certified|qualified|guaranteed)\b/i, SCOPE_NEGATED = /\bNOT\b[^.]{0,40}(accredit|certif|qualif|guarant)/i;
-const honestScope = (s) => typeof s === "string" && SCOPE_LIMIT.test(s) && !(SCOPE_OVERCLAIM.test(s) && !SCOPE_NEGATED.test(s));
+// r4 (Opus): without the u flag `[^.]{0,40}` counts UTF-16 code units — 21 astral characters between NOT and "guarant" are 42
+// units here and 21 code points in Python/Go/Java; each astral character is folded to one BMP placeholder before the tests
+// (the u flag is not used: with /iu the \b and \w semantics would diverge from the ASCII ones of the other three)
+const oneUnitPerCodePoint = (s) => Array.from(s, (c) => (c.codePointAt(0) > 0xffff ? "\ufffd" : c)).join("");
+const honestScope = (s0) => { if (typeof s0 !== "string") return false; const s = oneUnitPerCodePoint(s0); return SCOPE_LIMIT.test(s) && !(SCOPE_OVERCLAIM.test(s) && !SCOPE_NEGATED.test(s)); };
 const b64Strict = (s, n) => { if (typeof s !== "string" || s.length !== Math.ceil(n / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(s)) return null; const raw = Buffer.from(s, "base64"); return raw.length === n && raw.toString("base64") === s ? raw : null; };
 const sidecar = (p, suf) => (p.endsWith(".json") ? p.slice(0, -5) + suf : p + suf);
 
@@ -305,9 +309,10 @@ function main(argv) {
   // one grammar in the four CLIs (21/09/2026): an unknown flag, a value flag without a value or with "", a second positional = usage
   const usage = () => { console.error("usage: node oeverify.mjs <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]"); process.exit(2); };
   const VALUE = new Set(["--ledger", "--trust-store", "--expect-pq-key"]); const opts = {}; let pack = null;
+  const norm = (a) => (/^-[a-z]/.test(a) ? "-" + a : a);   // r4: -ledger and --ledger are the same flag in the four CLIs
   const badValue = (v) => v === undefined || v === "" || v.startsWith("-");
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
+    const a = norm(argv[i]);
     if (a === "--require-pq") { opts[a] = true; continue; }
     if (VALUE.has(a)) { const v = argv[i + 1]; if (badValue(v)) usage(); opts[a] = v; i++; continue; }
     const eq = a.indexOf("=");   // --flag=value, the form Python's argparse and Go's flag accept (one grammar in the four)

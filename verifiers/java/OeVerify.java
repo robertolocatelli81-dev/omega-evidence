@@ -316,7 +316,8 @@ public class OeVerify {
     static void run(String[] args) throws Exception {
         String pack = null, ledger = "", trust = "", epq = ""; boolean reqPQ = false;
         for (int k = 0; k < args.length; k++) {
-            String a = args[k]; String v = null; int eq = a.indexOf('=');
+            String a = args[k]; String v = null; if (a.startsWith("--") && a.length() > 2) a = a.substring(1);   // r4: -flag and --flag alike
+            int eq = a.indexOf('=');
             if (eq > 0 && a.startsWith("-")) { v = a.substring(eq + 1); a = a.substring(0, eq); }   // -flag=value (one grammar in the four)
             try {
                 switch (a) {

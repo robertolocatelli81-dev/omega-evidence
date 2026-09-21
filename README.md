@@ -233,7 +233,7 @@ packs, lenient base64, uppercase digests, unknown or non-string algorithms, clas
 overclaimed or missing `honest_scope`, duplicate keys, floats, nesting beyond 512, lone surrogates, non-UTF-8,
 empty / unrelated / tampered / float ledgers, rotated and revoked signers, stripped / foreign / invalid post-quantum
 layers, and — since 0.8.3 — an own `__proto__` key added without rehashing, a raw non-UTF-8 byte where U+FFFD was hashed,
-a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 76 pack cases plus 12 CLI-grammar cases
+a raw byte in a ledger key, a ledger line that is not an object): 0 disagreements on 80 pack cases plus 13 CLI-grammar cases
 with 4 verifiers (21 September 2026); the hostile pack cases are anchored with the hash a lenient verifier would accept,
 so the named layer decides; on a Node without ML-DSA the two Node divergences are declared, not hidden. RFC 3161 sidecars are verified by the Python reference
 only (the others report SKIP). The ledger profile is the cryptovalid one, so cryptovalid's five verifiers also
@@ -299,8 +299,8 @@ very function registered) the layer is reported present-but-unverifiable (never 
 Twelve review rounds on cra-evidence 0.3.0, whose verifiers are re-implementations of these, found defect classes in
 shared code; a review round on this release (Opus, Sonnet, Haiku — Gemini Pro out of credits) found more of the same
 class here. Measured on 21/09/2026 with a four-verifier probe before each fix and with the differential oracle after
-(88 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
-v0.8.2) is red on 32 cases, and against a deliberately lenient Python (loose parser, no scope check) on 9:
+(93 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
+v0.8.2) is red on 37 cases, and against a deliberately lenient Python (loose parser, no scope check) on 9:
 
 - **Node dropped an own `__proto__` key while copying** (`c[k] = …` invokes the prototype setter): a pack or ledger
   entry with such a key added and its hash untouched verified PASS in Node alone. `Object.fromEntries` keeps the key.
@@ -323,18 +323,27 @@ v0.8.2) is red on 32 cases, and against a deliberately lenient Python (loose par
   flag) and Java (no `UNICODE_CASE`). Python now uses `re.ASCII`, the semantics of the three.
 - **The Python reference crashed on typed-wrong LTV material**: `validation_material.crls_b64` as an int or a list of
   ints beside a correct digest was a `TypeError` traceback while the three gave a verdict. Typed now.
+- **The anchoring rule was read at two levels** (round 4, Opus): Go, Java and Node look for `anchored_pack_sha3` in the
+  ledger ENTRY (top-level or under `data`); the Python reference looked inside `data` (so `data.anchored_pack_sha3` or
+  `data.data.anchored_pack_sha3`). A chain-valid entry with a top-level anchor was PASS in the three and FAIL in Python;
+  one under `data.data` the reverse. Python now reads the entry. A trust-store entry without `data` was skipped by
+  Python and a broken store for the three: broken everywhere now.
+- **Node's `[^.]{0,40}` counted UTF-16 code units** (no `u` flag): 21 astral characters between `NOT` and `guarant`
+  were 42 units in Node and 21 code points elsewhere, so the negation was seen by three verifiers and not by Node.
+  Astral characters are folded to one placeholder unit before the three scope tests.
 - **The Python reference read the RFC 3161 sidecar with the loose `json.loads`**: a `.tsr.json` with a float or a
   duplicate key beside a correct digest was PASS in Python and FAIL in Go, Java and Node. Strict parser there too.
 - **Node crashed with an uncaught `ENOENT`** on a `--ledger` path that does not exist (the other three: FAIL).
 - **One CLI grammar in the four.** Usage error (exit 2, no verdict) everywhere for: an unknown flag; a value flag with
   `""`, without a value, or with a flag as its value; an abbreviated flag; a second positional; a pack path `""` or
   `-`; the `--` terminator; `--require-pq=false`; `-h`/`--help` (round 3: argparse answered it with exit 0). `--flag=value` is accepted by all four (argparse and Go's `flag` did
-  natively; Java and Node now do). Before: `python -m omega_evidence anchored.json --ledger ""` was **PASS** with the
+  natively; Java and Node now do), and so is one dash or two (`-ledger` / `--ledger`: Go's `flag` took both, Java one,
+  Python and Node two — round 4, Sonnet). Before: `python -m omega_evidence anchored.json --ledger ""` was **PASS** with the
   operator's ledger silently replaced by the sidecar (measured on v0.8.2), Node gave a verdict on an unknown flag,
   Go and Java took `""` as "not given" and a flag as a path, Python accepted `--ledg` and crashed on it.
 
 Declared, not aligned: Go's `flag` stops at the first positional, so `oeverify pack.json -ledger L` is a usage error
-in Go and a verdict in the other three (put flags first); Node and Java refuse an input over 256 MiB and Go a ledger line
+in Go and a verdict in Python, Java and Node (put flags first); Node and Java refuse an input over 256 MiB and Go a ledger line
 over 64 MiB while Python has no bound — a valid file beyond those sizes verifies in some of the four only.
 
 No verdict changed on an in-profile pack with a well-formed command line. Two Go files carried an `AGPL-3.0-or-later`

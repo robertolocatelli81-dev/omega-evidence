@@ -302,4 +302,21 @@ class Ledger:
                     e = loads_strict(line)          # 0.7.0: the strict profile also on replay (no duplicate keys)
                     if not isinstance(e, dict):
                         raise ValueError("ledger line is not a JSON object")
-                    yield e.get("data", {})
+                    yield e.get("data")     # 0.8.3 r4: no default — an entry without "data" is what it is (the trust store
+                                            # treats it as broken, like Go/Java/Node; Python used to skip it silently)
+
+    def raw_entries(self):
+        """The whole entries (idx, ts, data, prev_hash, self_hash, and any extra key), strict profile. The anchoring rule
+        reads the ENTRY (`anchored_pack_sha3` top-level or under `data`), as the three other verifiers do — 0.8.3 r4 (Opus):
+        the reference read `data` instead, so a top-level anchor was PASS in the three and FAIL here, and a
+        `data.data.anchored_pack_sha3` the reverse."""
+        if not os.path.exists(self.path):
+            return
+        with open(self.path, encoding="utf-8", newline="\n") as fh:
+            for line in fh:
+                line = line.strip(" \t\r\n")
+                if line:
+                    e = loads_strict(line)
+                    if not isinstance(e, dict):
+                        raise ValueError("ledger line is not a JSON object")
+                    yield e

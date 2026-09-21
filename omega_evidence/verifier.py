@@ -101,7 +101,7 @@ def _check_ledger(path: str, ledger_path: Optional[str], layers: List) -> bool:
     except (OSError, ValueError):
         pk = {}
     pack_sha3 = pk.get("pack_sha3", "")
-    entries = list(lg.entries())
+    entries = list(lg.raw_entries())   # r4: the whole entry, as Go/Java/Node read it
     if not entries:
         layers.append(_layer("ledger-chain", "FAIL", f"{lp}: ledger empty — nothing anchored"))
         return False
@@ -345,12 +345,12 @@ def main(argv=None) -> int:
     import argparse
     p = argparse.ArgumentParser(allow_abbrev=False, add_help=False, prog="omega-evidence-verify")   # r3: -h/--help exit 0 here, 2 in the three (usage on stderr documents the flags)
     p.add_argument("pack")
-    p.add_argument("--ledger")
-    p.add_argument("--trust-store")
-    p.add_argument("--expect-pq-key", help="pinned ML-DSA-65 public key (base64): requires the hybrid layer")
-    p.add_argument("--require-pq", action="store_true", help="require a pinned, valid post-quantum layer (trust registry)")
+    p.add_argument("--ledger", "-ledger")            # r4: one dash or two, the same flag in the four CLIs
+    p.add_argument("--trust-store", "-trust-store")
+    p.add_argument("--expect-pq-key", "-expect-pq-key", help="pinned ML-DSA-65 public key (base64): requires the hybrid layer")
+    p.add_argument("--require-pq", "-require-pq", action="store_true", help="require a pinned, valid post-quantum layer (trust registry)")
     raw = list(sys.argv[1:] if argv is None else argv)
-    if "--" in raw or any(x.startswith("--require-pq=") for x in raw):   # no "--" terminator, no value on the boolean flag (one grammar in the four)
+    if "--" in raw or any(x.startswith(("--require-pq=", "-require-pq=")) for x in raw):   # no "--" terminator, no value on the boolean flag (one grammar in the four)
         p.error("unexpected argument")
     a = p.parse_args(argv)
     if a.pack == "" or a.pack.startswith("-"):   # an unset $PACK must not be read as a path

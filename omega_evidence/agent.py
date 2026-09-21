@@ -182,7 +182,7 @@ class AgentEvidenceLog:
         st = {"total": 0, "allow": 0, "deny": 0, "allow_with_approval": 0,
               "attestation_recorded": 0, "inconsistent": []}
         for d in self._ledger.entries():
-            if d.get("kind") != "agent_governance_action":
+            if not isinstance(d, dict) or d.get("kind") != "agent_governance_action":   # r4: entries() no longer defaults a missing data to {}
                 continue
             st["total"] += 1
             st[d.get("decision", "?")] = st.get(d.get("decision", "?"), 0) + 1
