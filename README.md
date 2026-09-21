@@ -49,7 +49,7 @@ A pack's trust level is *stated, not implied*:
 ```
 trusted-signed  producer signature valid AND key trusted in the registry
 signed          producer signature valid (identity not checked)
-anchored        valid ledger chain OR valid TSA timestamp (integrity/time)
+anchored        valid ledger chain (integrity/time) — an RFC 3161 token is recorded and bound to the pack, not a tier
 none            internal consistency only  →  rejected, cannot authenticate
 ```
 

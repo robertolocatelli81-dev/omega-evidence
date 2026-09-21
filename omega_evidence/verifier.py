@@ -21,12 +21,13 @@ Layers (each PASS / FAIL / SKIP; SKIP is honest, never a false green):
 Graduated authenticity (strongest first):
   trusted-signed  — producer signature valid AND key trusted in the registry
   signed          — producer signature valid (identity not checked)
-  anchored        — valid ledger chain OR valid TSA timestamp (integrity/time)
+  anchored        — valid ledger chain (integrity/time); an RFC 3161 token is recorded and bound, not a tier
   none            — internal consistency only  →  FAIL, cannot authenticate
 
-A bare fabricated pack (no ledger, no timestamp, no signature) cannot pass. A SELF-MADE
-  ledger anchor, however, only proves integrity/time — read `authenticated` (not just `valid`)
-  and the RFC 3161 layer, which is verified ONLY against a supplied TSA trust anchor (ca_file).
+A bare fabricated pack (no ledger, no signature) cannot pass. A SELF-MADE ledger anchor,
+  however, only proves integrity/time — read `authenticated` (not just `valid`). The RFC 3161
+  layer is SKIP here as in Go/Java/Node (no trust anchor reaches verify_pack; the cryptographic
+  check is `timestamp.verify(tsr_b64, digest, ca_file=...)` for the operator) — 0.8.3 r6/r7.
 """
 
 from __future__ import annotations
@@ -104,6 +105,8 @@ def _check_ledger(path: str, ledger_path: Optional[str], layers: List) -> bool:
     except (OSError, ValueError, RecursionError):
         pk = {}
     pack_sha3 = pk.get("pack_sha3", "")
+    if not isinstance(pack_sha3, str):   # r7: a non-string digest never anchors (the three: "" for a non-string)
+        pack_sha3 = ""
     entries = list(lg.raw_entries())   # r4: the whole entry, as Go/Java/Node read it
     if not entries:
         layers.append(_layer("ledger-chain", "FAIL", f"{lp}: ledger empty — nothing anchored"))
@@ -275,10 +278,8 @@ def _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, t
         layers.append(_layer("authenticity", "PASS", "trusted-signed"))
     elif sig_status == "PASS":
         layers.append(_layer("authenticity", "PASS", "signed (identity not checked against a registry)"))
-    elif ledger_ok or ts_status == "PASS":
-        layers.append(_layer("authenticity", "PASS",
-                             "anchored (integrity/time, not identity) — "
-                             + ("ledger" if ledger_ok else "TSA")))
+    elif ledger_ok:   # r7 (Opus): the "or ts_status == PASS" branch was dead (never PASS here) and absent from the three
+        layers.append(_layer("authenticity", "PASS", "anchored (integrity/time, not identity) — ledger"))
     else:
         layers.append(_layer("authenticity", "FAIL", "no anchor and no signature: cannot authenticate"))
 

@@ -272,25 +272,24 @@ class Ledger:
                 lines = fh.read().decode("utf-8").split("\n")
         except (OSError, UnicodeDecodeError):
             return False, [0]
-        if lines is not None:
-            for i, line in enumerate(lines):
-                if not line.strip(" \t\r\n"):
-                    continue
-                try:
-                    e = loads_strict(line.strip(" \t\r\n"))
-                    if not isinstance(e, dict):
-                        raise ValueError("entry is not an object")
-                except (ValueError, RecursionError):
-                    bad.append(i)
-                    n += 1
-                    continue
-                idx = e.get("idx")
-                sh = e.get("self_hash")
-                if (isinstance(idx, bool) or idx != n or e.get("prev_hash") != prev
-                        or not isinstance(sh, str) or sh != _hash_entry(e)):
-                    bad.append(i)
-                prev = sh if isinstance(sh, str) else prev
+        for i, line in enumerate(lines):
+            if not line.strip(" \t\r\n"):
+                continue
+            try:
+                e = loads_strict(line.strip(" \t\r\n"))
+                if not isinstance(e, dict):
+                    raise ValueError("entry is not an object")
+            except (ValueError, RecursionError):
+                bad.append(i)
                 n += 1
+                continue
+            idx = e.get("idx")
+            sh = e.get("self_hash")
+            if (isinstance(idx, bool) or idx != n or e.get("prev_hash") != prev
+                    or not isinstance(sh, str) or sh != _hash_entry(e)):
+                bad.append(i)
+            prev = sh if isinstance(sh, str) else prev
+            n += 1
         return (not bad), bad
 
     @property

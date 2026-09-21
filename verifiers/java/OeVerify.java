@@ -24,7 +24,7 @@ public class OeVerify {
     static final String GENESIS = "0".repeat(64);
     static final byte[] ED_SPKI = hex("302a300506032b6570032100");
     static final byte[] MLDSA65_SPKI = hex("308207b2300b0609608648016503040312038207a100");
-    // ASCII word boundaries spelled out (r5): \\b is ASCII only since JDK 19 (JDK-8264160); the family profile is ASCII in the four
+    // ASCII word boundaries spelled out (r5/r7): independent of the JDK's \\b semantics; the family profile is ASCII in the four
     static final String WB_L = "(?<![A-Za-z0-9_])", WB_R = "(?![A-Za-z0-9_])";
     static final Pattern SCOPE_LIMIT = Pattern.compile(WB_L + "NOT" + WB_R);
     static final Pattern SCOPE_OVERCLAIM = Pattern.compile(WB_L + "(accredited|certified|qualified|guaranteed)" + WB_R, Pattern.CASE_INSENSITIVE);
