@@ -334,7 +334,8 @@ public class OeVerify {
         if (pack == null) { usage(); return; }
         Map<String, Object> r = verifyPack(pack, ledger, trust, epq, reqPQ);
         System.out.println(j(r));
-        System.exit("PASS".equals(r.get("verdict")) ? 0 : 1);
+        String v = (String) r.get("verdict");
+        System.exit("PASS".equals(v) ? 0 : "FAIL".equals(v) ? 1 : 77);   // 77 = the check did not run on this JDK
     }
 
     static Map<String, Object> verifyPack(String packPath, String ledgerPath, String trustStore, String expectedPQ, boolean requirePQ) throws Exception {
@@ -421,6 +422,9 @@ public class OeVerify {
         return finish(layers, trusted, "PASS".equals(sigStatus) && !trustFailed, required);   // council 16/09 r1: never authenticated for a revoked/untrusted signer
     }
 
+    // PQ algorithms the project implements a backend for somewhere; membership does not mean THIS JDK has it.
+    static final java.util.Set<String> KNOWN_PQ_ALGS = java.util.Set.of("ml-dsa-65", "slh-dsa-sha2-128s");
+
     static void checkPQ(List<Map<String, Object>> layers, Obj side, String digest, String expectedPQ, boolean requirePQ) {
         java.util.function.BiConsumer<String, String> add = (s, d) -> { Map<String, Object> m = new LinkedHashMap<>(); m.put("layer", "pq-signature"); m.put("status", s); m.put("detail", d); layers.add(m); };
         boolean required = requirePQ || !expectedPQ.isEmpty();
@@ -430,10 +434,26 @@ public class OeVerify {
         if (palg == null || palg.isEmpty()) { if (required) add.accept("FAIL", "post-quantum layer required but absent (stripped or never signed)"); return; }
         String pkB64 = str(side, "pq_public_key_b64"), sigB64 = str(side, "pq_signature_b64");
         if (!expectedPQ.isEmpty() && !expectedPQ.equals(pkB64)) { add.accept("FAIL", palg + " co-signature by a key other than the pinned one"); return; }
-        if (!"ml-dsa-65".equals(palg)) { add.accept(required ? "FAIL" : "SKIP", palg + " is not a registered PQ backend (pq-present-unverified" + (required ? ": a required layer that cannot be checked is not a pass)" : ")")); return; }
-        if (!mldsaSupported()) { add.accept(required ? "FAIL" : "SKIP", "ml-dsa-65 present but this JDK has no ML-DSA (pq-present-unverified" + (required ? ": not a pass)" : ")")); return; }
+        if (!"ml-dsa-65".equals(palg)) {
+            // Same split as the Python verifier: a PQ algorithm the project knows but this runtime does not implement
+            // is an absence; a name nobody knows stays a judgment (it can never be pq-protected).
+            add.accept(required ? "FAIL" : "SKIP", palg + " is not a registered PQ backend (pq-present-unverified" + (required ? ": a required layer that cannot be checked is not a pass)" : ")"));
+            if (KNOWN_PQ_ALGS.contains(palg)) layers.get(layers.size() - 1).put("assessed", Boolean.FALSE);
+            return;
+        }
+        // FORM BEFORE CAPABILITY (24/09/2026): well-formedness needs no backend, so it is judged first. Probing the
+        // backend first handed a real defect of the artifact to the absence side on a JDK without ML-DSA.
         byte[] pk = b64Strict(pkB64, 1952), sig = b64Strict(sigB64, 3309);
-        if (pk == null || sig == null || !mldsaVerify(pk, digest.getBytes(StandardCharsets.UTF_8), sig)) { add.accept("FAIL", "ml-dsa-65 co-signature invalid"); return; }
+        if (pk == null || sig == null) { add.accept("FAIL", "ml-dsa-65 co-signature is not strict base64 of the expected length (checked without a backend)"); return; }
+        if (!mldsaSupported()) {
+            // This JDK cannot run the check: FAIL when required (fail-closed), but marked so the roll-up does not
+            // report OUR missing capability as a finding about the pack. An unknown algorithm name stays a judgment.
+            add.accept(required ? "FAIL" : "SKIP", "ml-dsa-65 present but this JDK has no ML-DSA (pq-present-unverified" + (required ? ": not a pass)" : ")"));
+            // marked on SKIP too: an optional layer this JDK cannot read still makes the run inconclusive
+            layers.get(layers.size() - 1).put("assessed", Boolean.FALSE);
+            return;
+        }
+        if (!mldsaVerify(pk, digest.getBytes(StandardCharsets.UTF_8), sig)) { add.accept("FAIL", "ml-dsa-65 co-signature invalid"); return; }
         if (expectedPQ.isEmpty()) { add.accept(required ? "FAIL" : "SKIP", "ml-dsa-65 co-signature valid against the key INSIDE the sidecar only (pq-present-unpinned)"); return; }
         add.accept("PASS", "pq-protected (ml-dsa-65, pinned key)");
     }
@@ -448,9 +468,17 @@ public class OeVerify {
         if (!hasPQ) pq = Boolean.FALSE;
         boolean integrity = false; for (Map<String, Object> l : layers) if ("pack-sha3".equals(l.get("layer")) && "PASS".equals(l.get("status"))) integrity = true;   // council r2
         signed = signed && integrity; trusted = trusted && integrity;
+        boolean anyAbsent = false, anyJudged = false;
+        for (Map<String, Object> l : layers) {
+            if (Boolean.FALSE.equals(l.get("assessed"))) anyAbsent = true;
+            if ("FAIL".equals(l.get("status")) && !Boolean.FALSE.equals(l.get("assessed"))) anyJudged = true;
+        }
+        boolean assessed = anyJudged || !anyAbsent;    // FAIL > NOT_ASSESSED > PASS, SKIP included
+        boolean passed = checked && valid && assessed && (!pqRequired || Boolean.TRUE.equals(pq));
         Map<String, Object> r = new LinkedHashMap<>();
-        r.put("valid", checked && valid); r.put("layers", layers); r.put("authenticated", trusted || signed); r.put("pq_protected", pq);
-        r.put("verdict", (checked && valid && (!pqRequired || Boolean.TRUE.equals(pq))) ? "PASS" : "FAIL");
+        r.put("valid", checked && valid); r.put("assessed", assessed); r.put("layers", layers);
+        r.put("authenticated", trusted || signed); r.put("pq_protected", pq);
+        r.put("verdict", passed ? "PASS" : (assessed ? "FAIL" : "NOT_ASSESSED"));
         r.put("verifier", "OeVerify (Java, JDK stdlib)");
         return r;
     }

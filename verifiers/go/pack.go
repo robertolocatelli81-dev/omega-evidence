@@ -29,6 +29,8 @@ type Layer struct {
 	Layer  string `json:"layer"`
 	Status string `json:"status"`
 	Detail string `json:"detail"`
+	// Assessed is nil for an ordinary layer and false when this runtime could not run the check at all.
+	Assessed *bool `json:"assessed,omitempty"`
 }
 
 type Receipt struct {
@@ -36,6 +38,7 @@ type Receipt struct {
 	Layers        []Layer `json:"layers"`
 	Authenticated bool    `json:"authenticated"`
 	PQProtected   *bool   `json:"pq_protected"`
+	Assessed      bool    `json:"assessed"`
 	Verdict       string  `json:"verdict"`
 	Verifier      string  `json:"verifier"`
 }
@@ -223,7 +226,7 @@ func sidecarPath(pack, suffix string) string {
 // layer); requirePQ requires a pinned, valid layer (through the trust registry).
 func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ bool) Receipt {
 	r := Receipt{Layers: []Layer{}, Verifier: "oeverify (Go, stdlib)"}
-	add := func(l, s, d string) { r.Layers = append(r.Layers, Layer{l, s, d}) }
+	add := func(l, s, d string) { r.Layers = append(r.Layers, Layer{l, s, d, nil}) }
 	pack, err := readObject(packPath)
 	if err != nil {
 		add("pack-json", "FAIL", err.Error())
@@ -400,7 +403,11 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 
 // checkPQ: the pinned tri-state (cryptovalid 0.13.0 / omega-evidence 0.7.0 rules).
 func checkPQ(r *Receipt, side *Object, digest, expectedPQ string, requirePQ bool) {
-	add := func(s, d string) { r.Layers = append(r.Layers, Layer{"pq-signature", s, d}) }
+	add := func(s, d string) { r.Layers = append(r.Layers, Layer{"pq-signature", s, d, nil}) }
+	// markAbsent flags the layer just added: it FAILED because THIS runtime lacks the capability, not because the
+	// pack is bad. Same split as the Python, Node and Java verifiers.
+	markAbsent := func() { f := false; r.Layers[len(r.Layers)-1].Assessed = &f }
+	knownPQ := map[string]bool{"ml-dsa-65": true, "slh-dsa-sha2-128s": true}
 	required := requirePQ || expectedPQ != ""
 	palg, has := str(side, "pq_sig_alg")
 	if !has || palg == "" {
@@ -425,6 +432,16 @@ func checkPQ(r *Receipt, side *Object, digest, expectedPQ string, requirePQ bool
 		} else {
 			add("SKIP", palg+" is not a registered PQ backend (pq-present-unverified)")
 		}
+		if knownPQ[palg] {
+			markAbsent() // also on SKIP: an optional layer this build cannot read still makes the run inconclusive
+		}
+		return
+	}
+	// FORM BEFORE CAPABILITY (24/09/2026): well-formedness needs no backend, so it is judged first. Probing the
+	// backend first handed a real defect of the artifact to the absence side on a build without ML-DSA.
+	pk, sig := b64Strict(pkB64, 1952), b64Strict(sigB64, 3309)
+	if pk == nil || sig == nil {
+		add("FAIL", "ml-dsa-65 co-signature is not strict base64 of the expected length (checked without a backend)")
 		return
 	}
 	if !PQSupported {
@@ -433,10 +450,10 @@ func checkPQ(r *Receipt, side *Object, digest, expectedPQ string, requirePQ bool
 		} else {
 			add("SKIP", "ml-dsa-65 present but this verifier was built with Go < 1.27 (pq-present-unverified)")
 		}
+		markAbsent()
 		return
 	}
-	pk, sig := b64Strict(pkB64, 1952), b64Strict(sigB64, 3309)
-	if pk == nil || sig == nil || !mldsaVerify(pk, []byte(digest), sig) {
+	if !mldsaVerify(pk, []byte(digest), sig) {
 		add("FAIL", "ml-dsa-65 co-signature invalid")
 		return
 	}
@@ -496,8 +513,22 @@ func finish(r Receipt, digest string, trusted, signed bool, force string, pqRequ
 		}
 	}
 	r.PQProtected = pq
+	// Total order FAIL > NOT_ASSESSED > PASS: an absence never hides a finding and never becomes a pass.
+	anyAbsent, anyJudged := false, false
+	for _, l := range r.Layers {
+		if l.Assessed != nil && !*l.Assessed {
+			anyAbsent = true
+		}
+		if l.Status == "FAIL" && (l.Assessed == nil || *l.Assessed) {
+			anyJudged = true
+		}
+	}
+	r.Assessed = anyJudged || !anyAbsent // FAIL > NOT_ASSESSED > PASS, SKIP included
 	r.Verdict = "FAIL"
-	if r.Valid && (!pqRequired || (pq != nil && *pq)) {
+	if !r.Assessed {
+		r.Verdict = "NOT_ASSESSED"
+	}
+	if r.Valid && r.Assessed && (!pqRequired || (pq != nil && *pq)) {
 		r.Verdict = "PASS"
 	}
 	if force != "" {

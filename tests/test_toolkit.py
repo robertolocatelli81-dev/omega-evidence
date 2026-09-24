@@ -21,6 +21,7 @@ from omega_evidence import (_ed25519_pure, agent, attestation, canonical,  # noq
                             chip_registry, cra, ledger, ots, pack,
                             preservation, signing, trust, verify_pack)
 from omega_evidence.interop import dsse, sdjwt  # noqa: E402
+from omega_evidence import verifier  # noqa: E402
 from omega_evidence.pqbackends import gate as pqgate  # noqa: E402
 
 
@@ -2310,6 +2311,65 @@ class TestMlDsaHybrid(unittest.TestCase):
             pp, idt, signer = self._hybrid(tmp)
             open(pp[:-5] + ".tsr.json", "w").write("[1]")
             v = verify_pack(pp); self.assertEqual(self._layer(v, "rfc3161")["status"], "FAIL"); self.assertFalse(v["valid"])
+
+
+class AbsenceSideOfTheVerdict(unittest.TestCase):
+    """A check this host could not run must not read as a finding about the pack.
+
+    Measured 24/09/2026 before the fix: with `--require-pq`, a host with no registered ML-DSA backend and a host
+    whose backend REJECTED the co-signature both produced `pq-signature` FAIL and exit 1 — the missing backend
+    reported with the same value as a broken signature. `valid` stays False in both (fail-closed); `assessed`
+    separates them.
+    """
+
+    def _layers(self, ret, alg="ml-dsa-65"):
+        side = {"pq_sig_alg": alg, "pq_public_key_b64": "AAAA", "pq_signature_b64": "BBBB"}
+        layers = []
+        with unittest.mock.patch.object(verifier, "verify_pq_alg", return_value=ret):
+            verifier._check_pq_cosignature(side, "deadbeef", layers, None, True)
+        return layers[0]
+
+    def test_a_missing_backend_for_a_known_algorithm_is_an_absence(self):
+        lay = self._layers(None)
+        self.assertEqual(lay["status"], "FAIL")                      # fail-closed: a required check that did not run
+        self.assertFalse(lay["assessed"])
+
+    def test_a_backend_that_rejects_is_a_judgment(self):
+        lay = self._layers(False)
+        self.assertEqual(lay["status"], "FAIL")
+        self.assertTrue(lay.get("assessed", True))
+
+    def test_an_unknown_algorithm_stays_a_judgment(self):
+        lay = self._layers(None, alg="not-a-real-pq-alg")
+        self.assertEqual(lay["status"], "FAIL")
+        self.assertTrue(lay.get("assessed", True), "an unknown name is not this host's missing capability")
+
+    def test_an_optional_layer_this_host_cannot_read_is_not_a_pass(self):
+        """The fail-open half of the same defect, measured 24/09/2026: with the PQ layer OPTIONAL and a co-signature
+        present but unverifiable here, a runtime without the backend answered PASS / exit 0 on the very pack a capable
+        runtime rejects with FAIL / exit 1. An absence must not become a pass, required or not."""
+        lay = self._layers(None)  # required path marks it; the optional path must mark it too
+        self.assertFalse(lay["assessed"])
+        side = {"pq_sig_alg": "ml-dsa-65", "pq_public_key_b64": "AAAA", "pq_signature_b64": "BBBB"}
+        layers = []
+        with unittest.mock.patch.object(verifier, "verify_pq_alg", return_value=None):
+            verifier._check_pq_cosignature(side, "deadbeef", layers, None, False)   # NOT required
+        self.assertEqual(layers[0]["status"], "SKIP")
+        self.assertFalse(layers[0]["assessed"], "an optional layer this host cannot read is still an absence")
+        roll = verifier._rollup([verifier._layer("pack-sha3", "PASS"), layers[0]])
+        self.assertTrue(roll["valid"])          # nothing adverse was found...
+        self.assertFalse(roll["assessed"])      # ...but the run is inconclusive, so the CLI must not print PASS
+
+    def test_the_rollup_does_not_let_an_absence_hide_a_finding(self):
+        absent = verifier._layer("pq-signature", "FAIL", "no backend here"); absent["assessed"] = False
+        only = verifier._rollup([verifier._layer("pack-sha3", "PASS"), absent])
+        self.assertFalse(only["valid"]); self.assertFalse(only["assessed"])
+        mixed = verifier._rollup([verifier._layer("pack-sha3", "FAIL", "digest mismatch"), absent])
+        self.assertFalse(mixed["valid"])
+        self.assertTrue(mixed["assessed"], "a tampered digest beside a missing backend is still a finding")
+        clean = verifier._rollup([verifier._layer("pack-sha3", "PASS")])
+        self.assertTrue(clean["valid"]); self.assertTrue(clean["assessed"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

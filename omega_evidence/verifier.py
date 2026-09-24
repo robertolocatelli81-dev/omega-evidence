@@ -32,6 +32,7 @@ A bare fabricated pack (no ledger, no signature) cannot pass. A SELF-MADE ledger
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import os
@@ -46,14 +47,27 @@ from .signing import verify_pq_alg, verify_signature
 from .trust import TrustRegistry
 
 
+# PQ algorithms this project implements a backend for. Membership does not mean a backend is LOADED here: that is the
+# point — a known algorithm with no loaded backend is an absence on this host, an unknown name is a judgment.
+KNOWN_PQ_ALGS = frozenset({"ml-dsa-65", "slh-dsa-sha2-128s"})
+
+
 def _layer(name: str, status: str, detail: str = "") -> Dict[str, str]:
     return {"layer": name, "status": status, "detail": detail}
 
 
 def _rollup(layers: List[Dict[str, str]]) -> Dict[str, Any]:
+    # A layer may carry assessed=False: it FAILED only because this host could not perform the check (no registered
+    # backend for a known PQ algorithm), not because the pack is bad. The roll-up says the run was inconclusive only
+    # when EVERY failing layer is of that kind — an absence must never hide a real finding on another layer.
+    # `valid` keeps its meaning and stays False either way: fail-closed, never a pass on a check that did not run.
     checked = [x for x in layers if x["status"] in ("PASS", "FAIL")]
     valid = bool(checked) and all(x["status"] == "PASS" for x in checked)
-    return {"valid": valid, "layers": layers,
+    judged = [x for x in layers if x["status"] == "FAIL" and x.get("assessed", True)]
+    absent = [x for x in layers if x.get("assessed") is False]
+    # FAIL > NOT_ASSESSED > PASS. An adverse finding wins; otherwise a check that could not run here makes the run
+    # inconclusive even if it was OPTIONAL, because a capable runtime may well reject what this one could not read.
+    return {"valid": valid, "assessed": bool(judged) or not absent, "layers": layers,
             "verified_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
@@ -150,6 +164,17 @@ def _check_timestamp(path: str, layers: List) -> str:
     return st
 
 
+def _b64_strict(v: Any) -> bool:
+    """Strict base64: no whitespace, no alternative alphabet, correct padding. Needs no cryptographic backend."""
+    if not isinstance(v, str) or not v:
+        return False
+    try:
+        base64.b64decode(v, validate=True)
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def _check_pq_cosignature(side: dict, digest: str, layers: List, expected_pq: Optional[str] = None,
                           require_pq: bool = False) -> Optional[bool]:
     """Report a post-quantum co-signature (hybrid pack) with PINNED semantics (0.7.0, the cryptovalid 0.13.0 rules):
@@ -175,11 +200,25 @@ def _check_pq_cosignature(side: dict, digest: str, layers: List, expected_pq: Op
     if expected_pq and pk != expected_pq:
         layers.append(_layer("pq-signature", "FAIL", f"{palg} co-signature by a key other than the pinned one"))
         return False
+    # FORM BEFORE CAPABILITY (24/09/2026): whether the co-signature is well-formed base64 is visible WITHOUT any
+    # backend, so it must be judged before the backend is probed. Probing first handed a real defect of the artifact
+    # to the absence side on hosts with no backend, while a capable host called the same bytes a FAIL.
+    if required and palg in KNOWN_PQ_ALGS and not (_b64_strict(pk) and _b64_strict(side.get("pq_signature_b64", ""))):
+        # Only for a REQUIRED layer of a KNOWN algorithm, whose encoding is defined: an optional layer keeps its SKIP
+        # contract, and a registered third-party backend may use an encoding of its own. Same scope as the Node, Java
+        # and Go verifiers, which apply their strict base64 inside the ml-dsa-65 branch.
+        layers.append(_layer("pq-signature", "FAIL", f"{palg} co-signature is not strict base64 (checked without a backend)"))
+        return False
     r = verify_pq_alg(palg, pk, side.get("pq_signature_b64", ""), digest.encode())
     if r is None:
-        layers.append(_layer("pq-signature", "FAIL" if required else "SKIP",
-                             f"{palg} is not a registered PQ backend (pq-present-unverified"
-                             + (": a required layer that cannot be checked is not a pass)" if required else ")")))
+        lay = _layer("pq-signature", "FAIL" if required else "SKIP",
+                     f"{palg} is not a registered PQ backend (pq-present-unverified"
+                     + (": a required layer that cannot be checked is not a pass)" if required else ")"))
+        if palg in KNOWN_PQ_ALGS:
+            # A PQ algorithm this project knows, with no backend registered HERE: the check did not run. Still FAIL
+            # (fail-closed), but marked so the roll-up does not report our missing backend as a finding about the pack.
+            lay["assessed"] = False
+        layers.append(lay)
         return None
     if not r:
         layers.append(_layer("pq-signature", "FAIL", f"{palg} co-signature invalid"))
@@ -384,9 +423,13 @@ def main(argv=None) -> int:
         if v is not None and (v == "" or v.startswith("-")):   # "" or a flag as a value would silently mean "not given" (one grammar in the four, 21/09/2026)
             p.error(f"--{flag.replace('_', '-')} needs a value (got {v!r})")
     r = verify_pack(a.pack, a.ledger, a.trust_store, a.expect_pq_key, a.require_pq)
-    r["verdict"] = "PASS" if r.get("valid") and (not (a.require_pq or a.expect_pq_key) or r.get("pq_protected") is True) else "FAIL"
+    # `assessed` gates PASS too: a run where a present layer could not be read here is inconclusive, not a pass.
+    passed = r.get("valid") and r.get("assessed", True) and (not (a.require_pq or a.expect_pq_key) or r.get("pq_protected") is True)
+    r["verdict"] = "PASS" if passed else ("FAIL" if r.get("assessed", True) else "NOT_ASSESSED")
     print(json.dumps(r, indent=1))
-    return 0 if r["verdict"] == "PASS" else 1
+    if r["verdict"] == "PASS":
+        return 0
+    return 1 if r["verdict"] == "FAIL" else 77   # 77 = nothing could be checked here, never "the pack is bad"
 
 
 if __name__ == "__main__":

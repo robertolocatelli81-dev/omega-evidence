@@ -198,7 +198,8 @@ function trustState(path) {
 }
 
 export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = "", requirePQ = false } = {}) {
-  const layers = []; const add = (layer, status, detail = "") => layers.push({ layer, status, detail });
+  const layers = [];
+  const add = (layer, status, detail = "", assessed = true) => layers.push(assessed ? { layer, status, detail } : { layer, status, detail, assessed });
   const required = requirePQ || Boolean(expectPQ);
   let pack;
   try { pack = readObject(packPath); } catch (e) { add("pack-json", "FAIL", e.message); return finish(layers, false, false, required); }
@@ -276,21 +277,34 @@ function mldsa65Verify(pk, msg, sig) {
   try { key = createPublicKey({ key: Buffer.concat([MLDSA65_SPKI_PREFIX, pk]), format: "der", type: "spki" }); } catch { return null; }
   try { return Boolean(edVerify(null, msg, key, sig)); } catch { return null; }
 }
+// PQ algorithms the project implements a backend for somewhere; membership does not mean THIS runtime has it.
+const KNOWN_PQ_ALGS = new Set(["ml-dsa-65", "slh-dsa-sha2-128s"]);
 export const MLDSA_SUPPORTED = (() => {
   try { createPublicKey({ key: Buffer.concat([MLDSA65_SPKI_PREFIX, Buffer.alloc(1952)]), format: "der", type: "spki" }); return true; } catch { return false; }
 })();
 function checkPQ(layers, side, expectPQ, requirePQ, digest) {
-  const add = (s, d) => layers.push({ layer: "pq-signature", status: s, detail: d });
+  // `assessed` defaults to true; a false here means THIS runtime could not run the check (see the two call sites).
+  const add = (s, d, assessed = true) => layers.push(assessed ? { layer: "pq-signature", status: s, detail: d } : { layer: "pq-signature", status: s, detail: d, assessed });
   const required = requirePQ || Boolean(expectPQ);
   if ("pq_sig_alg" in side && typeof side.pq_sig_alg !== "string") { add("FAIL", "pq_sig_alg is not a string"); return; }
   const palg = side.pq_sig_alg;
   if (!palg) { if (required) add("FAIL", "post-quantum layer required but absent (stripped or never signed)"); return; }
   if (expectPQ && side.pq_public_key_b64 !== expectPQ) { add("FAIL", palg + " co-signature by a key other than the pinned one"); return; }
-  if (palg !== "ml-dsa-65") { add(required ? "FAIL" : "SKIP", palg + " is not a registered PQ backend (pq-present-unverified" + (required ? ": a required layer that cannot be checked is not a pass)" : ")")); return; }
+  if (palg !== "ml-dsa-65") {
+    // Same split as the Python verifier: an algorithm the project knows but this runtime does not implement is an
+    // absence; a name nobody knows stays a judgment (it can never be pq-protected).
+    add(required ? "FAIL" : "SKIP", palg + " is not a registered PQ backend (pq-present-unverified" + (required ? ": a required layer that cannot be checked is not a pass)" : ")"), !KNOWN_PQ_ALGS.has(palg));
+    return;
+  }
   const pk = b64Strict(side.pq_public_key_b64, 1952), sig = b64Strict(side.pq_signature_b64, 3309);
   if (!pk || !sig) { add("FAIL", "ml-dsa-65 co-signature invalid"); return; }
   const ok = mldsa65Verify(pk, Buffer.from(digest, "utf-8"), sig);
-  if (ok === null) { add(required ? "FAIL" : "SKIP", "ml-dsa-65 present but NOT verified by this Node (OpenSSL < 3.5): use the Python, Go or Java verifier" + (required ? " — a required layer that cannot be checked is not a pass" : "")); return; }
+  if (ok === null) {
+    // This Node cannot run the check: FAIL when required (fail-closed), but marked so the roll-up does not report
+    // OUR missing capability as a finding about the pack. An unknown algorithm name, above, stays a judgment.
+    add(required ? "FAIL" : "SKIP", "ml-dsa-65 present but NOT verified by this Node (OpenSSL < 3.5): use the Python, Go or Java verifier" + (required ? " — a required layer that cannot be checked is not a pass" : ""), false);   // marked on SKIP too: an optional layer this Node cannot read still makes the run inconclusive
+    return;
+  }
   if (!ok) { add("FAIL", "ml-dsa-65 co-signature invalid"); return; }
   if (!expectPQ) { add(required ? "FAIL" : "SKIP", "ml-dsa-65 co-signature valid against the key INSIDE the sidecar only (pq-present-unpinned)" + (required ? "" : ": pin the signer's post-quantum key")); return; }
   add("PASS", "pq-protected (ml-dsa-65, pinned key)");
@@ -302,7 +316,11 @@ function finish(layers, trusted, signed, pqRequired) {
   const pqL = layers.find((l) => l.layer === "pq-signature");
   const pq = !pqL ? false : pqL.status === "PASS" ? true : pqL.status === "SKIP" ? null : false;
   const integrity = layers.some((l) => l.layer === "pack-sha3" && l.status === "PASS");   // council r2
-  return { valid, layers, authenticated: (trusted || signed) && integrity, pq_protected: pq, verdict: valid && (!pqRequired || pq === true) ? "PASS" : "FAIL", verifier: "oeverify.mjs (Node stdlib; ML-DSA-65 " + (MLDSA_SUPPORTED ? "verified through OpenSSL >= 3.5" : "not verifiable on this Node") + ")" };
+  const judged = layers.some((l) => l.status === "FAIL" && l.assessed !== false);
+  const absent = layers.some((l) => l.assessed === false);
+  const assessed = judged || !absent;                 // FAIL > NOT_ASSESSED > PASS, SKIP included
+  const passed = valid && assessed && (!pqRequired || pq === true);
+  return { valid, assessed, layers, authenticated: (trusted || signed) && integrity, pq_protected: pq, verdict: passed ? "PASS" : (assessed ? "FAIL" : "NOT_ASSESSED"), verifier: "oeverify.mjs (Node stdlib; ML-DSA-65 " + (MLDSA_SUPPORTED ? "verified through OpenSSL >= 3.5" : "not verifiable on this Node") + ")" };
 }
 
 function main(argv) {
@@ -323,6 +341,6 @@ function main(argv) {
   if (!pack) usage();
   const r = verifyPack(pack, { ledger: opts["--ledger"] ?? "", trustStore: opts["--trust-store"] ?? "", expectPQ: opts["--expect-pq-key"] ?? "", requirePQ: Boolean(opts["--require-pq"]) });
   console.log(JSON.stringify(r, null, 1));
-  process.exit(r.verdict === "PASS" ? 0 : 1);
+  process.exit(r.verdict === "PASS" ? 0 : r.verdict === "FAIL" ? 1 : 77);   // 77 = nothing adverse found, the check did not run here
 }
 if (process.argv[1] && process.argv[1].endsWith("oeverify.mjs")) main(process.argv.slice(2));
