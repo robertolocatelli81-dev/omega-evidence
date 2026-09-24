@@ -66,5 +66,8 @@ func main() {
 	if r.Verdict == "PASS" {
 		os.Exit(0)
 	}
+	if r.Verdict == "NOT_ASSESSED" {
+		os.Exit(77) // nothing adverse was found, and a required check could not run on this runtime
+	}
 	os.Exit(1)
 }

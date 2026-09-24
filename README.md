@@ -222,13 +222,51 @@ phase for agent records — they are observability and security-event schemas, n
 
 ## Independent verifiers (Go, Java, Node) and the differential oracle
 
+### The absence side of the verdict
+
+A check that could not run is not a finding about the pack. The **CLI** reports three verdicts, with a total order
+`FAIL > NOT_ASSESSED > PASS` (the library returns `valid` and `assessed`; `verdict` is the CLI's rendering of the pair):
+
+| `verdict` | exit | meaning |
+|---|---|---|
+| `PASS` | 0 | every layer that ran passed |
+| `FAIL` | 1 | at least one layer was checked and is adverse |
+| `NOT_ASSESSED` | 77 | nothing adverse was found, and a required check could not run on this host |
+
+This applies to a check that was **required**: an optional PQ layer stays `SKIP` and does not feed the verdict, so a
+malformed optional co-signature can still leave a pack at `PASS` on a runtime without the backend while a runtime with
+it says `FAIL` — that contract predates this change and is unchanged here. Whether the artifact is well-formed is
+judged before the backend is probed, because that needs no backend: a co-signature that is not strict base64 is a
+`FAIL` on every runtime, capable or not.
+
+`valid` stays false under `NOT_ASSESSED` (fail-closed: a check that did not run is never a pass), and a layer carries
+`assessed: false` when it failed only because this runtime lacks the capability — today, a known PQ algorithm with no
+backend registered here. An **unknown** algorithm name stays a judgment: it can never be pq-protected. An absence
+never hides a finding: one adverse layer beside a missing backend still gives `FAIL`.
+
+Measured 24/09/2026, the same `OeVerify.java` on the same signed pack with `-require-pq`: on JDK 17, which has no
+ML-DSA, `NOT_ASSESSED` / exit 77; on JDK 27, which has it, `FAIL` / exit 1 — because there the co-signature really is
+invalid. Before this change both answered `FAIL`, and the first of the two was declaring a defect it had not checked.
+
+All four verifiers carry the same split, and agree on it (measured on one signed pack with `--require-pq`):
+
+| `pq_sig_alg` | Python | Node | Java 27 | Go 1.27 |
+|---|---|---|---|---|
+| `slh-dsa-sha2-128s` — known to the project, no backend in any of these runtimes | `NOT_ASSESSED` / 77 | `NOT_ASSESSED` / 77 | `NOT_ASSESSED` / 77 | `NOT_ASSESSED` / 77 |
+| an unknown name — never pq-protected, so a judgment | `FAIL` / 1 | `FAIL` / 1 | `FAIL` / 1 | `FAIL` / 1 |
+| `ml-dsa-65` with a backend present — the co-signature is really invalid | `FAIL` / 1 | `FAIL` / 1 | `FAIL` / 1 | `FAIL` / 1 |
+
+
+
 `verifiers/` holds three stdlib-only re-implementations of the pack verifier — Go (`verifiers/go`, `crypto/mldsa`
 for ML-DSA-65 with Go ≥ 1.27), Java (`verifiers/java/OeVerify.java`, JDK 24+ for ML-DSA-65, single file) and Node
 (`verifiers/js/oeverify.mjs`: Ed25519, SHA3 and — since 0.8.0 — **ML-DSA-65 through the Node build's OpenSSL ≥ 3.5**,
 feature-detected: the raw key is wrapped in a SubjectPublicKeyInfo and checked with `crypto.verify`, measured on Node
 24.21.0 and 22.23.2; on an older OpenSSL the layer is reported present-but-unverified, never true) — plus
 `verifiers/differential_oracle.py`, which builds packs, sidecars, ledgers and trust registries with the toolkit and
-demands the same `(verdict, pq_protected, authenticated)` from Python, Go, Java and Node on every case (tampered
+demands the same `(verdict, pq_protected, authenticated)` from Python, Go, Java and Node on every case — except from
+a verifier that answers `NOT_ASSESSED`, which is neither agreement nor disagreement and is reported with its own
+denominator (24/09/2026: counting it as agreement is how a shared incapacity used to read as consensus) — (tampered
 packs, lenient base64, uppercase digests, unknown or non-string algorithms, classical algorithm declared as PQ,
 overclaimed or missing `honest_scope`, duplicate keys, floats, nesting beyond 512, lone surrogates, non-UTF-8,
 empty / unrelated / tampered / float ledgers, rotated and revoked signers, stripped / foreign / invalid post-quantum

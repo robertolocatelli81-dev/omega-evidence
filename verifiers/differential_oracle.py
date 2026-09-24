@@ -97,6 +97,13 @@ def build_cases(d):
     P.add_pq_signature(up, "ml-dsa-65", base64.b64encode(b"\x01" * 1952).decode(), base64.b64encode(b"\x02" * 3309).decode())
     cases["sig-digest-upper-signed-with-pq"] = (up, [], None)
     cases["unsigned-required-pq"] = (cases["anchored"][0], ["--require-pq"], None)   # r14: anchored (PASS without the flag) — a verifier ignoring the requirement says PASS
+    # 24/09/2026 — a HOST-SIDE case. A signed pack carrying a ml-dsa-65 co-signature, with the layer REQUIRED: a
+    # verifier whose runtime has an ML-DSA backend reaches a verdict on it, one whose runtime has none cannot. Before
+    # the absence side was separated, both answered FAIL and the oracle read that as agreement — a shared incapacity
+    # looking like consensus. Now the second says NOT_ASSESSED and is reported rather than counted as agreeing.
+    hp = mk("pq-required-host-side"); P.sign_pack(hp, idt)
+    P.add_pq_signature(hp, "ml-dsa-65", base64.b64encode(b"\x03" * 1952).decode(), base64.b64encode(b"\x04" * 3309).decode())
+    cases["pq-required-host-side"] = (hp, ["--require-pq"], None)
     # honest scope variants and pack shapes — every one ANCHORED with the hash a lenient verifier would accept (review r2,
     # Opus: a bare pack is FAIL whatever the verifier does with floats / duplicate keys / depth / scope, so the case could
     # not fail); hashes computed with json.dumps directly where the toolkit itself refuses the content
@@ -300,18 +307,45 @@ def main():
         print("  js verifier NOT measured (no node)")
     print(f"differential oracle over {len(avail)} pack verifiers: {sorted(avail)}")
     cases = build_cases(tmp)
-    diffs = declared = 0
+    # Which runtimes can actually run the ML-DSA check? Probed, not assumed: a pack whose PQ co-signature is genuinely
+    # VALID and pinned. A runtime that reaches pq_protected=True on it is capable, so a later NOT_ASSESSED from it is a
+    # wrong verdict, not an absence. Without the probe (no cryptography >= 48 here) nobody is called capable, which is
+    # the conservative direction: it can miss a wrong NOT_ASSESSED, never invent one.
+    capable = {}
+    if "hybrid-expected-key" in cases:
+        hp, hf, _ = cases["hybrid-expected-key"]
+        for k, cmd in avail.items():
+            r = run(cmd, hp, hf, k in ("go", "java"))
+            capable[k] = isinstance(r, tuple) and len(r) > 1 and r[1] is True
+        print("  ML-DSA capable runtimes (probed on a valid pinned co-signature): "
+              + ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in sorted(capable.items())))
+    diffs = declared = inconclusive = 0
     for name, (path, flags, decl) in cases.items():
         res = {k: run(cmd, path, flags, k in ("go", "java")) for k, cmd in avail.items()}
-        ref = res.get("python")
-        bad = {k: v for k, v in res.items() if v != ref}
+        # NOT_ASSESSED is neither agreement nor disagreement (24/09/2026): a verifier whose host cannot run a required
+        # check has no verdict to compare, and counting it as agreement is how a shared incapacity used to read as
+        # consensus. It is excluded from the comparison and reported with its own denominator.
+        unassessed = {k: v for k, v in res.items() if isinstance(v, tuple) and v and v[0] == "NOT_ASSESSED"}
+        # ...but only from a runtime that really cannot run the check. A CAPABLE runtime answering NOT_ASSESSED is a
+        # disagreement, not an excuse: excusing it would let "I could not look" hide a wrong verdict (24/09/2026).
+        wrongly = {k: v for k, v in unassessed.items() if capable.get(k)}
+        unassessed = {k: v for k, v in unassessed.items() if k not in wrongly}
+        comparable = {k: v for k, v in res.items() if k not in unassessed}
+        if unassessed:
+            inconclusive += 1
+        ref = comparable.get("python")
+        bad = {k: v for k, v in comparable.items() if v != ref} if ref is not None else {}
+        bad.update(wrongly)
         if bad and decl and all(k in decl and decl[k] == v for k, v in bad.items()):
             declared += 1
             print(f"  [DECL] {name:34} {res}  <- declared: this Node has no ML-DSA (OpenSSL < 3.5)")
             continue
         if bad:
             diffs += 1
-        print(f"  [{'OK ' if not bad else 'DIFF'}] {name:34} {res}")
+        tag = "OK " if not bad else "DIFF"
+        if unassessed and not bad:
+            tag = "N/A"
+        print(f"  [{tag}] {name:34} {res}" + (f"  <- not assessed by {sorted(unassessed)}" if unassessed else ""))
     # CLI grammar (21/09/2026, found on cra-evidence): an unknown flag, a value flag without a value / with "" / with a flag as
     # value, an abbreviation, a second positional = usage error (exit 2, no verdict) in EVERY CLI — never a verdict with the
     # constraint silently dropped (Node gave a verdict on all of them)
@@ -356,7 +390,8 @@ def main():
         if not ok:
             diffs += 1
         print(f"  [{'OK ' if ok else 'DIFF'}] {name:34} expect {want if want != 'usage' else 'usage(exit 2)'}: {row}")
-    print(f"disagreements: {diffs}/{len(cases) + len(cli)} (declared Node divergences: {declared})")
+    print(f"disagreements: {diffs}/{len(cases) + len(cli)} (declared Node divergences: {declared}; "
+          f"cases with a verifier that could not assess: {inconclusive})")
     shutil.rmtree(tmp, ignore_errors=True)
     return 1 if diffs else 0
 
