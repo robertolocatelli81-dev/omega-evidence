@@ -63,9 +63,11 @@ def _rollup(layers: List[Dict[str, str]]) -> Dict[str, Any]:
     # `valid` keeps its meaning and stays False either way: fail-closed, never a pass on a check that did not run.
     checked = [x for x in layers if x["status"] in ("PASS", "FAIL")]
     valid = bool(checked) and all(x["status"] == "PASS" for x in checked)
-    failing = [x for x in layers if x["status"] == "FAIL"]
-    judged = [x for x in failing if x.get("assessed", True)]
-    return {"valid": valid, "assessed": (not failing) or bool(judged), "layers": layers,
+    judged = [x for x in layers if x["status"] == "FAIL" and x.get("assessed", True)]
+    absent = [x for x in layers if x.get("assessed") is False]
+    # FAIL > NOT_ASSESSED > PASS. An adverse finding wins; otherwise a check that could not run here makes the run
+    # inconclusive even if it was OPTIONAL, because a capable runtime may well reject what this one could not read.
+    return {"valid": valid, "assessed": bool(judged) or not absent, "layers": layers,
             "verified_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
@@ -212,7 +214,7 @@ def _check_pq_cosignature(side: dict, digest: str, layers: List, expected_pq: Op
         lay = _layer("pq-signature", "FAIL" if required else "SKIP",
                      f"{palg} is not a registered PQ backend (pq-present-unverified"
                      + (": a required layer that cannot be checked is not a pass)" if required else ")"))
-        if required and palg in KNOWN_PQ_ALGS:
+        if palg in KNOWN_PQ_ALGS:
             # A PQ algorithm this project knows, with no backend registered HERE: the check did not run. Still FAIL
             # (fail-closed), but marked so the roll-up does not report our missing backend as a finding about the pack.
             lay["assessed"] = False
@@ -421,7 +423,8 @@ def main(argv=None) -> int:
         if v is not None and (v == "" or v.startswith("-")):   # "" or a flag as a value would silently mean "not given" (one grammar in the four, 21/09/2026)
             p.error(f"--{flag.replace('_', '-')} needs a value (got {v!r})")
     r = verify_pack(a.pack, a.ledger, a.trust_store, a.expect_pq_key, a.require_pq)
-    passed = r.get("valid") and (not (a.require_pq or a.expect_pq_key) or r.get("pq_protected") is True)
+    # `assessed` gates PASS too: a run where a present layer could not be read here is inconclusive, not a pass.
+    passed = r.get("valid") and r.get("assessed", True) and (not (a.require_pq or a.expect_pq_key) or r.get("pq_protected") is True)
     r["verdict"] = "PASS" if passed else ("FAIL" if r.get("assessed", True) else "NOT_ASSESSED")
     print(json.dumps(r, indent=1))
     if r["verdict"] == "PASS":

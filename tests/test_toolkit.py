@@ -2344,6 +2344,22 @@ class AbsenceSideOfTheVerdict(unittest.TestCase):
         self.assertEqual(lay["status"], "FAIL")
         self.assertTrue(lay.get("assessed", True), "an unknown name is not this host's missing capability")
 
+    def test_an_optional_layer_this_host_cannot_read_is_not_a_pass(self):
+        """The fail-open half of the same defect, measured 24/09/2026: with the PQ layer OPTIONAL and a co-signature
+        present but unverifiable here, a runtime without the backend answered PASS / exit 0 on the very pack a capable
+        runtime rejects with FAIL / exit 1. An absence must not become a pass, required or not."""
+        lay = self._layers(None)  # required path marks it; the optional path must mark it too
+        self.assertFalse(lay["assessed"])
+        side = {"pq_sig_alg": "ml-dsa-65", "pq_public_key_b64": "AAAA", "pq_signature_b64": "BBBB"}
+        layers = []
+        with unittest.mock.patch.object(verifier, "verify_pq_alg", return_value=None):
+            verifier._check_pq_cosignature(side, "deadbeef", layers, None, False)   # NOT required
+        self.assertEqual(layers[0]["status"], "SKIP")
+        self.assertFalse(layers[0]["assessed"], "an optional layer this host cannot read is still an absence")
+        roll = verifier._rollup([verifier._layer("pack-sha3", "PASS"), layers[0]])
+        self.assertTrue(roll["valid"])          # nothing adverse was found...
+        self.assertFalse(roll["assessed"])      # ...but the run is inconclusive, so the CLI must not print PASS
+
     def test_the_rollup_does_not_let_an_absence_hide_a_finding(self):
         absent = verifier._layer("pq-signature", "FAIL", "no backend here"); absent["assessed"] = False
         only = verifier._rollup([verifier._layer("pack-sha3", "PASS"), absent])

@@ -233,11 +233,15 @@ A check that could not run is not a finding about the pack. The **CLI** reports 
 | `FAIL` | 1 | at least one layer was checked and is adverse |
 | `NOT_ASSESSED` | 77 | nothing adverse was found, and a required check could not run on this host |
 
-This applies to a check that was **required**: an optional PQ layer stays `SKIP` and does not feed the verdict, so a
-malformed optional co-signature can still leave a pack at `PASS` on a runtime without the backend while a runtime with
-it says `FAIL` — that contract predates this change and is unchanged here. Whether the artifact is well-formed is
-judged before the backend is probed, because that needs no backend: a co-signature that is not strict base64 is a
-`FAIL` on every runtime, capable or not.
+This holds whether the check was **required or optional**. Measured 24/09/2026: with the PQ layer optional and a
+co-signature present but unverifiable here, a runtime without the backend used to answer `PASS` / exit 0 on the very
+pack a capable runtime rejects with `FAIL` / exit 1 — an absence turning into a pass, which is the fail-open half of
+the same defect. A present layer this runtime cannot read now marks the run `NOT_ASSESSED` even when it is optional,
+so exit 0 means "checked, and nothing adverse", never "did not look". A layer that is genuinely absent from the pack
+changes nothing: there was nothing to read.
+
+Whether the artifact is well-formed is judged before the backend is probed, because that needs no backend: a
+required co-signature of a known algorithm that is not strict base64 is a `FAIL` on every runtime, capable or not.
 
 `valid` stays false under `NOT_ASSESSED` (fail-closed: a check that did not run is never a pass), and a layer carries
 `assessed: false` when it failed only because this runtime lacks the capability — today, a known PQ algorithm with no

@@ -429,11 +429,11 @@ func checkPQ(r *Receipt, side *Object, digest, expectedPQ string, requirePQ bool
 	if palg != "ml-dsa-65" {
 		if required {
 			add("FAIL", palg+" is not a registered PQ backend (pq-present-unverified: a required layer that cannot be checked is not a pass)")
-			if knownPQ[palg] {
-				markAbsent()
-			}
 		} else {
 			add("SKIP", palg+" is not a registered PQ backend (pq-present-unverified)")
+		}
+		if knownPQ[palg] {
+			markAbsent() // also on SKIP: an optional layer this build cannot read still makes the run inconclusive
 		}
 		return
 	}
@@ -447,10 +447,10 @@ func checkPQ(r *Receipt, side *Object, digest, expectedPQ string, requirePQ bool
 	if !PQSupported {
 		if required {
 			add("FAIL", "ml-dsa-65 present but this verifier was built with Go < 1.27 (pq-present-unverified: not a pass)")
-			markAbsent()
 		} else {
 			add("SKIP", "ml-dsa-65 present but this verifier was built with Go < 1.27 (pq-present-unverified)")
 		}
+		markAbsent()
 		return
 	}
 	if !mldsaVerify(pk, []byte(digest), sig) {
@@ -514,21 +514,21 @@ func finish(r Receipt, digest string, trusted, signed bool, force string, pqRequ
 	}
 	r.PQProtected = pq
 	// Total order FAIL > NOT_ASSESSED > PASS: an absence never hides a finding and never becomes a pass.
-	anyFailing, anyJudged := false, false
+	anyAbsent, anyJudged := false, false
 	for _, l := range r.Layers {
-		if l.Status == "FAIL" {
-			anyFailing = true
-			if l.Assessed == nil || *l.Assessed {
-				anyJudged = true
-			}
+		if l.Assessed != nil && !*l.Assessed {
+			anyAbsent = true
+		}
+		if l.Status == "FAIL" && (l.Assessed == nil || *l.Assessed) {
+			anyJudged = true
 		}
 	}
-	r.Assessed = !anyFailing || anyJudged
+	r.Assessed = anyJudged || !anyAbsent // FAIL > NOT_ASSESSED > PASS, SKIP included
 	r.Verdict = "FAIL"
 	if !r.Assessed {
 		r.Verdict = "NOT_ASSESSED"
 	}
-	if r.Valid && (!pqRequired || (pq != nil && *pq)) {
+	if r.Valid && r.Assessed && (!pqRequired || (pq != nil && *pq)) {
 		r.Verdict = "PASS"
 	}
 	if force != "" {

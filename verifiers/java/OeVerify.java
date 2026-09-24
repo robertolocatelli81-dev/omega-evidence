@@ -438,7 +438,7 @@ public class OeVerify {
             // Same split as the Python verifier: a PQ algorithm the project knows but this runtime does not implement
             // is an absence; a name nobody knows stays a judgment (it can never be pq-protected).
             add.accept(required ? "FAIL" : "SKIP", palg + " is not a registered PQ backend (pq-present-unverified" + (required ? ": a required layer that cannot be checked is not a pass)" : ")"));
-            if (required && KNOWN_PQ_ALGS.contains(palg)) layers.get(layers.size() - 1).put("assessed", Boolean.FALSE);
+            if (KNOWN_PQ_ALGS.contains(palg)) layers.get(layers.size() - 1).put("assessed", Boolean.FALSE);
             return;
         }
         // FORM BEFORE CAPABILITY (24/09/2026): well-formedness needs no backend, so it is judged first. Probing the
@@ -449,7 +449,8 @@ public class OeVerify {
             // This JDK cannot run the check: FAIL when required (fail-closed), but marked so the roll-up does not
             // report OUR missing capability as a finding about the pack. An unknown algorithm name stays a judgment.
             add.accept(required ? "FAIL" : "SKIP", "ml-dsa-65 present but this JDK has no ML-DSA (pq-present-unverified" + (required ? ": not a pass)" : ")"));
-            if (required) layers.get(layers.size() - 1).put("assessed", Boolean.FALSE);
+            // marked on SKIP too: an optional layer this JDK cannot read still makes the run inconclusive
+            layers.get(layers.size() - 1).put("assessed", Boolean.FALSE);
             return;
         }
         if (!mldsaVerify(pk, digest.getBytes(StandardCharsets.UTF_8), sig)) { add.accept("FAIL", "ml-dsa-65 co-signature invalid"); return; }
@@ -467,11 +468,13 @@ public class OeVerify {
         if (!hasPQ) pq = Boolean.FALSE;
         boolean integrity = false; for (Map<String, Object> l : layers) if ("pack-sha3".equals(l.get("layer")) && "PASS".equals(l.get("status"))) integrity = true;   // council r2
         signed = signed && integrity; trusted = trusted && integrity;
-        boolean anyFailing = false, anyJudged = false;
-        for (Map<String, Object> l : layers)
-            if ("FAIL".equals(l.get("status"))) { anyFailing = true; if (!Boolean.FALSE.equals(l.get("assessed"))) anyJudged = true; }
-        boolean assessed = !anyFailing || anyJudged;   // an absence never hides a finding, and never becomes a pass
-        boolean passed = checked && valid && (!pqRequired || Boolean.TRUE.equals(pq));
+        boolean anyAbsent = false, anyJudged = false;
+        for (Map<String, Object> l : layers) {
+            if (Boolean.FALSE.equals(l.get("assessed"))) anyAbsent = true;
+            if ("FAIL".equals(l.get("status")) && !Boolean.FALSE.equals(l.get("assessed"))) anyJudged = true;
+        }
+        boolean assessed = anyJudged || !anyAbsent;    // FAIL > NOT_ASSESSED > PASS, SKIP included
+        boolean passed = checked && valid && assessed && (!pqRequired || Boolean.TRUE.equals(pq));
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("valid", checked && valid); r.put("assessed", assessed); r.put("layers", layers);
         r.put("authenticated", trusted || signed); r.put("pq_protected", pq);

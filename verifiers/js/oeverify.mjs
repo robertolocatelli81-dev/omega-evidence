@@ -293,7 +293,7 @@ function checkPQ(layers, side, expectPQ, requirePQ, digest) {
   if (palg !== "ml-dsa-65") {
     // Same split as the Python verifier: an algorithm the project knows but this runtime does not implement is an
     // absence; a name nobody knows stays a judgment (it can never be pq-protected).
-    add(required ? "FAIL" : "SKIP", palg + " is not a registered PQ backend (pq-present-unverified" + (required ? ": a required layer that cannot be checked is not a pass)" : ")"), !(required && KNOWN_PQ_ALGS.has(palg)));
+    add(required ? "FAIL" : "SKIP", palg + " is not a registered PQ backend (pq-present-unverified" + (required ? ": a required layer that cannot be checked is not a pass)" : ")"), !KNOWN_PQ_ALGS.has(palg));
     return;
   }
   const pk = b64Strict(side.pq_public_key_b64, 1952), sig = b64Strict(side.pq_signature_b64, 3309);
@@ -302,7 +302,7 @@ function checkPQ(layers, side, expectPQ, requirePQ, digest) {
   if (ok === null) {
     // This Node cannot run the check: FAIL when required (fail-closed), but marked so the roll-up does not report
     // OUR missing capability as a finding about the pack. An unknown algorithm name, above, stays a judgment.
-    add(required ? "FAIL" : "SKIP", "ml-dsa-65 present but NOT verified by this Node (OpenSSL < 3.5): use the Python, Go or Java verifier" + (required ? " — a required layer that cannot be checked is not a pass" : ""), false);
+    add(required ? "FAIL" : "SKIP", "ml-dsa-65 present but NOT verified by this Node (OpenSSL < 3.5): use the Python, Go or Java verifier" + (required ? " — a required layer that cannot be checked is not a pass" : ""), false);   // marked on SKIP too: an optional layer this Node cannot read still makes the run inconclusive
     return;
   }
   if (!ok) { add("FAIL", "ml-dsa-65 co-signature invalid"); return; }
@@ -316,9 +316,10 @@ function finish(layers, trusted, signed, pqRequired) {
   const pqL = layers.find((l) => l.layer === "pq-signature");
   const pq = !pqL ? false : pqL.status === "PASS" ? true : pqL.status === "SKIP" ? null : false;
   const integrity = layers.some((l) => l.layer === "pack-sha3" && l.status === "PASS");   // council r2
-  const failing = layers.filter((l) => l.status === "FAIL");
-  const assessed = failing.length === 0 || failing.some((l) => l.assessed !== false);
-  const passed = valid && (!pqRequired || pq === true);
+  const judged = layers.some((l) => l.status === "FAIL" && l.assessed !== false);
+  const absent = layers.some((l) => l.assessed === false);
+  const assessed = judged || !absent;                 // FAIL > NOT_ASSESSED > PASS, SKIP included
+  const passed = valid && assessed && (!pqRequired || pq === true);
   return { valid, assessed, layers, authenticated: (trusted || signed) && integrity, pq_protected: pq, verdict: passed ? "PASS" : (assessed ? "FAIL" : "NOT_ASSESSED"), verifier: "oeverify.mjs (Node stdlib; ML-DSA-65 " + (MLDSA_SUPPORTED ? "verified through OpenSSL >= 3.5" : "not verifiable on this Node") + ")" };
 }
 
