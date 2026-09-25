@@ -10,20 +10,77 @@
 package oeverify
 
 import (
-	"bufio"
+	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/sha3"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 )
 
 const Genesis = "0000000000000000000000000000000000000000000000000000000000000000"
+
+// MaxInputBytes bounds every file this verifier reads (pack, sidecars, ledger, trust store — and so any ledger line):
+// the same number in the four verifiers (25/09/2026). It replaces the 64 MiB bufio.Scanner line buffer, which was an
+// undeclared bound on a ledger line only (a longer line was FAIL here and PASS in Python and Java).
+const MaxInputBytes = 64 << 20
+
+// InjectEnv is the test hook of the four verifiers (README): set to "1" it raises an internal error after pack-sha3.
+const InjectEnv = "OEVERIFY_INJECT_INTERNAL_ERROR"
+
+// readInput reads one verifier input (25/09/2026, NEMESIS: a FIFO in place of a sidecar blocked the four verifiers, a
+// symlink to /dev/zero exhausted memory): opened O_NONBLOCK so a FIFO does not block the open, accepted only if the
+// OPENED file is regular, read to at most MaxInputBytes+1 bytes. Every refusal is an error, reported by the caller as it
+// reports an unreadable file.
+// small-order / non-canonical Ed25519 keys (R=identity, S=0 verifies on every message; OpenSSL accepts it, measured 25/09/2026) — same list as omega_evidence/signing.py WEAK_ED25519_KEYS
+var weakEd25519Keys = map[string]bool{"0100000000000000000000000000000000000000000000000000000000000000": true, "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f": true, "0000000000000000000000000000000000000000000000000000000000000000": true, "0000000000000000000000000000000000000000000000000000000000000080": true, "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05": true, "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a": true, "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85": true, "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa": true, "0100000000000000000000000000000000000000000000000000000000000080": true, "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff": true}
+
+func weakEd25519(pk []byte) bool {
+	if len(pk) != 32 || weakEd25519Keys[hex.EncodeToString(pk)] {
+		return true
+	}
+	if pk[31]&0x7f != 0x7f || pk[0] < 0xed {
+		return false
+	}
+	for i := 1; i < 31; i++ {
+		if pk[i] != 0xff {
+			return false
+		}
+	}
+	return true
+}
+
+func readInput(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: not a regular file", path)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, MaxInputBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > MaxInputBytes {
+		return nil, fmt.Errorf("%s: input exceeds %d bytes", path, MaxInputBytes)
+	}
+	return b, nil
+}
 
 type Layer struct {
 	Layer  string `json:"layer"`
@@ -92,11 +149,15 @@ func str(o *Object, k string) (string, bool) {
 }
 
 func readObject(path string) (*Object, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := readInput(path)
 	if err != nil {
 		return nil, err
 	}
-	v, err := Parse([]byte(strings.Trim(string(raw), " \t\r\n")))
+	return objectOf(raw)
+}
+
+func objectOf(raw []byte) (*Object, error) {
+	v, err := Parse(bytes.Trim(raw, " \t\r\n"))
 	if err != nil {
 		return nil, err
 	}
@@ -110,17 +171,13 @@ func readObject(path string) (*Object, error) {
 // ledgerEntries verifies the strict chain (LF lines, blank = space/tab/CR, strict JSON, sequential idx,
 // content → self_hash → prev link) and returns the parsed entries when the chain holds.
 func ledgerEntries(path string) ([]*Object, bool) {
-	f, err := os.Open(path)
+	data, err := readInput(path) // bounded, non-blocking, regular file only
 	if err != nil {
 		return nil, false
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 64<<20)
 	prev, n, ok := Genesis, 0, true
 	var out []*Object
-	for sc.Scan() {
-		raw := sc.Bytes()
+	for _, raw := range bytes.Split(data, []byte("\n")) { // LF lines; a CR before the LF is JSON whitespace (and blank below)
 		blank := true
 		for _, c := range raw {
 			if c != ' ' && c != '\t' && c != '\r' {
@@ -151,9 +208,6 @@ func ledgerEntries(path string) ([]*Object, bool) {
 		}
 		out = append(out, e)
 		n++
-	}
-	if sc.Err() != nil {
-		ok = false
 	}
 	return out, ok
 }
@@ -224,13 +278,41 @@ func sidecarPath(pack, suffix string) string {
 
 // VerifyPack mirrors omega_evidence.verifier.verify_pack. expectedPQ pins the ML-DSA-65 key (and requires the
 // layer); requirePQ requires a pinned, valid layer (through the trust registry).
-func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ bool) Receipt {
-	r := Receipt{Layers: []Layer{}, Verifier: "oeverify (Go, stdlib)"}
+func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ bool) (out Receipt) {
+	r := &Receipt{Layers: []Layer{}, Verifier: "oeverify (Go, stdlib)"}
+	defer func() {
+		if p := recover(); p != nil {
+			out = InternalError(r.Layers, fmt.Sprintf("%T", p))
+		}
+	}()
+	return verifyPack(r, packPath, ledgerPath, trustStore, expectedPQ, requirePQ)
+}
+
+// InternalError: a fault of the TOOL is not a finding about the pack (25/09/2026). The layer "internal" is FAIL with
+// assessed=false, so the run is NOT_ASSESSED (exit 77) unless a layer judged before the fault is adverse; never
+// authenticated, never pq-protected. Before, a panic exited 2 — the code of a usage error. A runtime out-of-memory is a
+// fatal error in Go, not a panic: the input bound is what keeps it away.
+func InternalError(layers []Layer, what string) Receipt {
+	f := false
+	r := Receipt{Layers: append(append([]Layer{}, layers...), Layer{"internal", "FAIL", "verifier error, not a finding about the pack: " + what, &f}),
+		Verifier: "oeverify (Go, stdlib)"}
+	r = finish(r, "", false, false, "", false)
+	r.Authenticated = false
+	r.PQProtected = &f
+	return r
+}
+
+func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string, requirePQ bool) Receipt {
+	r := rp
 	add := func(l, s, d string) { r.Layers = append(r.Layers, Layer{l, s, d, nil}) }
-	pack, err := readObject(packPath)
+	packBytes, err := readInput(packPath) // read ONCE: the timestamp binding hashes these bytes, not a second read
+	var pack *Object
+	if err == nil {
+		pack, err = objectOf(packBytes)
+	}
 	if err != nil {
 		add("pack-json", "FAIL", err.Error())
-		return finish(r, "", false, false, "FAIL", false)
+		return finish(*r, "", false, false, "FAIL", false)
 	}
 	add("pack-json", "PASS", "")
 	scope, _ := str(pack, "honest_scope")
@@ -252,6 +334,9 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 		} else {
 			add("pack-sha3", "FAIL", "")
 		}
+	}
+	if os.Getenv(InjectEnv) == "1" {
+		panic("internal error injected by " + InjectEnv)
 	}
 	// ledger anchor
 	lp := ledgerPath
@@ -286,8 +371,7 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 	// (shape and content-binding ARE checked, like the reference: an object whose digest_sha256 is the pack bytes)
 	if tp := sidecarPath(packPath, ".tsr.json"); fileExists(tp) {
 		ts, e := readObject(tp)
-		packBytes, e2 := os.ReadFile(packPath)
-		if e != nil || e2 != nil {
+		if e != nil {
 			add("timestamp", "FAIL", "malformed sidecar")
 		} else if dg, _ := str(ts, "digest_sha256"); dg != sha256Hex(packBytes) {
 			add("timestamp", "FAIL", "pack changed after stamping")
@@ -315,8 +399,8 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 		signedDigest, _ := str(side, "signed_pack_sha3")
 		pkB64, _ := str(side, "public_key_b64")
 		sigB64, _ := str(side, "signature_b64")
-		if algPresent && !hasAlg { // present but not a string: malformed (council 16/09 r1), like pq_sig_alg
-			add("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a string")
+		if algPresent && (!hasAlg || alg == "") { // present but not a string, or "": malformed (council 16/09 r1; 25/09/2026 for "")
+			add("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a non-empty string")
 			sigStatus = "FAIL"
 		} else if alg != "ed25519" {
 			add("producer-signature", "SKIP", "unsupported sig_alg: "+alg)
@@ -325,8 +409,16 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 			// uppercase digest must not reach the PQ layer here either (it gave pq_protected null vs false)
 			add("producer-signature", "FAIL", "malformed sidecar fields (strict base64 32/64, lowercase hex digest)")
 			sigStatus = "FAIL"
+		} else if fp, present := side.Vals["fingerprint"]; present && fp != fingerprintOf(pk) {
+			// 25/09/2026 (NEMESIS): fingerprint / signed_utc were never read ("", 0, null, true, [], {}: PASS, authenticated).
+			// Absent = legacy, fine; present = what sign_pack writes (derived from THIS key; the exact instant form)
+			add("producer-signature", "FAIL", "malformed sidecar field: fingerprint is not the one derived from public_key_b64")
+			sigStatus = "FAIL"
+		} else if su, present := side.Vals["signed_utc"]; present && !signedUTCOK(su) {
+			add("producer-signature", "FAIL", "malformed sidecar field: signed_utc is not YYYY-MM-DDTHH:MM:SS+00:00")
+			sigStatus = "FAIL"
 		} else {
-			okSig := ed25519.Verify(ed25519.PublicKey(pk), []byte(declared), sig)
+			okSig := !weakEd25519(pk) && ed25519.Verify(ed25519.PublicKey(pk), []byte(declared), sig)
 			if !okSig || signedDigest != declared {
 				add("producer-signature", "FAIL", "signature invalid or pack changed")
 				sigStatus = "FAIL"
@@ -339,7 +431,7 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 						add("pq-signature", "FAIL", "post-quantum layer required but the pack carries no valid classical signature (hybrid = both)")
 					}
 					add("authenticity", "FAIL", "producer signature present but invalid") // r9 (Sonnet): the ledger may be fine here
-					return finish(r, declared, false, false, "", requirePQ || expectedPQ != "")
+					return finish(*r, declared, false, false, "", requirePQ || expectedPQ != "")
 				}
 				add("producer-signature", "PASS", "signed by "+sid+" (ed25519)")
 				sigStatus = "PASS"
@@ -356,7 +448,7 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 						pinned = te.pqPubkey
 					}
 				}
-				checkPQ(&r, side, declared, pinned, requirePQ)
+				checkPQ(r, side, declared, pinned, requirePQ)
 				if trustStore != "" {
 					te := st[sid]
 					if stOK && te != nil && !te.revoked && te.pubkey == pkB64 {
@@ -398,7 +490,33 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 	}
 	// authenticated = a producer identity signed AND was not refused by the registry (council 16/09 r1: Go said
 	// true for a revoked signer while the authenticity layer was FAIL; Python says false)
-	return finish(r, declared, trusted, sigStatus == "PASS" && !trustFailed, "", requirePQ || expectedPQ != "")
+	return finish(*r, declared, trusted, sigStatus == "PASS" && !trustFailed, "", requirePQ || expectedPQ != "")
+}
+
+var signedUTC = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\+00:00$`)
+
+// signedUTCOK: the instant sign_pack writes (isoformat, seconds, +00:00), ASCII digits, a real calendar date, year >= 1,
+// second <= 59 — the rule of the four.
+func signedUTCOK(v any) bool {
+	s, ok := v.(string)
+	if !ok || !signedUTC.MatchString(s) {
+		return false
+	}
+	n := func(a, b int) int { x, _ := strconv.Atoi(s[a:b]); return x }
+	y, mo, d, h, mi, se := n(0, 4), n(5, 7), n(8, 10), n(11, 13), n(14, 16), n(17, 19)
+	leap := (y%4 == 0 && y%100 != 0) || y%400 == 0
+	dim := []int{31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+	if leap {
+		dim[1] = 29
+	}
+	return y >= 1 && mo >= 1 && mo <= 12 && d >= 1 && d <= dim[mo-1] && h <= 23 && mi <= 59 && se <= 59
+}
+
+// fingerprintOf is signing.Identity.fingerprint: "ed25519:" + first 8 + U+2026 + last 8 hex digits of SHA-256(raw key).
+func fingerprintOf(pk []byte) string {
+	h := sha256.Sum256(pk)
+	x := hex.EncodeToString(h[:])
+	return "ed25519:" + x[:8] + "\u2026" + x[len(x)-8:]
 }
 
 // checkPQ: the pinned tri-state (cryptovalid 0.13.0 / omega-evidence 0.7.0 rules).
@@ -411,8 +529,8 @@ func checkPQ(r *Receipt, side *Object, digest, expectedPQ string, requirePQ bool
 	required := requirePQ || expectedPQ != ""
 	palg, has := str(side, "pq_sig_alg")
 	if !has || palg == "" {
-		if _, present := side.Vals["pq_sig_alg"]; present && !has { // non-string alg: present and malformed
-			add("FAIL", "pq_sig_alg is not a string")
+		if _, present := side.Vals["pq_sig_alg"]; present { // non-string alg, or "": present and malformed, not absent (25/09/2026 for "")
+			add("FAIL", "pq_sig_alg is not a non-empty string")
 			return
 		}
 		if required {

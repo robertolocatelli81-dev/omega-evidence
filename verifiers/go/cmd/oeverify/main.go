@@ -1,4 +1,4 @@
-// oeverify — Go verifier of omega-evidence packs. Exit 0 = PASS, 1 = FAIL, 2 = usage.
+// oeverify — Go verifier of omega-evidence packs. Exit 0 = PASS, 1 = FAIL, 77 = NOT_ASSESSED, 2 = usage.
 package main
 
 import (
@@ -60,6 +60,13 @@ func main() {
 	if flag.NArg() != 1 || flag.Arg(0) == "" || strings.HasPrefix(flag.Arg(0), "-") { // an unset $PACK is not a path
 		flag.Usage()
 	}
+	defer func() { // a fault outside VerifyPack's own recover: still not a finding (exit 77, never 1 or 2) — 25/09/2026
+		if p := recover(); p != nil {
+			out, _ := json.MarshalIndent(oe.InternalError(nil, fmt.Sprintf("%T", p)), "", " ")
+			fmt.Println(string(out))
+			os.Exit(77)
+		}
+	}()
 	r := oe.VerifyPack(flag.Arg(0), *ledger, *trust, *pq, *req)
 	out, _ := json.MarshalIndent(r, "", " ")
 	fmt.Println(string(out))

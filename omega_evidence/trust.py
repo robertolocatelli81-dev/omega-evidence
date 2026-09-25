@@ -49,6 +49,27 @@ class TrustRegistry:
         for d in self._ledger.entries():
             self._apply(d)
 
+    @classmethod
+    def replay(cls, data: bytes) -> "TrustRegistry":
+        """A READ-ONLY registry replayed from the bytes of a store already read (the verifier reads it once, bounded and
+        non-blocking, through ledger.read_input). The same strict chain check and the same replay as the constructor;
+        trust/rotate/revoke on it raise, since there is no ledger to append to (25/09/2026)."""
+        from .ledger import entries_text, verify_text
+        self = cls.__new__(cls)
+        self._ledger = None
+        self._lock = threading.Lock()
+        self._state = {}
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise ValueError(f"trust store broken: {e}") from e
+        ok, bad = verify_text(text)
+        if not ok:
+            raise ValueError(f"trust store broken: bad line(s) {bad[:5]}")
+        for e in entries_text(text):
+            self._apply(e.get("data"))
+        return self
+
     @staticmethod
     def _key(v: Any, what: str) -> str:
         if not isinstance(v, str) or not v.strip() or v != v.strip():

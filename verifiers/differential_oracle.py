@@ -7,7 +7,13 @@ Node divergences on a Node whose OpenSSL is < 3.5 (no ML-DSA there: a REQUIRED p
 ML-DSA co-signature is not detectable); with OpenSSL >= 3.5 (Node >= 24.6, measured also on 22.23) Node verifies ML-DSA-65
 and the declared count is 0. Cases are generated with the toolkit itself; ML-DSA cases need cryptography >= 48 (skipped
 and SAID otherwise). Exit 1 on any undeclared disagreement. Council 16/09 r1: `authenticated` joined the tuple (Go/Java/JS
-said true for a revoked signer) and the trust-store / sig_alg / foreign-classical-key / timestamp-sidecar cases were added."""
+said true for a revoked signer) and the trust-store / sig_alg / foreign-classical-key / timestamp-sidecar cases were added.
+25/09/2026 (NEMESIS on 0.9.0): an outcome that is not a verdict (crash, timeout, no JSON, an exit code other than the
+verdict's 0/1/77) is never agreement; cases with an EXPECTED verdict (every verifier must give it, so an error shared by the
+four stays visible) for FIFO and /dev/zero inputs in every position, the input bound, the sidecar fields fingerprint /
+signed_utc, "" as an algorithm name, and an injected internal error. The cases that used to block or exhaust memory run
+under `systemd-run --user --scope -p MemoryMax=$OEVERIFY_MEMORY_MAX` (default 1500M) when available. OEVERIFY_JS points the
+Node column at another tree; OEVERIFY_ONLY=prefix,... runs only the matching cases (ablations)."""
 import base64, glob, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -24,6 +30,10 @@ except Exception:  # noqa: BLE001
 
 SCOPE = "Proves integrity; does NOT prove the claim."
 PY_CWD = None   # set from OEVERIFY_PYTHONPATH (ablation)
+# 25/09/2026 — per-case metadata of the cases added for the NEMESIS findings:
+EXPECT = {}     # name -> the verdict EVERY verifier must give (a wrong outcome shared by the four is still a disagreement)
+CASE_ENV = {}   # name -> extra environment (the internal-error injection hook)
+HAZARD = set()  # names whose input used to block or exhaust memory: run with a memory cap (systemd-run) and a short timeout
 
 
 def build_cases(d):
@@ -253,21 +263,143 @@ def build_cases(d):
         cases["hybrid-pq-lenient-base64"] = (sw, [], None)
     else:
         print("  hybrid (ML-DSA-65) cases NOT measured: cryptography >= 48 absent")
+    _nemesis_cases(d, cases, mk, idt, store)
+    # 25/09 (4-mind round 2, A1): small-order Ed25519 keys — R=identity, S=0 verifies on every message under OpenSSL;
+    # every port must refuse them, with and without the key pinned in a trust store
+    for nm, keyhex in (("weak-key-identity", "01" + "00" * 31), ("weak-key-order8", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
+                       ("weak-key-noncanonical", "ed" + "ff" * 30 + "7f")):
+        w = mk(nm); P.sign_pack(w, idt); sp = w[:-5] + ".sig.json"; sd = json.load(open(sp))
+        sd["public_key_b64"] = base64.b64encode(bytes.fromhex(keyhex)).decode()
+        sd["signature_b64"] = base64.b64encode(bytes([1]) + bytes(63)).decode(); sd.pop("fingerprint", None); json.dump(sd, open(sp, "w"))
+        cases[nm] = (w, [], None)
+        st_w = os.path.join(d, nm + "_trust.jsonl"); trust.TrustRegistry(st_w).trust("acme", sd["public_key_b64"])
+        cases[nm + "-pinned"] = (w, ["--trust-store", st_w], None)
     return cases
 
 
-def run(cmd, path, flags, go_style):
+def _nemesis_cases(d, cases, mk, idt, store):
+    """25/09/2026 (NEMESIS on 0.9.0). Each case is built so that a verifier WITHOUT the rule gives a different verdict:
+    the hostile sidecar sits beside a pack that is otherwise PASS (anchored and/or signed)."""
+    from omega_evidence.ledger import MAX_INPUT_BYTES as CAP, _hash_entry
+    def signed(name, anchored=False):
+        p = mk(name)
+        if anchored:
+            P.anchor_pack(p, p[:-5] + ".ledger.jsonl")
+        P.sign_pack(p, idt); return p
+    def put(path, kind):   # replace a file by a FIFO or by a symlink to /dev/zero
+        if os.path.lexists(path):
+            os.remove(path)
+        os.mkfifo(path) if kind == "fifo" else os.symlink("/dev/zero", path)
+    # 1. files that are not regular: FIFO (blocked all four on 0.9.0) and a symlink to /dev/zero (exhausted memory).
+    #    Expected: the FAIL each verifier already gives for an unreadable file in that position (e.g. a directory).
+    if hasattr(os, "mkfifo") and os.path.exists("/dev/zero"):
+        for kind in ("fifo", "devzero"):
+            p = mk(f"fs-pack-{kind}"); put(p, kind); cases[f"fs-pack-{kind}"] = (p, [], None)
+            p = signed(f"fs-sig-{kind}", anchored=True); put(p[:-5] + ".sig.json", kind); cases[f"fs-sig-{kind}"] = (p, [], None)
+            p = signed(f"fs-ledger-{kind}"); put(p[:-5] + ".ledger.jsonl", kind); cases[f"fs-ledger-{kind}"] = (p, [], None)
+            p = signed(f"fs-tsr-{kind}", anchored=True); put(p[:-5] + ".tsr.json", kind); cases[f"fs-tsr-{kind}"] = (p, [], None)
+            p = signed(f"fs-trust-{kind}"); t = os.path.join(d, f"trust-{kind}.jsonl"); put(t, kind); cases[f"fs-trust-{kind}"] = (p, ["--trust-store", t], None)
+            for n in ("pack", "sig", "ledger", "tsr", "trust"):
+                EXPECT[f"fs-{n}-{kind}"] = "FAIL"; HAZARD.add(f"fs-{n}-{kind}")
+    else:
+        print("  FIFO / /dev/zero cases NOT measured on this platform")
+    # 2. the input bound (MAX_INPUT_BYTES, one number in the four): one byte over it is refused in every position the
+    #    same way; a ledger whose one entry makes the file exactly the bound verifies (0.9.0: Go's undeclared 64 MiB line
+    #    buffer, 256 MiB in Node/Java, none in Python; Node exhausted its heap on a 70 MB line)
+    def pad_to(path, size):
+        with open(path, "a") as f:
+            f.write(" " * (size - os.path.getsize(path)))
+    def big_entry_ledger(p, size):
+        lg = p[:-5] + ".ledger.jsonl"; P.anchor_pack(p, lg); prev = json.loads(open(lg).read().splitlines()[-1])["self_hash"]
+        e = {"idx": 1, "ts": "2026-09-25T00:00:00+00:00", "data": {"blob": ""}, "prev_hash": prev}
+        room = size - os.path.getsize(lg) - len(json.dumps(dict(e, self_hash="0" * 64), separators=(",", ":"))) - 1
+        e["data"]["blob"] = "A" * room; e["self_hash"] = _hash_entry(e)
+        with open(lg, "a") as f:
+            f.write(json.dumps(e, separators=(",", ":")) + "\n")
+        assert os.path.getsize(lg) == size, (os.path.getsize(lg), size)
+    p = mk("cap-ledger-line-at-bound"); big_entry_ledger(p, CAP); cases["cap-ledger-line-at-bound"] = (p, [], None); EXPECT["cap-ledger-line-at-bound"] = "PASS"
+    p = mk("cap-ledger-line-over"); P.sign_pack(p, idt); big_entry_ledger(p, CAP + 1); cases["cap-ledger-line-over"] = (p, [], None)
+    p = mk("cap-pack-over"); P.anchor_pack(p, p[:-5] + ".ledger.jsonl"); pad_to(p, CAP + 1); cases["cap-pack-over"] = (p, [], None)   # trailing blanks: the SAME pack under the bound is PASS
+    p = signed("cap-sig-over", anchored=True); pad_to(p[:-5] + ".sig.json", CAP + 1); cases["cap-sig-over"] = (p, [], None)
+    p = signed("cap-trust-over"); t = os.path.join(d, "trust-over.jsonl"); open(t, "w").write(open(store).read()); pad_to(t, CAP + 1)
+    cases["cap-trust-over"] = (p, ["--trust-store", t], None)
+    for n in ("cap-ledger-line-over", "cap-pack-over", "cap-sig-over", "cap-trust-over"):
+        EXPECT[n] = "FAIL"
+    for n in ("cap-ledger-line-at-bound", "cap-ledger-line-over", "cap-pack-over", "cap-sig-over", "cap-trust-over"):
+        HAZARD.add(n)
+    # 3. sidecar fields the producer writes and no verifier read on 0.9.0 (PASS, authenticated, with any value): present
+    #    = what sign_pack writes, the fingerprint DERIVED from the key and the instant in its exact form; absent = legacy
+    other_fp = signing.Identity("x").fingerprint
+    bad = {"fingerprint": ["", 0, None, True, [], {}, other_fp, other_fp.replace("\u2026", "..."),
+                           idt.fingerprint.upper().replace("ED25519", "ed25519"), idt.fingerprint + " "],
+           "signed_utc": ["", 0, None, True, [], {}, "2026-09-25T06:49:12Z", "2026-09-25T06:49:12+00:00\n", "2026-02-30T00:00:00+00:00",
+                          "2026-09-25T24:00:00+00:00", "2026-09-25T06:49:60+00:00", "0000-01-01T00:00:00+00:00",
+                          "\u0662\u0660\u0662\u0666-09-25T06:49:12+00:00", "2026-09-25 06:49:12+00:00", "2026-09-25T06:49:12.5+00:00"]}
+    for field, values in bad.items():
+        for i, v in enumerate(values):
+            nm = f"sig-{field}-bad-{i}-{type(v).__name__}"
+            p = signed(nm); sp = p[:-5] + ".sig.json"; sd = json.load(open(sp)); sd[field] = v; json.dump(sd, open(sp, "w"))
+            cases[nm] = (p, [], None); EXPECT[nm] = "FAIL"
+    for nm, edit in (("sig-fields-absent-legacy", lambda sd: [sd.pop("fingerprint"), sd.pop("signed_utc")]),   # positive controls:
+                     ("sig-signed-utc-leap-day", lambda sd: sd.__setitem__("signed_utc", "2024-02-29T23:59:59+00:00")),   # these stay PASS
+                     ("sig-signed-utc-year-1", lambda sd: sd.__setitem__("signed_utc", "0001-01-01T00:00:00+00:00"))):
+        p = signed(nm); sp = p[:-5] + ".sig.json"; sd = json.load(open(sp)); edit(sd); json.dump(sd, open(sp, "w"))
+        cases[nm] = (p, [], None); EXPECT[nm] = "PASS"
+    cases["sig-as-produced"] = (signed("sig-as-produced"), [], None); EXPECT["sig-as-produced"] = "PASS"
+    # 4. "" is a present, malformed algorithm name, never "absent" (0.9.0: pq_sig_alg "" = absent, null = FAIL; sig_alg ""
+    #    = an unsupported-algorithm SKIP, null = FAIL). Anchored, so a SKIP of the signature layer would read PASS.
+    for field in ("sig_alg", "pq_sig_alg"):
+        nm = f"sig-{field.replace('_', '-')}-empty"; p = signed(nm, anchored=True); sp = p[:-5] + ".sig.json"
+        sd = json.load(open(sp)); sd[field] = ""; json.dump(sd, open(sp, "w")); cases[nm] = (p, [], None); EXPECT[nm] = "FAIL"
+    # 5. an internal error of the verifier is NOT_ASSESSED (exit 77), never FAIL (0.9.0: Java said FAIL, Python and Node
+    #    exited 1 on a traceback, Go 2 on a panic) — unless a layer judged before the fault is adverse (tampered body)
+    cases["internal-error-injected"] = (signed("internal-error"), [], None)
+    ti = signed("internal-error-after-a-finding"); dd = json.load(open(ti)); dd["claim"] = "y"; json.dump(dd, open(ti, "w"))
+    cases["internal-error-after-a-finding"] = (ti, [], None)
+    for nm, want in (("internal-error-injected", "NOT_ASSESSED"), ("internal-error-after-a-finding", "FAIL")):
+        CASE_ENV[nm] = {"OEVERIFY_INJECT_INTERNAL_ERROR": "1"}; EXPECT[nm] = want
+
+
+EXIT_OF = {"PASS": 0, "FAIL": 1, "NOT_ASSESSED": 77}
+MEM_WRAP = None   # systemd-run prefix for the HAZARD cases (a verifier that reads /dev/zero must not take the host down)
+
+
+def mem_wrap():
+    global MEM_WRAP
+    if MEM_WRAP is None:
+        pre = ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=" + os.environ.get("OEVERIFY_MEMORY_MAX", "1500M"), "-p", "MemorySwapMax=0"]
+        try:
+            ok = shutil.which("systemd-run") and subprocess.run(pre + ["true"], capture_output=True, timeout=30).returncode == 0
+        except Exception:  # noqa: BLE001
+            ok = False
+        MEM_WRAP = pre if ok else []
+        print("  memory cap on the hazard cases: " + (pre[5] if ok else "NOT available (systemd-run --user --scope failed): run them only on fixed verifiers"))
+    return MEM_WRAP
+
+
+def run(cmd, path, flags, go_style, name=""):
     args = list(cmd) + ([f.replace("--", "-", 1) for f in flags] + [path] if go_style else [path] + flags)
+    hazard = name in HAZARD
+    if hazard:
+        args = mem_wrap() + args
+    env = dict(os.environ, **CASE_ENV[name]) if name in CASE_ENV else None
     try:
-        out = subprocess.run(args, capture_output=True, text=True, timeout=60, cwd=PY_CWD if cmd[0] == sys.executable else None)
+        out = subprocess.run(args, capture_output=True, text=True, timeout=(30 if name.startswith("fs-") else 180) if hazard else 60, env=env,
+                             cwd=PY_CWD if cmd[0] == sys.executable else None)
+    except subprocess.TimeoutExpired:
+        return ("TIMEOUT", None, None)
+    try:
         r = json.loads(out.stdout)
-        return (r["verdict"], r.get("pq_protected"), r.get("authenticated"))
+        v = (r["verdict"], r.get("pq_protected"), r.get("authenticated"))
     except Exception:  # noqa: BLE001
-        return ("NONJSON/CRASH", None, None)
+        return (f"NONJSON/CRASH(exit {out.returncode})", None, None)
+    if EXIT_OF.get(v[0]) != out.returncode:   # 25/09/2026: the exit code is part of the verdict (Java printed FAIL on a fault)
+        return (f"{v[0]}/exit {out.returncode}", v[1], v[2])
+    return v
 
 
 def main():
-    avail = {"python": [sys.executable, "-m", "omega_evidence"], "js": ["node", os.path.join(HERE, "js", "oeverify.mjs")]}
+    avail = {"python": [sys.executable, "-m", "omega_evidence"], "js": ["node", os.environ.get("OEVERIFY_JS") or os.path.join(HERE, "js", "oeverify.mjs")]}
     global PY_CWD
     if os.environ.get("OEVERIFY_PYTHONPATH"):   # r9: run the Python verifier from another tree (the lax ablation, verifiers/lax_python_ablation.sh)
         PY_CWD = os.environ["OEVERIFY_PYTHONPATH"]   # cwd, so that `-m omega_evidence` resolves THAT tree, not this one
@@ -315,13 +447,31 @@ def main():
     if "hybrid-expected-key" in cases:
         hp, hf, _ = cases["hybrid-expected-key"]
         for k, cmd in avail.items():
-            r = run(cmd, hp, hf, k in ("go", "java"))
+            r = run(cmd, hp, hf, k in ("go", "java"), "hybrid-expected-key")
             capable[k] = isinstance(r, tuple) and len(r) > 1 and r[1] is True
         print("  ML-DSA capable runtimes (probed on a valid pinned co-signature): "
               + ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in sorted(capable.items())))
     diffs = declared = inconclusive = 0
+    only = os.environ.get("OEVERIFY_ONLY")   # comma-separated name prefixes (the ablation runs only the cases it targets)
+    all_cases = cases
+    if only:
+        cases = {n: c for n, c in cases.items() if any(n.startswith(o) for o in only.split(","))}
     for name, (path, flags, decl) in cases.items():
-        res = {k: run(cmd, path, flags, k in ("go", "java")) for k, cmd in avail.items()}
+        res = {k: run(cmd, path, flags, k in ("go", "java"), name) for k, cmd in avail.items()}
+        if name in EXPECT:
+            # a case with an expected verdict: every verifier must give it (so a wrong outcome shared by all is visible),
+            # and the tuples must agree; NOT_ASSESSED is judged like any verdict here (the injected fault expects it)
+            ref = res.get("python")
+            bad = {k: v for k, v in res.items() if v[0] != EXPECT[name] or v != ref}
+            if bad:
+                diffs += 1
+            print(f"  [{'OK ' if not bad else 'DIFF'}] {name:34} {res}  <- expected {EXPECT[name]} from each")
+            continue
+        # 25/09/2026: an outcome that is not a verdict (crash, timeout, no JSON, exit code not the verdict's) is never agreement
+        if any(v[0] not in EXIT_OF for v in res.values()):
+            diffs += 1
+            print(f"  [DIFF] {name:34} {res}  <- not a verdict")
+            continue
         # NOT_ASSESSED is neither agreement nor disagreement (24/09/2026): a verifier whose host cannot run a required
         # check has no verdict to compare, and counting it as agreement is how a shared incapacity used to read as
         # consensus. It is excluded from the comparison and reported with its own denominator.
@@ -349,7 +499,7 @@ def main():
     # CLI grammar (21/09/2026, found on cra-evidence): an unknown flag, a value flag without a value / with "" / with a flag as
     # value, an abbreviation, a second positional = usage error (exit 2, no verdict) in EVERY CLI — never a verdict with the
     # constraint silently dropped (Node gave a verdict on all of them)
-    valid = cases["bare"][0]
+    valid = all_cases["bare"][0]
     cli = {"cli-unknown-flag": ["--no-such-flag"], "cli-ledger-empty": ["--ledger", ""], "cli-ledger-missing-value": ["--ledger"],
            "cli-ledger-flag-as-value": ["--ledger", "--require-pq"], "cli-abbreviation": ["--ledg", valid], "cli-two-positionals": [valid],
            # review r1 (Opus): the pack path itself "" or "-" (an unset $PACK), the "--" terminator, a value on the boolean flag
@@ -359,6 +509,8 @@ def main():
            # r13 (Opus): a REPEATED value flag — Go's flag.Visit and argparse saw the final value only (Go even ate -require-pq as a value)
            "cli-repeated-flag-empty-first": ["--ledger", "", "--ledger", valid], "cli-repeated-flag-as-value-first": ["--ledger", "--require-pq", "--ledger", valid]}   # r5: argparse resolved -l / -ledg by prefix (a verdict in Python alone)   # r3 (Sonnet): argparse answered --help with exit 0 while the three said usage
     cli["cli-other-dash-spelling-verdict"] = ["--other-dash"]   # r4 (Sonnet): -ledger in Python/Node, --ledger in Go/Java → a verdict, the same flag
+    if only:
+        cli = {}
     for name, extra in cli.items():
         row = {}
         for k, cmd in avail.items():
@@ -373,7 +525,7 @@ def main():
             elif extra[0] == "--pack":   # the positional itself is the hostile value ("--pack" is a marker of this table, not a flag)
                 args = list(cmd) + [extra[1]]
             elif extra[0] == "--other-dash":
-                lp_ = cases["anchored"][0][:-5] + ".ledger.jsonl"; ap_ = cases["anchored"][0]
+                lp_ = all_cases["anchored"][0][:-5] + ".ledger.jsonl"; ap_ = all_cases["anchored"][0]
                 args = list(cmd) + (["--ledger", lp_, ap_] if gs else [ap_, "-ledger", lp_])
             else:
                 args = list(cmd) + (ex + [valid] if gs else [valid] + ex)

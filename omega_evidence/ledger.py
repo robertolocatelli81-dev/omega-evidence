@@ -24,11 +24,42 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import threading
 import time
 from typing import Dict, List, Tuple
 
 GENESIS = "0" * 64
+
+# One bound for every file a verifier reads (pack, .sig.json, .tsr.json, ledger, trust store) — and so for any single
+# ledger line — the same number in the Python, Node, Go and Java verifiers (25/09/2026). Chosen where the peak memory of
+# every one of them, measured at the bound, stays far from its runtime's limit; above it every verifier refuses the file
+# the way it refuses an unreadable one. It bounds what a VERIFIER accepts, not what Ledger.append may write.
+MAX_INPUT_BYTES = 64 * 1024 * 1024
+
+
+def read_input(path: str, limit: int = MAX_INPUT_BYTES) -> bytes:
+    """Read one verifier input without letting the file decide how long or how much. Opened O_NONBLOCK, so a FIFO put
+    in place of a sidecar does not block the open; accepted only when fstat says the OPENED file is regular (a FIFO, a
+    device such as a symlink to /dev/zero, a directory: refused); read to at most `limit` + 1 bytes, so a file beyond
+    the bound is refused, never exhausted. Every refusal is an OSError, which the verifier already reports as the FAIL of
+    the layer that reads the file (25/09/2026, NEMESIS: a FIFO blocked all four verifiers, /dev/zero exhausted memory)."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path}: not a regular file")
+        chunks, total = [], 0
+        while total <= limit:
+            b = os.read(fd, min(1 << 20, limit + 1 - total))
+            if not b:
+                break
+            chunks.append(b)
+            total += len(b)
+        if total > limit:
+            raise OSError(f"{path}: input exceeds {limit} bytes")
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 _SAFE_INT = (1 << 53) - 1
@@ -260,37 +291,16 @@ class Ledger:
             return entry
 
     def verify(self) -> Tuple[bool, List[int]]:
-        bad: List[int] = []
-        prev = GENESIS
         if not os.path.exists(self.path):
-            return True, bad
+            return True, []
         # 0.7.0: the same acceptance profile as the cryptovalid verifiers (Python/JS/Go/Rust/Java agree):
         # LF-only lines, blank = ASCII space/tab/CR, strict JSON, sequential idx, content → self_hash → prev link
-        n = 0
         try:   # r5 (Sonnet): strict decode here too (surrogateescape never raised); a non-UTF-8 file is a broken chain
             with open(self.path, "rb") as fh:
-                lines = fh.read().decode("utf-8").split("\n")
+                text = fh.read().decode("utf-8")
         except (OSError, UnicodeDecodeError):
             return False, [0]
-        for i, line in enumerate(lines):
-            if not line.strip(" \t\r\n"):
-                continue
-            try:
-                e = loads_strict(line.strip(" \t\r\n"))
-                if not isinstance(e, dict):
-                    raise ValueError("entry is not an object")
-            except (ValueError, RecursionError):
-                bad.append(i)
-                n += 1
-                continue
-            idx = e.get("idx")
-            sh = e.get("self_hash")
-            if (isinstance(idx, bool) or idx != n or e.get("prev_hash") != prev
-                    or not isinstance(sh, str) or sh != _hash_entry(e)):
-                bad.append(i)
-            prev = sh if isinstance(sh, str) else prev
-            n += 1
-        return (not bad), bad
+        return verify_text(text)
 
     @property
     def count(self) -> int:
@@ -324,3 +334,42 @@ class Ledger:
                     if not isinstance(e, dict):
                         raise ValueError("ledger line is not a JSON object")
                     yield e
+
+
+def verify_text(text: str) -> Tuple[bool, List[int]]:
+    """Ledger.verify() over a text already read — the verifier reads each file once, through read_input()."""
+    bad: List[int] = []
+    prev = GENESIS
+    n = 0
+    for i, line in enumerate(text.split("\n")):
+        if not line.strip(" \t\r\n"):
+            continue
+        try:
+            e = loads_strict(line.strip(" \t\r\n"))
+            if not isinstance(e, dict):
+                raise ValueError("entry is not an object")
+        except (ValueError, RecursionError):
+            bad.append(i)
+            n += 1
+            continue
+        idx = e.get("idx")
+        sh = e.get("self_hash")
+        if (isinstance(idx, bool) or idx != n or e.get("prev_hash") != prev
+                or not isinstance(sh, str) or sh != _hash_entry(e)):
+            bad.append(i)
+        prev = sh if isinstance(sh, str) else prev
+        n += 1
+    return (not bad), bad
+
+
+def entries_text(text: str) -> List[Dict]:
+    """Ledger.raw_entries() over a text already read (strict profile; a line that is not an object raises ValueError)."""
+    out = []
+    for line in text.split("\n"):
+        line = line.strip(" \t\r\n")
+        if line:
+            e = loads_strict(line)
+            if not isinstance(e, dict):
+                raise ValueError("ledger line is not a JSON object")
+            out.append(e)
+    return out

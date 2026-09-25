@@ -87,12 +87,38 @@ class Identity:
         return base64.b64encode(_seed_sign(self._seed, message)).decode()
 
 
+# Ed25519 public keys that make R=identity, S=0 a valid signature on EVERY message (small-order points), which OpenSSL
+# accepts (measured 25/09/2026): the 8 canonical small-order encodings, the 2 encodings with the sign bit set on x = 0,
+# and every non-canonical y >= p. Checked against curve arithmetic: 0 disagreements on 48 special and 200 000 random keys.
+# The same list is in the Go, Java and JS verifiers.
+WEAK_ED25519_KEYS = frozenset(bytes.fromhex(h) for h in (
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000080",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "0100000000000000000000000000000000000000000000000000000000000080",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
+
+
+def weak_ed25519_key(pk: bytes) -> bool:
+    """True for a 32-byte key of small order or with a non-canonical encoding (y >= p)."""
+    if len(pk) != 32 or pk in WEAK_ED25519_KEYS:
+        return True
+    return (int.from_bytes(pk, "little") & ((1 << 255) - 1)) >= 2 ** 255 - 19
+
+
 def verify_signature(public_key_b64: str, signature_b64: str, message: bytes) -> bool:
-    """Verify an Ed25519 signature. Works regardless of which backend produced it."""
+    """Verify an Ed25519 signature. Works regardless of which backend produced it. A weak key never verifies."""
     try:
         pk_raw = base64.b64decode(public_key_b64)
         sig = base64.b64decode(signature_b64)
     except (ValueError, TypeError):
+        return False
+    if weak_ed25519_key(pk_raw):
         return False
     if BACKEND == "cryptography":
         try:

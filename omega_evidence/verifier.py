@@ -16,7 +16,12 @@ omega_evidence.verifier — one offline verifier for any evidence pack.
 
 Layers (each PASS / FAIL / SKIP; SKIP is honest, never a false green):
   pack-json · honest-scope · pack-sha3 · ledger-chain · rfc3161 · producer-
-  signature · trusted-signer · authenticity.
+  signature · trusted-signer · authenticity — plus `internal` (FAIL with
+  assessed=false) when the verifier itself fails: NOT_ASSESSED, never a finding.
+
+Every file it reads (pack, sidecars, ledger, trust store) must be a regular file of at
+  most ledger.MAX_INPUT_BYTES (64 MiB); it is opened without blocking and read once. A
+  file that is not regular, or is larger, fails its layer as an unreadable file does.
 
 Graduated authenticity (strongest first):
   trusted-signed  — producer signature valid AND key trusted in the registry
@@ -40,9 +45,10 @@ import re as _re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import hashlib
 from .canonical import sha3, sha256_bytes
 from .pack import _honest_scope_declares_limit
-from .ledger import Ledger
+from .ledger import entries_text, loads_strict, read_input, verify_text
 from .signing import verify_pq_alg, verify_signature
 from .trust import TrustRegistry
 
@@ -93,35 +99,38 @@ def _anchors_pack(entry: Any, digest: str) -> bool:
     return _field(entry)
 
 
-def _check_ledger(path: str, ledger_path: Optional[str], layers: List) -> bool:
+def _read_pack(path: str) -> Dict[str, Any]:
+    """For callers of the _check_* helpers without a pack already read (verify_pack passes its own)."""
+    try:
+        pk = loads_strict(read_input(path).decode("utf-8"))   # r5 (Sonnet): the same parser as the integrity layer
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return pk if isinstance(pk, dict) else {}
+
+
+def _check_ledger(path: str, ledger_path: Optional[str], layers: List, pack: Optional[Dict[str, Any]] = None) -> bool:
     lp = ledger_path or _ledger_sidecar(path)
     if not lp:
         layers.append(_layer("ledger-chain", "SKIP", "no ledger beside pack"))
         return False
     try:
-        lg = Ledger(lp)
-        ok, bad = lg.verify()
-    except (RuntimeError, ValueError, OSError, TypeError, AttributeError, RecursionError) as e:
-        # a non-UTF-8 byte, a non-object line or an unreadable file is a FAIL verdict, never a traceback (probe 21/09/2026:
-        # UnicodeDecodeError escaped from Ledger.__init__ while Go/JS answered FAIL)
-        layers.append(_layer("ledger-chain", "FAIL", f"{lp}: unreadable ledger ({type(e).__name__})"))
+        # ONE bounded, non-blocking read of a regular file (25/09/2026: a FIFO blocked, /dev/zero exhausted memory); a
+        # non-UTF-8 byte, a non-object line or an unreadable file is a FAIL verdict, never a traceback (probe 21/09/2026)
+        text = read_input(lp).decode("utf-8")
+        ok, bad = verify_text(text)
+    except (ValueError, OSError, RecursionError) as e:
+        layers.append(_layer("ledger-chain", "FAIL", f"{lp}: unreadable ledger ({type(e).__name__}: {str(e)[:120]})"))
         return False
     if not ok:
         layers.append(_layer("ledger-chain", "FAIL", f"{lp}: broken chain"))
         return False
     # A valid chain is not enough: the pack must actually be RECORDED in the ledger.
     # An empty or unrelated ledger must NOT anchor a fabricated pack.
-    try:
-        from .ledger import loads_strict
-        pk = loads_strict(open(path, encoding="utf-8").read())   # r5 (Sonnet): the same parser as the integrity layer
-        if not isinstance(pk, dict):
-            pk = {}
-    except (OSError, ValueError, RecursionError):
-        pk = {}
+    pk = pack if isinstance(pack, dict) else _read_pack(path)
     pack_sha3 = pk.get("pack_sha3", "")
     if not isinstance(pack_sha3, str):   # r7: a non-string digest never anchors (the three: "" for a non-string)
         pack_sha3 = ""
-    entries = list(lg.raw_entries())   # r4: the whole entry, as Go/Java/Node read it
+    entries = entries_text(text)   # r4: the whole entry, as Go/Java/Node read it
     if not entries:
         layers.append(_layer("ledger-chain", "FAIL", f"{lp}: ledger empty — nothing anchored"))
         return False
@@ -133,20 +142,21 @@ def _check_ledger(path: str, ledger_path: Optional[str], layers: List) -> bool:
     return True
 
 
-def _check_timestamp(path: str, layers: List) -> str:
+def _check_timestamp(path: str, layers: List, pack_bytes: Optional[bytes] = None) -> str:
     ts_side = path[:-5] + ".tsr.json" if path.endswith(".json") else path + ".tsr.json"
     if not os.path.exists(ts_side):
         layers.append(_layer("rfc3161", "SKIP", "no RFC 3161 sidecar"))
         return "SKIP"
     try:
-        from .ledger import loads_strict
-        side = loads_strict(open(ts_side, encoding="utf-8").read())   # 0.8.3 review (Opus): json.loads let a float / duplicate
+        if pack_bytes is None:
+            pack_bytes = read_input(path)
+        side = loads_strict(read_input(ts_side).decode("utf-8"))   # 0.8.3 review (Opus): json.loads let a float / duplicate
         if not isinstance(side, dict):                                # key sidecar through (PASS in Python, FAIL in the other three)
             raise ValueError("sidecar is not a JSON object")
     except (OSError, ValueError, RecursionError) as e:
         layers.append(_layer("rfc3161", "FAIL", f"malformed sidecar: {e}"))
         return "FAIL"
-    current = sha256_bytes(open(path, "rb").read())
+    current = sha256_bytes(pack_bytes)   # the bytes verify_pack read: the digest is bound to what was verified
     if current != side.get("digest_sha256"):
         layers.append(_layer("rfc3161", "FAIL", "pack changed after stamping"))
         return "FAIL"
@@ -189,8 +199,10 @@ def _check_pq_cosignature(side: dict, digest: str, layers: List, expected_pq: Op
     autoload()
     palg = side.get("pq_sig_alg")
     required = bool(require_pq or expected_pq)
-    if "pq_sig_alg" in side and not isinstance(palg, str):   # present but not a string: malformed, never "unregistered"
-        layers.append(_layer("pq-signature", "FAIL", "pq_sig_alg is not a string"))
+    if "pq_sig_alg" in side and (not isinstance(palg, str) or not palg):
+        # present but not a string, or "": malformed, never "unregistered" and never "absent" (25/09/2026: "" read as
+        # absent while null was a FAIL — a present field is judged, whatever its value)
+        layers.append(_layer("pq-signature", "FAIL", "pq_sig_alg is not a non-empty string"))
         return False
     if not palg:
         if required:
@@ -232,33 +244,49 @@ def _check_pq_cosignature(side: dict, digest: str, layers: List, expected_pq: Op
     return True
 
 
+_SIGNED_UTC = _re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\+00:00")
+
+
+def _signed_utc_ok(v: Any) -> bool:
+    """The form pack.sign_pack writes: datetime.now(timezone.utc).isoformat(timespec="seconds"), i.e.
+    YYYY-MM-DDTHH:MM:SS+00:00 in ASCII digits, a real calendar instant (year >= 1, second <= 59). Same rule in the four."""
+    if not isinstance(v, str) or not _SIGNED_UTC.fullmatch(v):
+        return False
+    y, mo, d, h, mi, se = int(v[0:4]), int(v[5:7]), int(v[8:10]), int(v[11:13]), int(v[14:16]), int(v[17:19])
+    leap = (y % 4 == 0 and y % 100 != 0) or y % 400 == 0
+    dim = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    return y >= 1 and 1 <= mo <= 12 and 1 <= d <= dim[mo - 1] and h <= 23 and mi <= 59 and se <= 59
+
+
+def _fingerprint_of(pk_raw: bytes) -> str:
+    """signing.Identity.fingerprint, derived from the public key: "ed25519:" + first 8 + "\u2026" + last 8 hex digits
+    of SHA-256(raw key)."""
+    h = hashlib.sha256(pk_raw).hexdigest()
+    return f"ed25519:{h[:8]}\u2026{h[-8:]}"
+
+
 def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: List,
-                               expected_pq: Optional[str] = None, require_pq: bool = False):
+                               expected_pq: Optional[str] = None, require_pq: bool = False,
+                               pack: Optional[Dict[str, Any]] = None):
     sig_side = path[:-5] + ".sig.json" if path.endswith(".json") else path + ".sig.json"
     if not os.path.exists(sig_side):
         layers.append(_layer("producer-signature", "SKIP", "pack not signed"))
         return "SKIP", False, False
     try:
-        from .ledger import loads_strict
-        side = loads_strict(open(sig_side, encoding="utf-8").read().strip(" \t\r\n"))
+        side = loads_strict(read_input(sig_side).decode("utf-8").strip(" \t\r\n"))
         if not isinstance(side, dict):
             raise ValueError("sidecar is not a JSON object")
     except (OSError, ValueError) as e:              # unreadable (permissions, race) is a FAIL, not a crash (council r2)
         layers.append(_layer("producer-signature", "FAIL", f"malformed sidecar: {e}"))
         return "FAIL", False, False
-    try:
-        from .ledger import loads_strict
-        pack = loads_strict(open(path, encoding="utf-8").read())   # r5 (Sonnet): the same parser as the integrity layer
-        current = pack.get("pack_sha3", "") if isinstance(pack, dict) else ""
-    except (OSError, ValueError, RecursionError):   # verify_pack returns before this on a bad pack; belt for direct callers
-        layers.append(_layer("producer-signature", "FAIL", "pack unreadable"))
-        return "FAIL", False, False
+    pk_obj = pack if isinstance(pack, dict) else _read_pack(path)
+    current = pk_obj.get("pack_sha3", "")
     # The classical layer is Ed25519 ONLY — the same rule as the Go/Java/JS verifiers (council 16/09 r1: a
     # registered PQ backend must never be accepted here as the producer signature; a sig_alg that is not a
     # string is a malformed sidecar, an unknown string is an honest SKIP, never a crash)
     alg = side.get("sig_alg", "ed25519")
-    if not isinstance(alg, str):
-        layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a string"))
+    if not isinstance(alg, str) or not alg:   # 25/09/2026: "" is a present, malformed field (it was an "unsupported" SKIP)
+        layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a non-empty string"))
         return "FAIL", False, False
     if alg != "ed25519":
         layers.append(_layer("producer-signature", "SKIP", f"unsupported sig_alg: {alg}"))
@@ -269,6 +297,15 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
     if (b64_strict(side.get("public_key_b64"), 32) is None or b64_strict(side.get("signature_b64"), 64) is None
             or not isinstance(current, str) or not _re.fullmatch(r"[0-9a-f]{64}", current)):
         layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields (strict base64 32/64, lowercase hex digest)"))
+        return "FAIL", False, False
+    # 25/09/2026 (NEMESIS): the two fields the producer writes beside the signature were never read, so "", 0, null,
+    # true, [] or {} left the pack PASS and authenticated. Absent is legacy and fine; present must be what sign_pack
+    # writes — the fingerprint DERIVED from this public key, the instant in its exact form — else the layer is FAIL.
+    if "fingerprint" in side and side["fingerprint"] != _fingerprint_of(base64.b64decode(side["public_key_b64"])):
+        layers.append(_layer("producer-signature", "FAIL", "malformed sidecar field: fingerprint is not the one derived from public_key_b64"))
+        return "FAIL", False, False
+    if "signed_utc" in side and not _signed_utc_ok(side["signed_utc"]):
+        layers.append(_layer("producer-signature", "FAIL", "malformed sidecar field: signed_utc is not YYYY-MM-DDTHH:MM:SS+00:00"))
         return "FAIL", False, False
     if not isinstance(side.get("signer_id"), str) or not side["signer_id"]:
         # council r2: a list / missing signer_id gave three outcomes in three verifiers (crash, FAIL, JS coercion PASS)
@@ -283,8 +320,9 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
     sid, pk = side.get("signer_id"), side.get("public_key_b64")
     tr, tr_broken = None, None
     if trust_store:
-        try:                                  # the registry replays a STRICT, verified chain (council r1: a broken or
-            tr = TrustRegistry(trust_store)   # duplicate-key store must be a FAIL of this layer, never a crash or a pin)
+        try:   # the registry replays a STRICT, verified chain (council r1: a broken or duplicate-key store must be a FAIL of
+               # this layer, never a crash or a pin), read once, bounded and non-blocking (25/09/2026)
+            tr = TrustRegistry.replay(read_input(trust_store))
         except (OSError, ValueError, RuntimeError) as e:
             tr_broken = f"{type(e).__name__}: {str(e)[:120]}"
     trusted_now = bool(tr is not None and tr.is_trusted(sid, pk))
@@ -332,10 +370,36 @@ def verify_pack(path: str, ledger_path: Optional[str] = None,
     true / null (present, not confirmed) / false (absent or broken) — never true on a self-declared key."""
     layers: List[Dict[str, str]] = []
     try:
+        return _verify_pack(layers, path, ledger_path, trust_store, expected_pq_public_key_b64, require_pq)
+    except Exception as e:  # noqa: BLE001 — MemoryError and RecursionError included
+        return internal_error_receipt(layers, e)
+
+
+INJECT_ENV = "OEVERIFY_INJECT_INTERNAL_ERROR"   # test hook, the same name in the four verifiers (README)
+
+
+def internal_error_receipt(layers: List[Dict[str, Any]], e: BaseException) -> Dict[str, Any]:
+    """A fault of the TOOL is not a finding about the pack (25/09/2026: OeVerify.java turned any Throwable, even an
+    OutOfMemoryError, into verdict FAIL; this CLI and Node exited 1 on a traceback — the code of FAIL — and Go 2 on a
+    panic). The layer `internal` is FAIL with assessed=false, so the run is NOT_ASSESSED unless a layer already judged
+    before the fault is adverse (FAIL > NOT_ASSESSED > PASS: an absence never hides a finding). Never authenticated,
+    never pq-protected: nothing that did not complete is a pass."""
+    lay = _layer("internal", "FAIL", f"verifier error, not a finding about the pack: {type(e).__name__}")
+    lay["assessed"] = False
+    roll = _rollup(list(layers) + [lay])
+    roll["pq_protected"] = False
+    roll["authenticated"] = False
+    return roll
+
+
+def _verify_pack(layers, path, ledger_path, trust_store, expected_pq_public_key_b64, require_pq) -> Dict[str, Any]:
+    try:
         # 0.7.0: the family's strict acceptance profile (no duplicate keys, no floats, bounded integers, nesting
-        # <= 512) — the same rule the Go/Java/JS pack verifiers apply, so an ambiguous encoding is refused, not guessed
-        from .ledger import loads_strict
-        pack = loads_strict(open(path, encoding="utf-8").read().strip(" \t\r\n"))
+        # <= 512) — the same rule the Go/Java/JS pack verifiers apply, so an ambiguous encoding is refused, not guessed.
+        # 25/09/2026: read ONCE, bounded (MAX_INPUT_BYTES) and non-blocking, a regular file only; the ledger, timestamp
+        # and signature layers use these bytes, not a second read
+        pack_bytes = read_input(path)
+        pack = loads_strict(pack_bytes.decode("utf-8").strip(" \t\r\n"))
         if not isinstance(pack, dict):
             raise ValueError("pack is not a JSON object")
         layers.append(_layer("pack-json", "PASS"))
@@ -359,11 +423,13 @@ def verify_pack(path: str, ledger_path: Optional[str] = None,
         layers.append(_layer("pack-sha3", "FAIL", f"not canonicalisable: {e.__class__.__name__}"))
     if computed is not None:
         layers.append(_layer("pack-sha3", "PASS" if declared and declared == computed else "FAIL"))
+    if os.environ.get(INJECT_ENV) == "1":
+        raise RuntimeError("internal error injected by " + INJECT_ENV)
 
-    ledger_ok = _check_ledger(path, ledger_path, layers)
-    ts_status = _check_timestamp(path, layers)
+    ledger_ok = _check_ledger(path, ledger_path, layers, pack)
+    ts_status = _check_timestamp(path, layers, pack_bytes)
     sig_status, trusted, trust_failed = _check_signature_and_trust(path, trust_store, layers,
-                                                                   expected_pq_public_key_b64, require_pq)
+                                                                   expected_pq_public_key_b64, require_pq, pack)
     if (require_pq or expected_pq_public_key_b64) and sig_status != "PASS":
         layers.append(_layer("pq-signature", "FAIL", "post-quantum layer required but the pack carries no valid classical signature (hybrid = both)"))
     _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, ts_status)
@@ -422,11 +488,17 @@ def main(argv=None) -> int:
         v = getattr(a, flag)
         if v is not None and (v == "" or v.startswith("-")):   # "" or a flag as a value would silently mean "not given" (one grammar in the four, 21/09/2026)
             p.error(f"--{flag.replace('_', '-')} needs a value (got {v!r})")
-    r = verify_pack(a.pack, a.ledger, a.trust_store, a.expect_pq_key, a.require_pq)
-    # `assessed` gates PASS too: a run where a present layer could not be read here is inconclusive, not a pass.
-    passed = r.get("valid") and r.get("assessed", True) and (not (a.require_pq or a.expect_pq_key) or r.get("pq_protected") is True)
-    r["verdict"] = "PASS" if passed else ("FAIL" if r.get("assessed", True) else "NOT_ASSESSED")
-    print(json.dumps(r, indent=1))
+    try:
+        r = verify_pack(a.pack, a.ledger, a.trust_store, a.expect_pq_key, a.require_pq)
+        # `assessed` gates PASS too: a run where a present layer could not be read here is inconclusive, not a pass.
+        passed = r.get("valid") and r.get("assessed", True) and (not (a.require_pq or a.expect_pq_key) or r.get("pq_protected") is True)
+        r["verdict"] = "PASS" if passed else ("FAIL" if r.get("assessed", True) else "NOT_ASSESSED")
+        out = json.dumps(r, indent=1)
+    except Exception as e:  # noqa: BLE001 — a fault outside verify_pack's own guard: still not a finding (exit 77, never 1)
+        r = internal_error_receipt([], e)
+        r["verdict"] = "NOT_ASSESSED"
+        out = json.dumps(r, indent=1)
+    print(out)
     if r["verdict"] == "PASS":
         return 0
     return 1 if r["verdict"] == "FAIL" else 77   # 77 = nothing could be checked here, never "the pack is bad"

@@ -19,7 +19,11 @@ import java.util.regex.*;
 public class OeVerify {
     static final int MAX_DEPTH = 512;
     static final long SAFE_INT = (1L << 53) - 1;
-    static final long MAX_INPUT_BYTES = 256L * 1024 * 1024;
+    // One bound for every file read (pack, sidecars, ledger, trust store — and so for any ledger line), the same number in
+    // the four verifiers (25/09/2026; it was 256 MiB here and in Node, a 64 MiB line in Go, none in Python). Above it the
+    // file is refused as an unreadable one is.
+    static final int MAX_INPUT_BYTES = 64 * 1024 * 1024;
+    static final String INJECT_ENV = "OEVERIFY_INJECT_INTERNAL_ERROR";   // test hook, the same name in the four verifiers (README)
     static final Set<String> ATTEST = Set.of("self_hash");   // omega-evidence ledgers: self_hash is the only attestation key
     static final String GENESIS = "0".repeat(64);
     static final byte[] ED_SPKI = hex("302a300506032b6570032100");
@@ -77,10 +81,15 @@ public class OeVerify {
 
     // strict UTF-8: one malformed byte is unreadable, never U+FFFD (a lossy read verified PASS on a ledger entry whose
     // self_hash was computed over U+FFFD while the file held the raw byte — found by the differential probe, 21/09/2026)
-    static String strictUtf8(byte[] text) throws Bad {
-        try { return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(text)).toString(); }
-        catch (CharacterCodingException e) { throw new Bad("non-UTF-8 input"); }
+    // validated in a streaming pass with a small buffer, then decoded once (25/09/2026: decode() allocated a UTF-16
+    // CharBuffer of the whole input, twice per file — most of the heap at the input bound); same acceptance as before
+    static void requireUtf8(byte[] text) throws Bad {
+        CharsetDecoder d = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT);
+        java.nio.ByteBuffer in = java.nio.ByteBuffer.wrap(text); java.nio.CharBuffer out = java.nio.CharBuffer.allocate(8192);
+        while (true) { CoderResult r = d.decode(in, out, true); if (r.isError()) throw new Bad("non-UTF-8 input"); if (r.isUnderflow()) break; out.clear(); }
+        out.clear(); if (d.flush(out).isError()) throw new Bad("non-UTF-8 input");
     }
+    static String strictUtf8(byte[] text) throws Bad { requireUtf8(text); return new String(text, StandardCharsets.UTF_8); }
     static Object parse(byte[] text) throws Bad {
         String s = strictUtf8(text);
         int d = nestingDepth(text);
@@ -136,7 +145,10 @@ public class OeVerify {
             }
         }
         String string() throws Bad {
-            StringBuilder b = new StringBuilder(); i++;
+            i++; int st = i;
+            // fast path (25/09/2026): a string with no escape and no control character is one substring, not a StringBuilder
+            while (i < s.length()) { char c = s.charAt(i); if (c == '"') { String r = s.substring(st, i); i++; return r; } if (c == '\\' || c < 0x20) break; i++; }
+            StringBuilder b = new StringBuilder(); b.append(s, st, i);
             while (true) {
                 char c = peek(); i++;
                 if (c == '"') return b.toString();
@@ -180,31 +192,45 @@ public class OeVerify {
         for (int k = 0; k < Math.min(x.length, y.length); k++) if (x[k] != y[k]) return Integer.compare(x[k], y[k]);
         return Integer.compare(x.length, y.length);
     };
-    static void encode(StringBuilder b, Object v) {
+    // The canonical form is pure ASCII (every other unit is escaped), so it can be hashed in 64 KiB spills instead of being
+    // built whole (25/09/2026: at the input bound the whole string, its copy and its bytes were most of the heap).
+    static void encode(StringBuilder b, Object v) { encode(b, v, null); }
+    static void spill(StringBuilder b, MessageDigest md) { if (md != null && b.length() >= (1 << 16)) { md.update(b.toString().getBytes(StandardCharsets.ISO_8859_1)); b.setLength(0); } }
+    static void encode(StringBuilder b, Object v, MessageDigest md) {
         if (v == null) b.append("null");
         else if (v instanceof Boolean) b.append(((Boolean) v) ? "true" : "false");
         else if (v instanceof Num) b.append(((Num) v).lexeme);
-        else if (v instanceof String) writeString(b, (String) v);
-        else if (v instanceof List) { b.append('['); List<?> l = (List<?>) v; for (int k = 0; k < l.size(); k++) { if (k > 0) b.append(','); encode(b, l.get(k)); } b.append(']'); }
+        else if (v instanceof String) writeString(b, (String) v, md);
+        else if (v instanceof List) { b.append('['); List<?> l = (List<?>) v; for (int k = 0; k < l.size(); k++) { if (k > 0) b.append(','); encode(b, l.get(k), md); } b.append(']'); }
         else if (v instanceof Obj) {
             Obj o = (Obj) v; List<String> ks = new ArrayList<>(o.keys); ks.sort(BY_CODEPOINT); b.append('{');
-            for (int k = 0; k < ks.size(); k++) { if (k > 0) b.append(','); writeString(b, ks.get(k)); b.append(':'); encode(b, o.vals.get(ks.get(k))); }
+            for (int k = 0; k < ks.size(); k++) { if (k > 0) b.append(','); writeString(b, ks.get(k), md); b.append(':'); encode(b, o.vals.get(ks.get(k)), md); }
             b.append('}');
         } else throw new IllegalStateException("unsupported value");
+        spill(b, md);
     }
-    static void writeString(StringBuilder b, String s) {
+    static final char[] HEXL = "0123456789abcdef".toCharArray();
+    static void writeString(StringBuilder b, String s) { writeString(b, s, null); }
+    // Python json.dumps(ensure_ascii=True), one UTF-16 unit at a time: a surrogate pair gives the same two \\uXXXX escapes the
+    // former per-code-point String.format computed (lowercase hex), without a format call per character
+    static void writeString(StringBuilder b, String s, MessageDigest md) {
         b.append('"');
-        s.codePoints().forEach(r -> {
+        for (int k = 0, n = s.length(); k < n; k++) {
+            char r = s.charAt(k);
             switch (r) {
                 case '"': b.append("\\\""); break; case '\\': b.append("\\\\"); break; case '\n': b.append("\\n"); break;
                 case '\r': b.append("\\r"); break; case '\t': b.append("\\t"); break; case '\b': b.append("\\b"); break; case '\f': b.append("\\f"); break;
                 default:
-                    if (r >= 0x20 && r <= 0x7e) b.append((char) r);
-                    else if (r > 0xFFFF) { int q = r - 0x10000; b.append(String.format("\\u%04x\\u%04x", 0xD800 + (q >> 10), 0xDC00 + (q & 0x3FF))); }
-                    else b.append(String.format("\\u%04x", r));
+                    if (r >= 0x20 && r <= 0x7e) b.append(r);
+                    else b.append('\\').append('u').append(HEXL[(r >> 12) & 15]).append(HEXL[(r >> 8) & 15]).append(HEXL[(r >> 4) & 15]).append(HEXL[r & 15]);
             }
-        });
+            if ((k & 0xffff) == 0xffff) spill(b, md);
+        }
         b.append('"');
+    }
+    static String canonHash(String algo, Obj o) throws Exception {
+        MessageDigest md = MessageDigest.getInstance(algo); StringBuilder b = new StringBuilder(); encode(b, o, md);
+        md.update(b.toString().getBytes(StandardCharsets.ISO_8859_1)); return toHex(md.digest());
     }
     static byte[] payload(Obj e) {
         Obj cp = new Obj();
@@ -227,7 +253,17 @@ public class OeVerify {
         byte[] spki = new byte[hdr.length + raw.length]; System.arraycopy(hdr, 0, spki, 0, hdr.length); System.arraycopy(raw, 0, spki, hdr.length, raw.length);
         return KeyFactory.getInstance(alg).generatePublic(new X509EncodedKeySpec(spki));
     }
-    static boolean edVerify(byte[] pk, byte[] msg, byte[] sig) { try { Signature v = Signature.getInstance("Ed25519"); v.initVerify(key("Ed25519", ED_SPKI, pk)); v.update(msg); return v.verify(sig); } catch (Exception e) { return false; } }
+    // small-order / non-canonical Ed25519 keys (R=identity, S=0 verifies on every message; OpenSSL accepts it, measured 25/09/2026) — same list as omega_evidence/signing.py WEAK_ED25519_KEYS
+    static final java.util.Set<String> WEAK_ED25519 = java.util.Set.of("0100000000000000000000000000000000000000000000000000000000000000", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "0000000000000000000000000000000000000000000000000000000000000000", "0000000000000000000000000000000000000000000000000000000000000080", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", "0100000000000000000000000000000000000000000000000000000000000080", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    static boolean weakEd25519(byte[] pk) {
+        if (pk.length != 32) return true;
+        StringBuilder h = new StringBuilder(); for (byte b : pk) h.append(String.format("%02x", b & 0xff));
+        if (WEAK_ED25519.contains(h.toString())) return true;
+        if ((pk[31] & 0x7f) != 0x7f || (pk[0] & 0xff) < 0xed) return false;
+        for (int i = 1; i < 31; i++) if ((pk[i] & 0xff) != 0xff) return false;
+        return true;
+    }
+    static boolean edVerify(byte[] pk, byte[] msg, byte[] sig) { if (weakEd25519(pk)) return false; try { Signature v = Signature.getInstance("Ed25519"); v.initVerify(key("Ed25519", ED_SPKI, pk)); v.update(msg); return v.verify(sig); } catch (Exception e) { return false; } }
     static Boolean mldsaSupported() { try { Signature.getInstance("ML-DSA-65"); return true; } catch (Exception e) { return false; } }
     static boolean mldsaVerify(byte[] pk, byte[] msg, byte[] sig) { try { Signature v = Signature.getInstance("ML-DSA-65"); v.initVerify(key("ML-DSA", MLDSA65_SPKI, pk)); v.update(msg); return v.verify(sig); } catch (Exception e) { return false; } }
 
@@ -246,18 +282,39 @@ public class OeVerify {
     static String sha(String algo, byte[] p) throws Exception { return toHex(MessageDigest.getInstance(algo).digest(p)); }
     static String str(Obj o, String k) { Object v = o.vals.get(k); return v instanceof String ? (String) v : null; }
     static Obj without(Obj o, String drop) { Obj cp = new Obj(); for (String k : o.keys) if (!k.equals(drop)) { cp.keys.add(k); cp.vals.put(k, o.vals.get(k)); } return cp; }
-    static byte[] canonBytes(Obj o) { StringBuilder b = new StringBuilder(); encode(b, o); return b.toString().getBytes(StandardCharsets.UTF_8); }
     static boolean honestScope(String s) {
         if (s == null || !SCOPE_LIMIT.matcher(s).find()) return false;
         if (SCOPE_OVERCLAIM.matcher(s).find() && !SCOPE_NEGATED.matcher(s).find()) return false;
         return true;
     }
-    static Obj readObject(String path) throws Bad, IOException {
-        if (Files.size(Path.of(path)) > MAX_INPUT_BYTES) throw new Bad("input exceeds " + MAX_INPUT_BYTES + " bytes");
-        byte[] raw = Files.readAllBytes(Path.of(path));
-        String t = strictUtf8(raw);   // strict decode; trimmed of ASCII space/tab/CR/LF only
-        int a = 0, z = t.length(); while (a < z && " \t\r\n".indexOf(t.charAt(a)) >= 0) a++; while (z > a && " \t\r\n".indexOf(t.charAt(z - 1)) >= 0) z--;
-        Object v = parse(t.substring(a, z).getBytes(StandardCharsets.UTF_8));
+    // One verifier input (25/09/2026, NEMESIS: a FIFO in place of a sidecar blocked the four verifiers, a symlink to
+    // /dev/zero exhausted memory): accepted only when the path resolves to a regular file, read to at most
+    // MAX_INPUT_BYTES + 1 bytes. The JDK has no O_NONBLOCK, so the type is checked on the path right BEFORE the open —
+    // a FIFO in place is never opened; one swapped in between the check and the open can still block (a race the other
+    // three close by checking the opened descriptor; declared in the README).
+    static byte[] readInput(String path) throws Bad, IOException {
+        Path p = Path.of(path);
+        if (!Files.readAttributes(p, java.nio.file.attribute.BasicFileAttributes.class).isRegularFile()) throw new Bad(path + ": not a regular file");
+        try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(p, StandardOpenOption.READ)) {
+            // sized from the channel (no doubling copies), grown only if the file grows, never past MAX_INPUT_BYTES + 1
+            byte[] b = new byte[(int) Math.min(Math.max(ch.size(), 0L), (long) MAX_INPUT_BYTES) + 1]; int total = 0;
+            while (true) {
+                if (total == b.length) { if (b.length > MAX_INPUT_BYTES) break; b = Arrays.copyOf(b, (int) Math.min(2L * b.length, MAX_INPUT_BYTES + 1L)); }
+                int n = ch.read(java.nio.ByteBuffer.wrap(b, total, b.length - total));
+                if (n < 0) break;
+                total += n;
+            }
+            if (total > MAX_INPUT_BYTES) throw new Bad(path + ": input exceeds " + MAX_INPUT_BYTES + " bytes");
+            return total == b.length ? b : Arrays.copyOf(b, total);
+        }
+    }
+    static Obj readObject(String path) throws Bad, IOException { return objectOf(readInput(path)); }
+    static boolean jsonWs(byte c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+    static Obj objectOf(byte[] raw) throws Bad {
+        // trimmed of ASCII space/tab/CR/LF on the bytes (single-byte characters, so the same cut as on the decoded text),
+        // then decoded ONCE by parse(); a non-UTF-8 byte is refused there, as before
+        int a = 0, z = raw.length; while (a < z && jsonWs(raw[a])) a++; while (z > a && jsonWs(raw[z - 1])) z--;
+        Object v = parse(a == 0 && z == raw.length ? raw : Arrays.copyOfRange(raw, a, z));
         if (!(v instanceof Obj)) throw new Bad("not a JSON object");
         return (Obj) v;
     }
@@ -266,21 +323,22 @@ public class OeVerify {
     // ───────────────────────── strict ledger chain (the cryptovalid profile; self_hash is the only attestation key here) ─────────────────────────
     static List<Obj> ledgerEntries(String path, boolean[] ok) throws Exception {
         List<Obj> out = new ArrayList<>(); ok[0] = true;
-        if (Files.size(Path.of(path)) > MAX_INPUT_BYTES) { ok[0] = false; return out; }
         String prev = GENESIS; int n = 0;
-        String all; try { all = strictUtf8(Files.readAllBytes(Path.of(path))); } catch (Bad e) { ok[0] = false; return out; }
+        byte[] all; try { all = readInput(path); requireUtf8(all); } catch (Bad | IOException e) { ok[0] = false; return out; }   // bounded, regular file only; one bad byte anywhere = unreadable, as before
         {
-            List<String> lines = new ArrayList<>(); int start = 0;
-            for (int k = 0; k < all.length(); k++) if (all.charAt(k) == '\n') { lines.add(all.substring(start, k)); start = k + 1; }
-            if (start < all.length()) lines.add(all.substring(start));
-            for (String ln : lines) {
-                boolean blank = true; for (char ch : ln.toCharArray()) if (ch != ' ' && ch != '\t' && ch != '\r') { blank = false; break; }
+            // LF lines cut on the BYTES (25/09/2026: decode, cut, re-encode and decode again held four copies of a long line);
+            // for valid UTF-8 the bytes of a line are exactly the re-encoding of its decoded text
+            List<int[]> lines = new ArrayList<>(); int start = 0;
+            for (int k = 0; k < all.length; k++) if (all[k] == '\n') { lines.add(new int[]{start, k}); start = k + 1; }
+            if (start < all.length) lines.add(new int[]{start, all.length});
+            for (int[] ln : lines) {
+                boolean blank = true; for (int k = ln[0]; k < ln[1]; k++) if (all[k] != ' ' && all[k] != '\t' && all[k] != '\r') { blank = false; break; }
                 if (blank) continue;
-                Object v; try { v = parse(ln.getBytes(StandardCharsets.UTF_8)); } catch (Bad e) { ok[0] = false; n++; continue; }
+                Object v; try { v = parse(ln[0] == 0 && ln[1] == all.length ? all : Arrays.copyOfRange(all, ln[0], ln[1])); } catch (Bad e) { ok[0] = false; n++; continue; }
                 if (!(v instanceof Obj)) { ok[0] = false; n++; continue; }
                 Obj e = (Obj) v;
                 Object idx = e.vals.get("idx"); String sh = str(e, "self_hash"), ph = str(e, "prev_hash");
-                String sum = sha("SHA-256", canonBytes(without(e, "self_hash")));
+                String sum = canonHash("SHA-256", without(e, "self_hash"));
                 if (!(idx instanceof Num) || !((Num) idx).lexeme.equals(String.valueOf(n)) || ph == null || !ph.equals(prev) || sh == null || !sh.equals(sum)) ok[0] = false;
                 if (sh != null) prev = sh;
                 out.add(e); n++;
@@ -311,7 +369,20 @@ public class OeVerify {
     // ───────────────────────── the verdict ─────────────────────────
     public static void main(String[] args) {
         try { run(args); }
-        catch (Throwable t) { System.out.println("{\"valid\":false,\"verdict\":\"FAIL\",\"layers\":[{\"layer\":\"internal\",\"status\":\"FAIL\",\"detail\":\"" + t.getClass().getSimpleName() + "\"}]}"); System.exit(1); }
+        // a fault outside verifyPack's own guard: still not a finding — NOT_ASSESSED, exit 77 (25/09/2026: this printed
+        // verdict FAIL and exited 1 on ANY Throwable, an OutOfMemoryError included)
+        catch (Throwable t) { System.out.println(j(internalError(new ArrayList<>(), t))); System.exit(77); }
+    }
+    // A fault of the TOOL is not a finding about the pack: the layer "internal" is FAIL with assessed=false, so the run is
+    // NOT_ASSESSED unless a layer judged before the fault is adverse (FAIL > NOT_ASSESSED > PASS); never authenticated,
+    // never pq-protected.
+    static Map<String, Object> internalError(List<Map<String, Object>> layers, Throwable t) {
+        List<Map<String, Object>> ls = new ArrayList<>(layers);
+        Map<String, Object> m = new LinkedHashMap<>(); m.put("layer", "internal"); m.put("status", "FAIL");
+        m.put("detail", "verifier error, not a finding about the pack: " + t.getClass().getSimpleName()); m.put("assessed", Boolean.FALSE); ls.add(m);
+        Map<String, Object> r = finish(ls, false, false, false);
+        r.put("authenticated", false); r.put("pq_protected", false);
+        return r;
     }
     static String val(String[] args, int k) { if (k >= args.length || args[k].isEmpty() || args[k].startsWith("-")) usage(); return args[k]; }   // "" or a flag as a value: usage (21/09/2026)
     static void usage() { System.err.println("usage: java OeVerify.java <pack.json> [-ledger L] [-trust-store T] [-expect-pq-key B64] [-require-pq]"); System.exit(2); }
@@ -338,18 +409,23 @@ public class OeVerify {
         System.exit("PASS".equals(v) ? 0 : "FAIL".equals(v) ? 1 : 77);   // 77 = the check did not run on this JDK
     }
 
-    static Map<String, Object> verifyPack(String packPath, String ledgerPath, String trustStore, String expectedPQ, boolean requirePQ) throws Exception {
+    static Map<String, Object> verifyPack(String packPath, String ledgerPath, String trustStore, String expectedPQ, boolean requirePQ) {
         List<Map<String, Object>> layers = new ArrayList<>();
+        try { return verifyPackIn(layers, packPath, ledgerPath, trustStore, expectedPQ, requirePQ); }
+        catch (Throwable t) { return internalError(layers, t); }
+    }
+    static Map<String, Object> verifyPackIn(List<Map<String, Object>> layers, String packPath, String ledgerPath, String trustStore, String expectedPQ, boolean requirePQ) throws Exception {
         java.util.function.BiConsumer<String[], String> add = (ls, d) -> { Map<String, Object> m = new LinkedHashMap<>(); m.put("layer", ls[0]); m.put("status", ls[1]); m.put("detail", d); layers.add(m); };
         boolean required = requirePQ || !expectedPQ.isEmpty();
-        Obj pack;
-        try { pack = readObject(packPath); } catch (Exception e) { add.accept(new String[]{"pack-json", "FAIL"}, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); return finish(layers, false, false, required); }
+        Obj pack; byte[] packBytes;   // read ONCE: the timestamp binding hashes these bytes, not a second read
+        try { packBytes = readInput(packPath); pack = objectOf(packBytes); } catch (Exception e) { add.accept(new String[]{"pack-json", "FAIL"}, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); return finish(layers, false, false, required); }
         add.accept(new String[]{"pack-json", "PASS"}, "");
         String scope = str(pack, "honest_scope");
         if (honestScope(scope)) add.accept(new String[]{"honest-scope", "PASS"}, "limit declared"); else add.accept(new String[]{"honest-scope", "FAIL"}, "no explicit honest_scope (or overclaim without a real NOT-limit)");
         String declared = str(pack, "pack_sha3"); if (declared == null) declared = "";
-        String computed = sha("SHA3-256", canonBytes(without(pack, "pack_sha3")));
+        String computed = canonHash("SHA3-256", without(pack, "pack_sha3"));
         add.accept(new String[]{"pack-sha3", !declared.isEmpty() && declared.equals(computed) ? "PASS" : "FAIL"}, "");
+        if ("1".equals(System.getenv(INJECT_ENV))) throw new IllegalStateException("internal error injected by " + INJECT_ENV);
         // ledger anchor
         String lp = ledgerPath;
         if (lp.isEmpty() && Files.exists(Path.of(sidecar(packPath, ".ledger.jsonl")))) lp = sidecar(packPath, ".ledger.jsonl");
@@ -367,7 +443,7 @@ public class OeVerify {
         if (Files.exists(Path.of(sidecar(packPath, ".tsr.json")))) {   // shape + content-binding checked like the reference; the token itself is not
             Obj ts = null; try { ts = readObject(sidecar(packPath, ".tsr.json")); } catch (Exception e) { ts = null; }
             if (ts == null) add.accept(new String[]{"timestamp", "FAIL"}, "malformed sidecar");
-            else if (!sha("SHA-256", Files.readAllBytes(Path.of(packPath))).equals(str(ts, "digest_sha256"))) add.accept(new String[]{"timestamp", "FAIL"}, "pack changed after stamping");
+            else if (!sha("SHA-256", packBytes).equals(str(ts, "digest_sha256"))) add.accept(new String[]{"timestamp", "FAIL"}, "pack changed after stamping");
             else add.accept(new String[]{"timestamp", "SKIP"}, "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
         }
         else add.accept(new String[]{"timestamp", "SKIP"}, "no timestamp sidecar");
@@ -382,11 +458,15 @@ public class OeVerify {
                 boolean algPresent = side.vals.containsKey("sig_alg");
                 String alg = algPresent ? str(side, "sig_alg") : "ed25519";
                 String signedDigest = str(side, "signed_pack_sha3"), pkB64 = str(side, "public_key_b64"), sigB64 = str(side, "signature_b64");
-                if (algPresent && alg == null) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar fields: sig_alg is not a string"); sigStatus = "FAIL"; }  // council 16/09 r1
+                if (algPresent && (alg == null || alg.isEmpty())) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar fields: sig_alg is not a non-empty string"); sigStatus = "FAIL"; }  // council 16/09 r1; "" is present and malformed (25/09/2026)
                 else if (!"ed25519".equals(alg)) add.accept(new String[]{"producer-signature", "SKIP"}, "unsupported sig_alg: " + alg);
                 else {
                     byte[] pk = b64Strict(pkB64, 32), sig = b64Strict(sigB64, 64);
                     if (pk == null || sig == null || !declared.matches("[0-9a-f]{64}")) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar fields (strict base64 32/64, lowercase hex digest)"); sigStatus = "FAIL"; }   // council r3
+                    // 25/09/2026 (NEMESIS): fingerprint / signed_utc were never read ("", 0, null, true, [], {}: PASS, authenticated).
+                    // Absent = legacy, fine; present = what sign_pack writes (derived from THIS key; the exact instant form)
+                    else if (side.vals.containsKey("fingerprint") && !fingerprintOf(pk).equals(side.vals.get("fingerprint"))) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar field: fingerprint is not the one derived from public_key_b64"); sigStatus = "FAIL"; }
+                    else if (side.vals.containsKey("signed_utc") && !signedUtcOK(side.vals.get("signed_utc"))) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar field: signed_utc is not YYYY-MM-DDTHH:MM:SS+00:00"); sigStatus = "FAIL"; }
                     else {
                     boolean okSig = edVerify(pk, declared.getBytes(StandardCharsets.UTF_8), sig);
                     if (!okSig || !declared.equals(signedDigest)) { add.accept(new String[]{"producer-signature", "FAIL"}, "signature invalid or pack changed"); sigStatus = "FAIL"; }
@@ -422,6 +502,20 @@ public class OeVerify {
         return finish(layers, trusted, "PASS".equals(sigStatus) && !trustFailed, required);   // council 16/09 r1: never authenticated for a revoked/untrusted signer
     }
 
+    // signing.Identity.fingerprint: "ed25519:" + first 8 + U+2026 + last 8 hex digits of SHA-256(raw public key)
+    static String fingerprintOf(byte[] pk) throws Exception { String h = sha("SHA-256", pk); return "ed25519:" + h.substring(0, 8) + "\u2026" + h.substring(56); }
+    static final Pattern SIGNED_UTC = Pattern.compile("[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\+00:00");
+    // the instant sign_pack writes (isoformat, seconds, +00:00), ASCII digits, a real calendar date, year >= 1, second <= 59
+    static boolean signedUtcOK(Object v) {
+        if (!(v instanceof String) || !SIGNED_UTC.matcher((String) v).matches()) return false;
+        String s = (String) v;
+        int y = Integer.parseInt(s.substring(0, 4)), mo = Integer.parseInt(s.substring(5, 7)), d = Integer.parseInt(s.substring(8, 10));
+        int h = Integer.parseInt(s.substring(11, 13)), mi = Integer.parseInt(s.substring(14, 16)), se = Integer.parseInt(s.substring(17, 19));
+        boolean leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        int[] dim = {31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        return y >= 1 && mo >= 1 && mo <= 12 && d >= 1 && d <= dim[mo - 1] && h <= 23 && mi <= 59 && se <= 59;
+    }
+
     // PQ algorithms the project implements a backend for somewhere; membership does not mean THIS JDK has it.
     static final java.util.Set<String> KNOWN_PQ_ALGS = java.util.Set.of("ml-dsa-65", "slh-dsa-sha2-128s");
 
@@ -429,7 +523,7 @@ public class OeVerify {
         java.util.function.BiConsumer<String, String> add = (s, d) -> { Map<String, Object> m = new LinkedHashMap<>(); m.put("layer", "pq-signature"); m.put("status", s); m.put("detail", d); layers.add(m); };
         boolean required = requirePQ || !expectedPQ.isEmpty();
         Object palgRaw = side.vals.get("pq_sig_alg");
-        if (side.vals.containsKey("pq_sig_alg") && !(palgRaw instanceof String)) { add.accept("FAIL", "pq_sig_alg is not a string"); return; }
+        if (side.vals.containsKey("pq_sig_alg") && (!(palgRaw instanceof String) || ((String) palgRaw).isEmpty())) { add.accept("FAIL", "pq_sig_alg is not a non-empty string"); return; }   // "" is present and malformed, not absent (25/09/2026)
         String palg = (String) palgRaw;
         if (palg == null || palg.isEmpty()) { if (required) add.accept("FAIL", "post-quantum layer required but absent (stripped or never signed)"); return; }
         String pkB64 = str(side, "pq_public_key_b64"), sigB64 = str(side, "pq_signature_b64");

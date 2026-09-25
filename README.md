@@ -231,7 +231,7 @@ A check that could not run is not a finding about the pack. The **CLI** reports 
 |---|---|---|
 | `PASS` | 0 | every layer that ran passed |
 | `FAIL` | 1 | at least one layer was checked and is adverse |
-| `NOT_ASSESSED` | 77 | nothing adverse was found, and a required check could not run on this host |
+| `NOT_ASSESSED` | 77 | nothing adverse was found, and a required check could not run on this host — or the verifier itself failed (layer `internal`, see *Unreleased* below) |
 
 This holds whether the check was **required or optional**. Measured 24/09/2026: with the PQ layer optional and a
 co-signature present but unverifiable here, a runtime without the backend used to answer `PASS` / exit 0 on the very
@@ -339,6 +339,70 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
+### Unreleased — inputs, sidecar fields and verifier faults (25 September 2026)
+
+- Small-order Ed25519 keys refused (25/09/2026). A public key that is a point of small order (the identity and the other torsion points) or a non-canonical encoding (y >= p) makes R=identity, S=0 a valid signature on EVERY message, and OpenSSL accepts it — measured through Python `cryptography` and Node (a forged pack was valid and authenticated with such a key pinned by the relying party verified); the Go, Java and Rust ports received the same guard without a measurement of their behaviour without it. Every verifier now refuses those keys with the same list (8 small-order encodings, 2 with the sign bit on x = 0, every y >= p; checked against curve arithmetic: 0 disagreements on 48 special and 200 000 random keys).
+
+
+Found by an adversarial review (NEMESIS) of 0.9.0; the version number is unchanged. Behaviour changes, the same in the
+Python reference, Node, Go and Java:
+
+- **Only regular files are read, without blocking, and read once.** A FIFO in place of the pack, a sidecar, the ledger
+  or the trust store blocked all four verifiers; a symlink to `/dev/zero` exhausted memory (Java reported the
+  `OutOfMemoryError` as a `FAIL` of the pack). Each file is now opened with `O_NONBLOCK` (Python, Node, Go) and accepted
+  only if the opened descriptor is a regular file; anything else fails its layer exactly as an unreadable file does
+  today (`pack-json`, `producer-signature`, `ledger-chain`, `rfc3161`/`timestamp`, `trusted-signer` FAIL — the outcome a
+  directory in that position already had). The JDK has no `O_NONBLOCK`: Java checks the type on the path right before
+  opening, so a FIFO in place is never opened, but one swapped in between that check and the open can still block it
+  (a race the other three close by checking the descriptor).
+- **One input bound, the same number in the four: 64 MiB (67 108 864 bytes) per file** — and therefore per ledger line.
+  Before: 256 MiB in Node and Java, a 64 MiB line buffer in Go that no document mentioned (its pack and sidecar reads were
+  unbounded), no bound in Python; Node exhausted its heap on a 70 MB ledger line and hung on a 100 MB sidecar field that
+  Python and Java verified. A file of 64 MiB + 1 byte now fails its layer in all four; a file of exactly 64 MiB verifies.
+  Files between 64 and 256 MiB that Node and Java used to accept are refused. The bound was chosen where every verifier's
+  peak memory, measured at the bound on seven input shapes (one ledger line of 64 MiB, a ledger of 161 200 lines, a pack
+  field and a sidecar field of 64 MiB, ASCII, `é` escapes and raw 3-byte UTF-8), stays far from its limit. Measured
+  25/09/2026 on this host (6.3 GiB RAM), peak RSS, worst shape: Python 3.11 397 MiB, Go 1.27.1 517 MiB, Node 22.23.2
+  501 MiB, Java 27 1325 MiB (the JVM grows its heap up to its default maximum, 1618 MiB here); the smallest heap that still
+  verifies every shape is 389 MiB for Java (`-Xmx`) and 304 MiB for Node (`--max-old-space-size`), against defaults of
+  1618 and 2096 MiB here. Below that heap Java answers `NOT_ASSESSED` (the `OutOfMemoryError` is a fault, next point);
+  a V8 heap exhaustion or a Go runtime out-of-memory is fatal in the runtime itself and cannot be turned into a receipt,
+  and an OS OOM kill is outside every verifier's control — the bound is what keeps them away. To stay within it, three
+  copies were removed: Node hashes the canonical form part by part instead of joining it (and escapes strings in bounded
+  chunks), Java validates UTF-8 in a streaming pass, decodes each file once and hashes in 64 KiB spills; both produce the
+  same bytes as before (checked on all 65 536 UTF-16 units and on random strings with astral characters).
+- **The sidecar fields the producer writes are read.** `fingerprint` and `signed_utc` were never looked at, so `""`,
+  `0`, `null`, `true`, `[]` or `{}` left a signed pack PASS and `authenticated`. Absent, they are still accepted (legacy
+  sidecars); present, they must be what `pack.sign_pack` writes — `fingerprint` equal to the one derived from
+  `public_key_b64` (`"ed25519:"` + the first 8 and last 8 hex digits of SHA-256 of the raw key, joined by U+2026), and
+  `signed_utc` of the form `YYYY-MM-DDTHH:MM:SS+00:00` in ASCII digits naming a real calendar instant (year ≥ 1,
+  second ≤ 59) — else `producer-signature` is FAIL ("malformed sidecar field").
+- **`""` is a present, malformed algorithm name.** `pq_sig_alg: ""` read as absent while `null` was a FAIL, and
+  `sig_alg: ""` was an "unsupported algorithm" SKIP while `null` was a FAIL: both are now FAIL of their layer.
+- **A fault of the verifier is not a finding about the pack.** Java turned any `Throwable` into `verdict: FAIL` / exit 1;
+  the Python CLI and Node exited 1 on an uncaught exception (the code of FAIL) and Go 2 on a panic (the code of a usage
+  error). Each verifier now catches its own faults and adds a layer `internal`, status FAIL with `assessed: false`: the
+  run is `NOT_ASSESSED` / exit 77, unless a layer judged before the fault is adverse (then `FAIL`, as ever: an absence
+  never hides a finding); `authenticated` and `pq_protected` are false. The library `verify_pack` returns that receipt
+  instead of raising. Test hook, the same in the four: the environment variable `OEVERIFY_INJECT_INTERNAL_ERROR=1`
+  raises an internal error right after the `pack-sha3` layer (it can only lower a verdict to `NOT_ASSESSED` or keep a
+  `FAIL`, never produce a `PASS`).
+
+Measured 25/09/2026 (Node 22.23.2, Go 1.27.1, JDK 27): the differential oracle, extended with 48 cases for these rules
+(FIFO and `/dev/zero` in five positions, the bound at and over it, 25 malformed `fingerprint` / `signed_utc` values and 4
+positive controls, `""` algorithms, the injected fault with and without a prior finding), gives 0 disagreements on 135
+pack cases plus 17 CLI cases; the same oracle against the four 0.9.0 verifiers is red on 43 (all of them new cases; the
+five that are not red are the four positive controls and the injected fault after a finding, FAIL either way). A
+verdict that is not one (crash, timeout, missing JSON, an exit code other than 0/1/77 for PASS/FAIL/NOT_ASSESSED) now
+counts as a disagreement even when all four share it, and the cases that used to block or exhaust memory run under a
+`systemd-run` memory cap. Removing each new check in turn, in each verifier, turns red exactly its own cases: the
+non-blocking open the 5 FIFO cases (in Java, which has no `O_NONBLOCK`, the file-type check does), the bound the 4
+over-bound cases, the fingerprint rule its 10, the instant rule its 15, each `""` rule its 1, the fault guard its 2.
+Removing only the regular-file check in Python, Node or Go turns nothing red: there the non-blocking open (a FIFO with
+no writer reads as empty) and the bound (`/dev/zero`) already refuse these inputs; it stays, so that the outcome does not
+depend on whether a FIFO has a writer. The positive control of the Python column (`lax_python_ablation.sh`) is still red
+on the same 13 cases.
+
 ### 0.8.3 — verifier hygiene from the cra-evidence review (21 September 2026)
 
 Twelve review rounds on cra-evidence 0.3.0, whose verifiers are re-implementations of these, found defect classes in
@@ -401,8 +465,9 @@ surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21
   Go and Java took `""` as "not given" and a flag as a path, Python accepted `--ledg` and crashed on it.
 
 Declared, not aligned: Go's `flag` stops at the first positional, so `oeverify pack.json -ledger L` is a usage error
-in Go and a verdict in Python, Java and Node (put flags first); Node and Java refuse an input over 256 MiB, Go bounds only a
-ledger line (64 MiB; its pack and sidecar reads are unbounded) and Python has no bound — a valid file beyond those sizes verifies in some of the four only. Not measured:
+in Go and a verdict in Python, Java and Node (put flags first); in 0.8.3–0.9.0 Node and Java refused an input over 256 MiB, Go
+bounded only a ledger line (64 MiB; its pack and sidecar reads were unbounded) and Python had no bound — a valid file beyond
+those sizes verified in some of the four only (one bound in the four since the *Unreleased* change below). Not measured:
 Ed25519 decoding of non-canonical or small-order points in a sidecar (the four backends — pure Python, OpenSSL, Go's
 `edwards25519`, SunEC — have their own rules; no such vectors are in the oracle yet). Go's `(?i)` in the scope regexes is Unicode simple folding (the other three fold
 ASCII only): harmless while no keyword contains `k` or `s` (KELVIN SIGN, LONG S fold to them) — a caveat for whoever adds a word.
@@ -445,7 +510,8 @@ Two Go files carried an `AGPL-3.0-or-later` SPDX header in this Apache-2.0 repos
   NaN/Infinity, CR line endings or non-sequential `idx` are refused. A 0.6.x ledger or pack holding a float
   (e.g. `{"amount": 10.5}`) no longer verifies: store such values as strings (`"10.5"`) or `Decimal`.
 - The producer-signature layer accepts **`sig_alg: "ed25519"` only** (missing = ed25519); any other string is an
-  honest SKIP, a non-string is a malformed sidecar. A post-quantum backend is never a classical producer signature.
+  honest SKIP, a non-string is a malformed sidecar (since the *Unreleased* change below the empty string is a malformed
+  sidecar too, no longer a SKIP). A post-quantum backend is never a classical producer signature.
 - A trust store that fails the strict chain verification raises `ValueError` on load and is a `trusted-signer`
   FAIL in the verifier (it used to crash, or trust the last of two duplicated keys).
 - `TrustRegistry.rotate()` keeps the pinned post-quantum key unless `drop_pq=True` (it used to drop it silently).

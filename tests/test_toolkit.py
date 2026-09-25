@@ -2371,5 +2371,134 @@ class AbsenceSideOfTheVerdict(unittest.TestCase):
         self.assertTrue(clean["valid"]); self.assertTrue(clean["assessed"])
 
 
+class NemesisInputsAndFaults(unittest.TestCase):
+    """25/09/2026 (NEMESIS on 0.9.0): files that are not regular, the input bound, the sidecar fields nobody read, and a
+    fault of the verifier reported as a FAIL of the pack. Every test here is red on 0.9.0."""
+    SCOPE = "Proves integrity; does NOT prove the claim."
+
+    def _signed(self, tmp, name="p", anchored=False, idt=None):
+        p = os.path.join(tmp, name + ".json")
+        pack.write_pack(p, pack.build_pack("demo", {"claim": "x"}, self.SCOPE))
+        if anchored:
+            pack.anchor_pack(p, p[:-5] + ".ledger.jsonl")
+        pack.sign_pack(p, idt or signing.Identity("acme"))
+        return p
+
+    def _cli(self, args, env=None, timeout=60):
+        # a child with an address-space limit: a verifier that reads /dev/zero hits MemoryError, not the host's memory
+        import resource
+        def lim():
+            resource.setrlimit(resource.RLIMIT_AS, (1 << 30, 1 << 30))
+        return subprocess.run([sys.executable, "-m", "omega_evidence"] + args, capture_output=True, text=True, timeout=timeout,
+                              cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))), preexec_fn=lim,
+                              env=dict(os.environ, **(env or {})))
+
+    def test_read_input_bounds_and_file_type(self):
+        from omega_evidence.ledger import read_input
+        with tempfile.TemporaryDirectory() as tmp:
+            f = os.path.join(tmp, "f"); open(f, "wb").write(b"x" * 10)
+            self.assertEqual(read_input(f, limit=10), b"x" * 10)            # exactly the bound: read
+            open(f, "wb").write(b"x" * 11)
+            with self.assertRaises(OSError):
+                read_input(f, limit=10)                                     # one byte over: refused
+            fifo = os.path.join(tmp, "fifo"); os.mkfifo(fifo)
+            with self.assertRaises(OSError):
+                read_input(fifo)                                            # returns at once: O_NONBLOCK + not regular
+            z = os.path.join(tmp, "z"); os.symlink("/dev/zero", z)
+            with self.assertRaises(OSError):
+                read_input(z)
+            with self.assertRaises(OSError):
+                read_input(tmp)                                             # a directory
+
+    @unittest.skipUnless(hasattr(os, "mkfifo") and os.path.exists("/dev/zero"), "POSIX FIFO and /dev/zero")
+    def test_non_regular_file_in_every_position_is_a_prompt_fail(self):
+        for kind in ("fifo", "devzero"):
+            for where in ("pack", "sig", "ledger", "tsr", "trust"):
+                with self.subTest(kind=kind, where=where), tempfile.TemporaryDirectory() as tmp:
+                    p = self._signed(tmp, anchored=where in ("sig", "tsr"))
+                    target = {"pack": p, "sig": p[:-5] + ".sig.json", "ledger": p[:-5] + ".ledger.jsonl",
+                              "tsr": p[:-5] + ".tsr.json", "trust": os.path.join(tmp, "t.jsonl")}[where]
+                    if os.path.lexists(target):
+                        os.remove(target)
+                    os.mkfifo(target) if kind == "fifo" else os.symlink("/dev/zero", target)
+                    try:
+                        out = self._cli([p] + (["--trust-store", target] if where == "trust" else []), timeout=20)
+                    except subprocess.TimeoutExpired:
+                        self.fail(f"{where} {kind}: the verifier blocked")
+                    self.assertEqual(out.returncode, 1, out.stderr[-300:])
+                    self.assertEqual(json.loads(out.stdout)["verdict"], "FAIL")
+
+    def test_input_bound_is_one_number_and_refuses_above_it(self):
+        from omega_evidence.ledger import MAX_INPUT_BYTES
+        self.assertEqual(MAX_INPUT_BYTES, 64 * 1024 * 1024)                # the number the README and the three ports declare
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "p.json")
+            pack.write_pack(p, pack.build_pack("demo", {"claim": "x"}, self.SCOPE)); pack.anchor_pack(p, p[:-5] + ".ledger.jsonl")
+            self.assertTrue(verify_pack(p)["valid"])
+            with open(p, "a") as f:                                          # the same pack, padded with blanks past the bound
+                f.write(" " * (MAX_INPUT_BYTES + 1 - os.path.getsize(p)))
+            r = verify_pack(p)
+            self.assertFalse(r["valid"])
+            self.assertEqual([l["status"] for l in r["layers"] if l["layer"] == "pack-json"], ["FAIL"])
+
+    def test_sidecar_fields_are_read(self):
+        idt = signing.Identity("acme")
+        bad = {"fingerprint": ["", 0, None, True, [], {}, signing.Identity("x").fingerprint, idt.fingerprint + " "],
+               "signed_utc": ["", 0, None, True, [], {}, "2026-09-25T06:49:12Z", "2026-02-30T00:00:00+00:00",
+                              "2026-09-25T06:49:12+00:00\n", "٢٠٢٦-09-25T06:49:12+00:00"],
+               "sig_alg": [""], "pq_sig_alg": [""]}
+        with tempfile.TemporaryDirectory() as tmp:
+            for field, values in bad.items():
+                for v in values:
+                    with self.subTest(field=field, value=v):
+                        p = self._signed(tmp, anchored=True, idt=idt); sp = p[:-5] + ".sig.json"   # anchored: a SKIP would read PASS
+                        sd = json.load(open(sp)); sd[field] = v; json.dump(sd, open(sp, "w"))
+                        r = verify_pack(p)
+                        self.assertFalse(r["valid"])
+                        if field != "pq_sig_alg":   # a malformed PQ field fails its own layer; the classical signature still holds
+                            self.assertFalse(r["authenticated"])
+            p = self._signed(tmp); self.assertTrue(verify_pack(p)["authenticated"])        # as produced: PASS
+            sp = p[:-5] + ".sig.json"; sd = json.load(open(sp)); sd.pop("fingerprint"); sd.pop("signed_utc"); json.dump(sd, open(sp, "w"))
+            self.assertTrue(verify_pack(p)["authenticated"])                               # absent (legacy): PASS
+
+    def test_internal_error_is_not_assessed_never_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._signed(tmp)
+            with unittest.mock.patch.object(verifier, "_check_ledger", side_effect=MemoryError()):
+                r = verify_pack(p)                                            # the library returns, it does not raise
+            self.assertFalse(r["valid"]); self.assertFalse(r["assessed"]); self.assertFalse(r["authenticated"])
+            self.assertEqual(r["layers"][-1]["layer"], "internal"); self.assertIs(r["layers"][-1]["assessed"], False)
+            out = self._cli([p], env={"OEVERIFY_INJECT_INTERNAL_ERROR": "1"})
+            self.assertEqual((json.loads(out.stdout)["verdict"], out.returncode), ("NOT_ASSESSED", 77))
+            dd = json.load(open(p)); dd["claim"] = "y"; json.dump(dd, open(p, "w"))   # a finding before the fault still wins
+            out = self._cli([p], env={"OEVERIFY_INJECT_INTERNAL_ERROR": "1"})
+            self.assertEqual((json.loads(out.stdout)["verdict"], out.returncode), ("FAIL", 1))
+
+
+class WeakEd25519Keys20260925(unittest.TestCase):
+    """A small-order key makes R=identity, S=0 verify on every message (OpenSSL accepts it): a pack with ANY content,
+    that key in the sidecar and pinned in the trust store, was valid AND authenticated before this check."""
+    def test_forged_pack_with_pinned_small_order_key_is_refused(self):
+        from omega_evidence import pack as P, trust
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "p.json")
+            P.write_pack(p, P.build_pack("demo", {"claim": "anything"}, "Proves integrity; does NOT prove the claim."))
+            P.sign_pack(p, signing.Identity("acme"))
+            sp = p[:-5] + ".sig.json"; sd = json.load(open(sp))
+            sd["public_key_b64"] = base64.b64encode(bytes([1]) + bytes(31)).decode()
+            sd["signature_b64"] = base64.b64encode(bytes([1]) + bytes(63)).decode(); sd.pop("fingerprint", None)
+            json.dump(sd, open(sp, "w"))
+            st = os.path.join(d, "t.jsonl"); trust.TrustRegistry(st).trust("acme", sd["public_key_b64"])
+            r = verifier.verify_pack(p, trust_store=st)
+            self.assertFalse(r["valid"]); self.assertFalse(r.get("authenticated"))
+
+    def test_weak_list_matches_the_rule_and_real_keys_pass(self):
+        for h in ("01" + "00" * 31, "ec" + "ff" * 31, "ed" + "ff" * 30 + "7f", "00" * 32):
+            self.assertTrue(signing.weak_ed25519_key(bytes.fromhex(h)), h)
+        for i in range(200):
+            idt = signing.Identity(f"k{i}")
+            self.assertFalse(signing.weak_ed25519_key(base64.b64decode(idt.public_key_b64)))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

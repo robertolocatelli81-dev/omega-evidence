@@ -11,36 +11,39 @@
 // on an older OpenSSL the layer is reported as before: present-but-unverified (null), never true.
 // Usage: node oeverify.mjs <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]
 import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, constants as FS, existsSync, fstatSync, openSync, readSync } from "node:fs";
 
 
 
-function pyEscape(s) {
-  let out = '"';
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i), ch = s[i];
-    if (ch === '"') out += '\\"';
-    else if (ch === "\\") out += "\\\\";
-    else if (ch === "\n") out += "\\n";
-    else if (ch === "\r") out += "\\r";
-    else if (ch === "\t") out += "\\t";
-    else if (ch === "\b") out += "\\b";
-    else if (ch === "\f") out += "\\f";
-    else if (c < 0x20 || c > 0x7e) out += "\\u" + c.toString(16).padStart(4, "0");
-    else out += ch;
-  }
-  return out + '"';
+// Python json.dumps(ensure_ascii=True) string form, one UTF-16 unit at a time. One regex pass (25/09/2026): the former
+// char-by-char `out += ch` built a rope of one node per character, and a 70 MB string exhausted the V8 heap (NEMESIS).
+const PY_SHORT = { '"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f" };
+const escUnits = (s) => s.replace(/["\\]|[^ -~]/g, (ch) => PY_SHORT[ch] ?? "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
+const ESC_CHUNK = 1 << 16;   // a replace() over millions of matches keeps one part per match alive: bounded chunks keep the peak low
+function pyEscapeInto(s, out) {
+  out.push('"');
+  if (s.length <= ESC_CHUNK) out.push(escUnits(s)); else for (let i = 0; i < s.length; i += ESC_CHUNK) out.push(escUnits(s.slice(i, i + ESC_CHUNK)));
+  out.push('"');
 }
 const cmp = (a, b) => { const A = [...a], B = [...b]; for (let i = 0; i < Math.min(A.length, B.length); i++) { const d = A[i].codePointAt(0) - B[i].codePointAt(0); if (d) return d; } return A.length - B.length; };
-function canon(v) {
-  if (v === null) return "null";
-  if (v === true) return "true";
-  if (v === false) return "false";
-  if (typeof v === "number") { if (!Number.isInteger(v) || !Number.isSafeInteger(v)) throw new Error("non-portable number (float or |int|>2^53-1)"); return String(v); }
-  if (typeof v === "string") return pyEscape(v);
-  if (Array.isArray(v)) return "[" + v.map(canon).join(",") + "]";
-  if (typeof v === "object") return "{" + Object.keys(v).sort(cmp).map((k) => pyEscape(k) + ":" + canon(v[k])).join(",") + "}";
-  throw new Error("unserialisable " + typeof v);
+// canonical JSON as a list of parts (25/09/2026): hashed part by part, never joined into one string — at the input bound a
+// joined canonical form plus its Buffer copy took most of the V8 heap on non-ASCII text
+function canonInto(v, out) {
+  if (v === null) out.push("null");
+  else if (v === true) out.push("true");
+  else if (v === false) out.push("false");
+  else if (typeof v === "number") { if (!Number.isInteger(v) || !Number.isSafeInteger(v)) throw new Error("non-portable number (float or |int|>2^53-1)"); out.push(String(v)); }
+  else if (typeof v === "string") pyEscapeInto(v, out);
+  else if (Array.isArray(v)) { out.push("["); v.forEach((x, i) => { if (i) out.push(","); canonInto(x, out); }); out.push("]"); }
+  else if (typeof v === "object") { out.push("{"); Object.keys(v).sort(cmp).forEach((k, i) => { if (i) out.push(","); pyEscapeInto(k, out); out.push(":"); canonInto(v[k], out); }); out.push("}"); }
+  else throw new Error("unserialisable " + typeof v);
+}
+function canonHash(algo, v) { const o = []; canonInto(v, o); const h = createHash(algo); for (const part of o) h.update(part, "utf8"); return h.digest("hex"); }
+// the number rule of canon() without building the string (parseStrict only needs the throw)
+function checkPortable(v) {
+  if (typeof v === "number") { if (!Number.isInteger(v) || !Number.isSafeInteger(v)) throw new Error("non-portable number (float or |int|>2^53-1)"); }
+  else if (Array.isArray(v)) v.forEach(checkPortable);
+  else if (v !== null && typeof v === "object") for (const k of Object.keys(v)) checkPortable(v[k]);
 }
 
 function hasDuplicateKeys(text) {
@@ -133,46 +136,85 @@ export function hasLoneSurrogate(text) {
 export const TIP_KIND = "cryptovalid_tip/1";
 
 const SPKI = Buffer.from("302a300506032b6570032100", "hex");
-const MAX_INPUT_BYTES = 256 * 1024 * 1024;
+// One bound for every file read (pack, sidecars, ledger, trust store — and so for any ledger line), the same number in
+// the four verifiers (25/09/2026; it was 256 MiB here and in Java, a 64 MiB line in Go, none in Python). Above it the file
+// is refused as an unreadable one is.
+export const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 const SCOPE_LIMIT = /\bNOT\b/, SCOPE_OVERCLAIM = /\b(accredited|certified|qualified|guaranteed)\b/i, SCOPE_NEGATED = /\bNOT\b[^.]{0,40}(accredit|certif|qualif|guarant)/i;
 // r4 (Opus): without the u flag `[^.]{0,40}` counts UTF-16 code units — 21 astral characters between NOT and "guarant" are 42
 // units here and 21 code points in Python/Go/Java; each astral character is folded to one BMP placeholder before the tests
 // (the u flag is not used: with /iu the \b and \w semantics would diverge from the ASCII ones of the other three)
-const oneUnitPerCodePoint = (s) => Array.from(s, (c) => (c.codePointAt(0) > 0xffff ? "\ufffd" : c)).join("");
+const oneUnitPerCodePoint = (s) => s.replace(/[\u{10000}-\u{10FFFF}]/gu, "\ufffd");   // one pass, no array of code points (25/09/2026)
 const honestScope = (s0) => { if (typeof s0 !== "string") return false; const s = oneUnitPerCodePoint(s0); return SCOPE_LIMIT.test(s) && !(SCOPE_OVERCLAIM.test(s) && !SCOPE_NEGATED.test(s)); };
 const b64Strict = (s, n) => { if (typeof s !== "string" || s.length !== Math.ceil(n / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(s)) return null; const raw = Buffer.from(s, "base64"); return raw.length === n && raw.toString("base64") === s ? raw : null; };
+// signing.Identity.fingerprint: "ed25519:" + first 8 + U+2026 + last 8 hex digits of SHA-256(raw public key)
+const fingerprintOf = (pkRaw) => { const h = createHash("sha256").update(pkRaw).digest("hex"); return "ed25519:" + h.slice(0, 8) + "\u2026" + h.slice(-8); };
+// the instant sign_pack writes (isoformat, seconds, +00:00), ASCII digits, a real calendar date, year >= 1, second <= 59
+function signedUtcOK(v) {
+  if (typeof v !== "string" || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\+00:00$/.test(v)) return false;
+  const n = (a, b) => Number(v.slice(a, b)); const y = n(0, 4), mo = n(5, 7), d = n(8, 10), h = n(11, 13), mi = n(14, 16), se = n(17, 19);
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const dim = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return y >= 1 && mo >= 1 && mo <= 12 && d >= 1 && d <= dim[mo - 1] && h <= 23 && mi <= 59 && se <= 59;
+}
 const sidecar = (p, suf) => (p.endsWith(".json") ? p.slice(0, -5) + suf : p + suf);
 
+// trim ASCII space/tab/CR/LF by index: the former /^[ \t\r\n]+|[ \t\r\n]+$/g is quadratic on long inner whitespace runs
+function trimJsonWs(text) {
+  const ws = (c) => c === 32 || c === 9 || c === 13 || c === 10;
+  let a = 0, z = text.length;
+  while (a < z && ws(text.charCodeAt(a))) a++;
+  while (z > a && ws(text.charCodeAt(z - 1))) z--;
+  return a === 0 && z === text.length ? text : text.slice(a, z);
+}
 function parseStrict(text) {
-  const t = text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+  const t = trimJsonWs(text);
   const d = jsonNestingDepth(t); if (d > MAX_JSON_DEPTH) throw new Error("json_too_deep");
   if (hasLoneSurrogate(t)) throw new Error("lone_surrogate");
   if (hasFloatLexeme(t)) throw new Error("float_lexeme");
   if (hasDuplicateKeys(t)) throw new Error("duplicate_key");
-  const v = JSON.parse(t); canon(v);   // canon throws on floats / non-portable integers
+  const v = JSON.parse(t); checkPortable(v);   // floats / non-portable integers throw (canon()'s rule, without the string)
   return v;
 }
-function readObject(path) {
-  if (statSync(path).size > MAX_INPUT_BYTES) throw new Error("input_too_large");
-  const v = parseStrict(readText(path));
+// One verifier input (25/09/2026, NEMESIS: a FIFO in place of a sidecar blocked all four verifiers, a symlink to /dev/zero
+// exhausted memory): opened O_NONBLOCK so a FIFO does not block the open, accepted only if fstat says the OPENED file is
+// regular, read to at most MAX_INPUT_BYTES + 1 bytes. Every refusal throws, and each caller reports it as it reports an
+// unreadable file.
+export function readInput(path, limit = MAX_INPUT_BYTES) {
+  const fd = openSync(path, FS.O_RDONLY | (FS.O_NONBLOCK ?? 0));
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error("not a regular file");
+    const chunks = []; let total = 0;
+    while (total <= limit) {
+      const buf = Buffer.allocUnsafe(Math.min(1 << 20, limit + 1 - total));
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (n === 0) break;
+      chunks.push(n === buf.length ? buf : buf.subarray(0, n)); total += n;
+    }
+    if (total > limit) throw new Error("input exceeds " + limit + " bytes");
+    return Buffer.concat(chunks, total);
+  } finally { closeSync(fd); }
+}
+function objectOf(text) {
+  const v = parseStrict(text);
   if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("not a JSON object");
   return v;
 }
-const sha3Hex = (b) => createHash("sha3-256").update(b).digest("hex");
+const readObject = (path) => objectOf(readText(path));
 const sha256Hex = (b) => createHash("sha256").update(b).digest("hex");
 const withoutKey = (o, k) => Object.fromEntries(Object.entries(o).filter(([key]) => key !== k));   // keeps an own "__proto__" key (c[key] = … would invoke the setter and DROP it: a ledger entry with that key added and self_hash untouched verified PASS here alone — 21/09/2026)
 const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });   // strict: one invalid byte is unreadable, never U+FFFD
-const readText = (path) => UTF8.decode(readFileSync(path));
+const readText = (path) => UTF8.decode(readInput(path));
 
 function ledgerEntries(path) {
   const out = []; let ok = true, prev = "0".repeat(64), n = 0;
   let ledgerText;   // a missing / unreadable / oversized / non-UTF-8 file is a broken ledger, never an uncaught ENOENT (0.8.3 review)
-  try { if (statSync(path).size > MAX_INPUT_BYTES) return { ok: false, entries: [] }; ledgerText = readText(path); } catch { return { ok: false, entries: [] }; }
+  try { ledgerText = readText(path); } catch { return { ok: false, entries: [] }; }   // bounded, non-blocking, regular file only (readInput)
   for (const ln of ledgerText.split("\n")) {
     if (!ln.replace(/[ \t\r]/g, "")) continue;
     let e; try { e = parseStrict(ln); if (!e || typeof e !== "object" || Array.isArray(e)) throw new Error("x"); } catch { ok = false; n++; continue; }
     const sh = e.self_hash, ph = e.prev_hash;
-    let sum = null; try { sum = sha256Hex(Buffer.from(canon(withoutKey(e, "self_hash")), "utf-8")); } catch { sum = null; }
+    let sum = null; try { sum = canonHash("sha256", withoutKey(e, "self_hash")); } catch { sum = null; }
     if (typeof e.idx === "boolean" || e.idx !== n || ph !== prev || typeof sh !== "string" || sh !== sum) ok = false;
     if (typeof sh === "string") prev = sh;
     out.push(e); n++;
@@ -197,17 +239,31 @@ function trustState(path) {
   return { ok, st };
 }
 
-export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = "", requirePQ = false } = {}) {
+export const INJECT_ENV = "OEVERIFY_INJECT_INTERNAL_ERROR";   // test hook, the same name in the four verifiers (README)
+// A fault of the TOOL is not a finding about the pack (25/09/2026): the layer `internal` is FAIL with assessed=false, so the
+// run is NOT_ASSESSED (exit 77) unless a layer judged before the fault is adverse; never authenticated, never pq-protected.
+// Before, an uncaught exception here exited 1 — the code of FAIL. A V8 heap exhaustion is fatal, not catchable: the input
+// bound is what keeps it away.
+function internalError(layers, e) {
+  const ls = layers.concat([{ layer: "internal", status: "FAIL", detail: "verifier error, not a finding about the pack: " + ((e && e.name) || typeof e), assessed: false }]);
+  const r = finish(ls, false, false, false);
+  return { ...r, authenticated: false, pq_protected: false };
+}
+export function verifyPack(packPath, opts = {}) {
   const layers = [];
+  try { return verifyPackIn(layers, packPath, opts); } catch (e) { return internalError(layers, e); }
+}
+function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ = "", requirePQ = false } = {}) {
   const add = (layer, status, detail = "", assessed = true) => layers.push(assessed ? { layer, status, detail } : { layer, status, detail, assessed });
   const required = requirePQ || Boolean(expectPQ);
-  let pack;
-  try { pack = readObject(packPath); } catch (e) { add("pack-json", "FAIL", e.message); return finish(layers, false, false, required); }
+  let pack, packBytes;   // read ONCE; the timestamp binding hashes these bytes, not a second read
+  try { packBytes = readInput(packPath); pack = objectOf(UTF8.decode(packBytes)); } catch (e) { add("pack-json", "FAIL", e.message); return finish(layers, false, false, required); }
   add("pack-json", "PASS");
   add("honest-scope", honestScope(pack.honest_scope) ? "PASS" : "FAIL", honestScope(pack.honest_scope) ? "limit declared" : "no explicit honest_scope (or overclaim without a real NOT-limit)");
   const declared = typeof pack.pack_sha3 === "string" ? pack.pack_sha3 : "";
-  let computed = ""; try { computed = sha3Hex(Buffer.from(canon(withoutKey(pack, "pack_sha3")), "utf-8")); } catch { computed = null; }
+  let computed = ""; try { computed = canonHash("sha3-256", withoutKey(pack, "pack_sha3")); } catch { computed = null; }
   add("pack-sha3", computed !== null && declared && declared === computed ? "PASS" : "FAIL");
+  if (process.env[INJECT_ENV] === "1") throw new Error("internal error injected by " + INJECT_ENV);
   let lp = ledger; if (!lp && existsSync(sidecar(packPath, ".ledger.jsonl"))) lp = sidecar(packPath, ".ledger.jsonl");
   let ledgerOK = false;
   if (!lp) add("ledger-chain", "SKIP", "no ledger beside pack");
@@ -219,7 +275,7 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
   if (existsSync(sidecar(packPath, ".tsr.json"))) {   // shape + content-binding checked like the reference; the token itself is not
     let ts = null; try { ts = readObject(sidecar(packPath, ".tsr.json")); } catch { ts = null; }
     if (!ts) add("timestamp", "FAIL", "malformed sidecar");
-    else if (ts.digest_sha256 !== sha256Hex(readFileSync(packPath))) add("timestamp", "FAIL", "pack changed after stamping");
+    else if (ts.digest_sha256 !== sha256Hex(packBytes)) add("timestamp", "FAIL", "pack changed after stamping");
     else add("timestamp", "SKIP", "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
   } else add("timestamp", "SKIP", "no timestamp sidecar");
   let sigStatus = "SKIP", trusted = false, trustFailed = false;
@@ -229,14 +285,18 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
     let side = null; try { side = readObject(sp); } catch (e) { add("producer-signature", "FAIL", "malformed sidecar: " + e.message); sigStatus = "FAIL"; }
     if (side) {
       const alg = "sig_alg" in side ? side.sig_alg : "ed25519";
-      if ("sig_alg" in side && typeof alg !== "string") { add("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a string"); sigStatus = "FAIL"; }  // council 16/09 r1
+      if ("sig_alg" in side && (typeof alg !== "string" || alg === "")) { add("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a non-empty string"); sigStatus = "FAIL"; }  // council 16/09 r1; "" is present and malformed (25/09/2026)
       else if (alg !== "ed25519") add("producer-signature", "SKIP", "unsupported sig_alg: " + alg);
       else {
         const pk = b64Strict(side.public_key_b64, 32), sig = b64Strict(side.signature_b64, 64);
         let okSig = false;
         if (!pk || !sig || typeof declared !== "string" || !/^[0-9a-f]{64}$/.test(declared)) { add("producer-signature", "FAIL", "malformed sidecar fields (strict base64 32/64, lowercase hex digest)"); sigStatus = "FAIL"; }   // council r3
+        // 25/09/2026 (NEMESIS): fingerprint / signed_utc were never read ("", 0, null, true, [], {}: PASS, authenticated).
+        // Absent = legacy, fine; present = what sign_pack writes (the fingerprint derived from THIS key, the exact instant form)
+        else if ("fingerprint" in side && side.fingerprint !== fingerprintOf(pk)) { add("producer-signature", "FAIL", "malformed sidecar field: fingerprint is not the one derived from public_key_b64"); sigStatus = "FAIL"; }
+        else if ("signed_utc" in side && !signedUtcOK(side.signed_utc)) { add("producer-signature", "FAIL", "malformed sidecar field: signed_utc is not YYYY-MM-DDTHH:MM:SS+00:00"); sigStatus = "FAIL"; }
         else {
-        try { okSig = Boolean(edVerify(null, Buffer.from(declared, "utf-8"), createPublicKey({ key: Buffer.concat([SPKI, pk]), format: "der", type: "spki" }), sig)); } catch { okSig = false; }
+        try { okSig = !weakEd25519(pk) && Boolean(edVerify(null, Buffer.from(declared, "utf-8"), createPublicKey({ key: Buffer.concat([SPKI, pk]), format: "der", type: "spki" }), sig)); } catch { okSig = false; }
         if (!okSig || side.signed_pack_sha3 !== declared) { add("producer-signature", "FAIL", "signature invalid or pack changed"); sigStatus = "FAIL"; }
         else {
           const sid = side.signer_id;
@@ -270,6 +330,14 @@ export function verifyPack(packPath, { ledger = "", trustStore = "", expectPQ = 
 
 // ML-DSA-65 (FIPS 204) through OpenSSL >= 3.5 when the runtime has it; otherwise the layer is reported as Python does
 // without a backend (SKIP unverified; FAIL when required) plus the pinned-key and shape checks — never true unverified.
+// small-order / non-canonical Ed25519 keys (R=identity, S=0 verifies on every message; OpenSSL accepts it, measured 25/09/2026) — same list as omega_evidence/signing.py WEAK_ED25519_KEYS
+const WEAK_ED25519 = new Set(["0100000000000000000000000000000000000000000000000000000000000000", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "0000000000000000000000000000000000000000000000000000000000000000", "0000000000000000000000000000000000000000000000000000000000000080", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", "0100000000000000000000000000000000000000000000000000000000000080", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"]);
+function weakEd25519(pk) {
+  if (pk.length !== 32 || WEAK_ED25519.has(pk.toString("hex"))) return true;
+  if ((pk[31] & 0x7f) !== 0x7f || pk[0] < 0xed) return false;          // y >= p = 2^255-19 only when bytes 1..30 are 0xff too
+  for (let i = 1; i < 31; i++) if (pk[i] !== 0xff) return false;
+  return true;
+}
 const MLDSA65_SPKI_PREFIX = Buffer.from("308207b2300b0609608648016503040312038207a100", "hex");   // SEQ{ SEQ{OID 2.16.840.1.101.3.4.3.18}, BIT STRING(0x00||1952 bytes) }
 function mldsa65Verify(pk, msg, sig) {
   // returns true/false, or null when this Node/OpenSSL cannot load ML-DSA keys (feature-detected, never guessed)
@@ -286,7 +354,7 @@ function checkPQ(layers, side, expectPQ, requirePQ, digest) {
   // `assessed` defaults to true; a false here means THIS runtime could not run the check (see the two call sites).
   const add = (s, d, assessed = true) => layers.push(assessed ? { layer: "pq-signature", status: s, detail: d } : { layer: "pq-signature", status: s, detail: d, assessed });
   const required = requirePQ || Boolean(expectPQ);
-  if ("pq_sig_alg" in side && typeof side.pq_sig_alg !== "string") { add("FAIL", "pq_sig_alg is not a string"); return; }
+  if ("pq_sig_alg" in side && (typeof side.pq_sig_alg !== "string" || side.pq_sig_alg === "")) { add("FAIL", "pq_sig_alg is not a non-empty string"); return; }   // "" is present and malformed, not absent (25/09/2026)
   const palg = side.pq_sig_alg;
   if (!palg) { if (required) add("FAIL", "post-quantum layer required but absent (stripped or never signed)"); return; }
   if (expectPQ && side.pq_public_key_b64 !== expectPQ) { add("FAIL", palg + " co-signature by a key other than the pinned one"); return; }
@@ -339,8 +407,12 @@ function main(argv) {
     pack = a;
   }
   if (!pack) usage();
-  const r = verifyPack(pack, { ledger: opts["--ledger"] ?? "", trustStore: opts["--trust-store"] ?? "", expectPQ: opts["--expect-pq-key"] ?? "", requirePQ: Boolean(opts["--require-pq"]) });
-  console.log(JSON.stringify(r, null, 1));
+  let r, out;
+  try {
+    r = verifyPack(pack, { ledger: opts["--ledger"] ?? "", trustStore: opts["--trust-store"] ?? "", expectPQ: opts["--expect-pq-key"] ?? "", requirePQ: Boolean(opts["--require-pq"]) });
+    out = JSON.stringify(r, null, 1);
+  } catch (e) { r = internalError([], e); out = JSON.stringify(r, null, 1); }   // a fault outside verifyPack's own guard: exit 77, never 1
+  console.log(out);
   process.exit(r.verdict === "PASS" ? 0 : r.verdict === "FAIL" ? 1 : 77);   // 77 = nothing adverse found, the check did not run here
 }
 if (process.argv[1] && process.argv[1].endsWith("oeverify.mjs")) main(process.argv.slice(2));
