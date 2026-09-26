@@ -368,9 +368,10 @@ Python reference, Node, Go and Java:
   1618 and 2096 MiB here. Below that heap Java answers `NOT_ASSESSED` (the `OutOfMemoryError` is a fault, next point);
   a V8 heap exhaustion or a Go runtime out-of-memory is fatal in the runtime itself and cannot be turned into a receipt,
   and an OS OOM kill is outside every verifier's control. **The bound alone did not keep them away** (26/09/2026): a
-  ledger of 64 MiB made of many short lines was split into all its lines at once — 64 M empty lines took Python to 612
-  MiB, Node to ~1 GB, Go to 1.7 GB and Java out of memory; 22 M lines `{}` crashed the Go runtime with no verdict at 2.3
-  GB (under a 2.5 GB cap), took Node to 1.95 GB, and left Python and Java `NOT_ASSESSED` for want of memory. The ledger
+  ledger of 64 MiB made of many short lines was split into all its lines at once. Measured on the previous code
+  (`474122b`) under `prlimit --data` 2.5 GB, peak RSS: 64 M empty lines — Python, Node and Go answered FAIL at 611 MiB,
+  1018 MiB and 1701 MiB, Java answered `NOT_ASSESSED` (out of memory, 1761 MiB); 22 M lines `{}` — Go crashed with no
+  verdict (2307 MiB), Python and Java answered `NOT_ASSESSED` (2365 and 1786 MiB), Node answered FAIL at 2170 MiB. The ledger
   is now read one line at a time; Node, Go and Java stop at the first break of the chain (no caller reads the entries of
   a broken chain), Python after 1 000 bad lines, which it reports. Measured on both shapes after the change, under the
   same cap: every verifier answers FAIL at 157–254 MiB (Python's line reader is ~3× slower than `split`: the price of
