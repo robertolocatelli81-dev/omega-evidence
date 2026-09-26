@@ -12,7 +12,10 @@ said true for a revoked signer) and the trust-store / sig_alg / foreign-classica
 verdict's 0/1/77) is never agreement; cases with an EXPECTED verdict (every verifier must give it, so an error shared by the
 four stays visible) for FIFO and /dev/zero inputs in every position, the input bound, the sidecar fields fingerprint /
 signed_utc, "" as an algorithm name, and an injected internal error. The cases that used to block or exhaust memory run
-under `systemd-run --user --scope -p MemoryMax=$OEVERIFY_MEMORY_MAX` (default 1500M) when available. OEVERIFY_JS points the
+under `prlimit --data=$OEVERIFY_DATA_MAX` (default 1.5 GB; 26/09/2026: at 2.5 GB the old Node, which materialized every
+ledger line, still fitted and a revert went unseen — at 1.5 GB it crashes and the case turns DIFF), falling back to
+`systemd-run --user --scope -p MemoryMax=$OEVERIFY_MEMORY_MAX`, which is INERT on a cgroup-v1 host (measured: 500 MB
+allocated under MemoryMax=100M) — the oracle says so when it falls back. OEVERIFY_JS points the
 Node column at another tree; OEVERIFY_ONLY=prefix,... runs only the matching cases (ablations)."""
 import base64, glob, json, os, shutil, subprocess, sys, tempfile
 
@@ -33,7 +36,7 @@ PY_CWD = None   # set from OEVERIFY_PYTHONPATH (ablation)
 # 25/09/2026 — per-case metadata of the cases added for the NEMESIS findings:
 EXPECT = {}     # name -> the verdict EVERY verifier must give (a wrong outcome shared by the four is still a disagreement)
 CASE_ENV = {}   # name -> extra environment (the internal-error injection hook)
-HAZARD = set()  # names whose input used to block or exhaust memory: run with a memory cap (systemd-run) and a short timeout
+HAZARD = set()  # names whose input used to block or exhaust memory: run with a memory cap (prlimit) and a short timeout
 
 
 def build_cases(d):
@@ -327,6 +330,13 @@ def _nemesis_cases(d, cases, mk, idt, store):
         EXPECT[n] = "FAIL"
     for n in ("cap-ledger-line-at-bound", "cap-ledger-line-over", "cap-pack-over", "cap-sig-over", "cap-trust-over"):
         HAZARD.add(n)
+    # 26/09/2026: many short lines under the bound. Materializing every line first took Go to a runtime crash with no
+    # verdict (22 M lines "{}") and Java out of memory; read one line at a time and stopped at the first break: FAIL.
+    for n, body in (("cap-ledger-many-empty-lines", b"\n" * CAP), ("cap-ledger-many-empty-objects", b"{}\n" * (CAP // 3))):
+        p = signed(n)
+        with open(p[:-5] + ".ledger.jsonl", "wb") as f:
+            f.write(body)
+        cases[n] = (p, [], None); EXPECT[n] = "FAIL"; HAZARD.add(n)
     # 3. sidecar fields the producer writes and no verifier read on 0.9.0 (PASS, authenticated, with any value): present
     #    = what sign_pack writes, the fingerprint DERIVED from the key and the instant in its exact form; absent = legacy
     other_fp = signing.Identity("x").fingerprint
@@ -361,11 +371,22 @@ def _nemesis_cases(d, cases, mk, idt, store):
 
 
 EXIT_OF = {"PASS": 0, "FAIL": 1, "NOT_ASSESSED": 77}
-MEM_WRAP = None   # systemd-run prefix for the HAZARD cases (a verifier that reads /dev/zero must not take the host down)
+MEM_WRAP = None   # memory-cap prefix for the HAZARD cases (a verifier that reads /dev/zero must not take the host down)
 
 
 def mem_wrap():
     global MEM_WRAP
+    if MEM_WRAP is None and shutil.which("prlimit"):
+        # prlimit --data first: `systemd-run -p MemoryMax=` does NOT limit on a cgroup-v1 host (measured 25/09/2026 — the
+        # hazard rows then ran uncapped while the oracle printed a cap). RLIMIT_DATA counts private mappings (Linux >= 4.7).
+        pre = ["prlimit", "--data=" + os.environ.get("OEVERIFY_DATA_MAX", "1500000000"), "--"]
+        try:
+            ok = subprocess.run(pre + ["true"], capture_output=True, timeout=30).returncode == 0
+        except Exception:  # noqa: BLE001
+            ok = False
+        if ok:
+            MEM_WRAP = pre
+            print("  memory cap on the hazard cases: prlimit --data=" + pre[1].split("=")[1] + " bytes")
     if MEM_WRAP is None:
         pre = ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=" + os.environ.get("OEVERIFY_MEMORY_MAX", "1500M"), "-p", "MemorySwapMax=0"]
         try:
@@ -373,7 +394,8 @@ def mem_wrap():
         except Exception:  # noqa: BLE001
             ok = False
         MEM_WRAP = pre if ok else []
-        print("  memory cap on the hazard cases: " + (pre[5] if ok else "NOT available (systemd-run --user --scope failed): run them only on fixed verifiers"))
+        print("  memory cap on the hazard cases: " + (pre[5] + " via systemd-run — INERT on a cgroup-v1 host: the hazard cases may run uncapped" if ok
+                                                     else "NOT available (no prlimit, systemd-run --user --scope failed): run them only on fixed verifiers"))
     return MEM_WRAP
 
 

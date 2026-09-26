@@ -33,7 +33,10 @@ GENESIS = "0" * 64
 
 # One bound for every file a verifier reads (pack, .sig.json, .tsr.json, ledger, trust store) — and so for any single
 # ledger line — the same number in the Python, Node, Go and Java verifiers (25/09/2026). Chosen where the peak memory of
-# every one of them, measured at the bound, stays far from its runtime's limit; above it every verifier refuses the file
+# every one of them, measured at the bound on the shapes the README lists, stays far from its runtime's limit — which
+# needed the ledger to be read one line at a time as well (26/09/2026: many short lines exhausted memory under the same
+# bound when every line was materialized first). NOT covered: one valid container with tens of millions of elements
+# still costs ~30x its size (README, "Still open"); above the bound every verifier refuses the file
 # the way it refuses an unreadable one. It bounds what a VERIFIER accepts, not what Ledger.append may write.
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 
@@ -336,12 +339,40 @@ class Ledger:
                     yield e
 
 
+def _lines(text: str):
+    """LF-separated lines, one at a time. `text.split("\\n")` built every line first: 64 MiB of empty lines became 64 M
+    string objects (612 MiB measured 26/09/2026; Go 1.7 GB, Node 1 GB, Java out of memory with the same shape)."""
+    start = 0
+    while True:
+        end = text.find("\n", start)
+        if end < 0:
+            yield text[start:]
+            return
+        yield text[start:end]
+        start = end + 1
+
+
+BAD_KEPT = 1000     # at most this many bad line numbers are reported, and the reading STOPS there: the chain is broken
+                    # all the same. Before (26/09/2026), 22 M lines "{}" were all parsed: 100-154 s where the other
+                    # three verifiers stop at the first break (independent review). Library callers of Ledger.verify()
+                    # get at most BAD_KEPT numbers; agent.verify() says so with bad_entries_truncated.
+
+
 def verify_text(text: str) -> Tuple[bool, List[int]]:
     """Ledger.verify() over a text already read — the verifier reads each file once, through read_input()."""
     bad: List[int] = []
+    broken = False
     prev = GENESIS
     n = 0
-    for i, line in enumerate(text.split("\n")):
+
+    def mark(i: int) -> None:
+        nonlocal broken
+        broken = True
+        if len(bad) < BAD_KEPT:
+            bad.append(i)
+    for i, line in enumerate(_lines(text)):
+        if len(bad) >= BAD_KEPT:
+            break
         if not line.strip(" \t\r\n"):
             continue
         try:
@@ -349,23 +380,23 @@ def verify_text(text: str) -> Tuple[bool, List[int]]:
             if not isinstance(e, dict):
                 raise ValueError("entry is not an object")
         except (ValueError, RecursionError):
-            bad.append(i)
+            mark(i)
             n += 1
             continue
         idx = e.get("idx")
         sh = e.get("self_hash")
         if (isinstance(idx, bool) or idx != n or e.get("prev_hash") != prev
                 or not isinstance(sh, str) or sh != _hash_entry(e)):
-            bad.append(i)
+            mark(i)
         prev = sh if isinstance(sh, str) else prev
         n += 1
-    return (not bad), bad
+    return (not broken), bad
 
 
 def entries_text(text: str) -> List[Dict]:
     """Ledger.raw_entries() over a text already read (strict profile; a line that is not an object raises ValueError)."""
     out = []
-    for line in text.split("\n"):
+    for line in _lines(text):
         line = line.strip(" \t\r\n")
         if line:
             e = loads_strict(line)

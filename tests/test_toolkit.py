@@ -2500,5 +2500,33 @@ class WeakEd25519Keys20260925(unittest.TestCase):
             self.assertFalse(signing.weak_ed25519_key(base64.b64decode(idt.public_key_b64)))
 
 
+class TestLedgerLines20260926(unittest.TestCase):
+    """B2 (26/09/2026): the ledger is read one line at a time; the Python reader stops after BAD_KEPT bad lines."""
+
+    def test_lines_split_exactly_like_split_newline(self):
+        from omega_evidence.ledger import _lines
+        for t in ("", "\n", "a", "a\n", "a\nb", "a\n\nb\n", "\r\n", "a\r\nb", "a\rb", "\n\n\n", " \t\n{}"):
+            self.assertEqual(list(_lines(t)), t.split("\n"), repr(t))
+
+    def test_reading_stops_after_bad_kept_bad_lines(self):
+        from omega_evidence import ledger as L
+        calls = []
+        real = L.loads_strict
+        with unittest.mock.patch.object(L, "loads_strict", side_effect=lambda t: calls.append(1) or real(t)):
+            ok, bad = L.verify_text("{}\n" * (L.BAD_KEPT * 3))
+        self.assertFalse(ok)
+        self.assertEqual(len(bad), L.BAD_KEPT)
+        self.assertEqual(bad[:3], [0, 1, 2])
+        self.assertEqual(len(calls), L.BAD_KEPT)      # the reading STOPPED: lines past the kept ones are not parsed
+
+    def test_agent_verify_says_when_the_list_is_truncated(self):
+        from omega_evidence.ledger import BAD_KEPT
+        with tempfile.TemporaryDirectory() as d:
+            gov = agent.AgentEvidenceLog(os.path.join(d, "l.jsonl"), runtime_id="t")   # opens a valid (empty) ledger
+            open(os.path.join(d, "l.jsonl"), "w").write("{}\n" * (BAD_KEPT + 5))     # then it is corrupted on disk
+            v = gov.verify()
+            self.assertFalse(v["chain_ok"])
+            self.assertTrue(v.get("bad_entries_truncated"))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -177,7 +177,20 @@ func ledgerEntries(path string) ([]*Object, bool) {
 	}
 	prev, n, ok := Genesis, 0, true
 	var out []*Object
-	for _, raw := range bytes.Split(data, []byte("\n")) { // LF lines; a CR before the LF is JSON whitespace (and blank below)
+	// LF lines, one at a time (a CR before the LF is JSON whitespace, and blank below). bytes.Split built a slice header
+	// per line first: 64 MiB of empty lines → 1.7 GB (measured 26/09/2026).
+	for rest, more := data, true; more; {
+		var raw []byte
+		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+			raw, rest = rest[:i], rest[i+1:]
+		} else {
+			raw, more = rest, false
+		}
+		if !ok {
+			// the chain is already broken and no caller reads the entries of a broken chain: stop accumulating
+			// (26/09/2026: 22 M lines "{}" crashed the runtime at 2.3 GB, no verdict)
+			break
+		}
 		blank := true
 		for _, c := range raw {
 			if c != ' ' && c != '\t' && c != '\r' {
@@ -208,6 +221,9 @@ func ledgerEntries(path string) ([]*Object, bool) {
 		}
 		out = append(out, e)
 		n++
+	}
+	if !ok {
+		return nil, false
 	}
 	return out, ok
 }
@@ -291,7 +307,8 @@ func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ b
 // InternalError: a fault of the TOOL is not a finding about the pack (25/09/2026). The layer "internal" is FAIL with
 // assessed=false, so the run is NOT_ASSESSED (exit 77) unless a layer judged before the fault is adverse; never
 // authenticated, never pq-protected. Before, a panic exited 2 — the code of a usage error. A runtime out-of-memory is a
-// fatal error in Go, not a panic: the input bound is what keeps it away.
+// fatal error in Go, not a panic: the input bound, with the ledger read one line at a time, keeps it away on the shapes
+// measured (README; 26/09/2026 22 M lines "{}" crashed the runtime before the line-at-a-time reading).
 func InternalError(layers []Layer, what string) Receipt {
 	f := false
 	r := Receipt{Layers: append(append([]Layer{}, layers...), Layer{"internal", "FAIL", "verifier error, not a finding about the pack: " + what, &f}),

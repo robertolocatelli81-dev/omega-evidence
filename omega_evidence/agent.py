@@ -175,8 +175,11 @@ class AgentEvidenceLog:
         return rec
 
     def verify(self) -> Dict[str, Any]:
+        from .ledger import BAD_KEPT
         ok, bad = self._ledger.verify()
-        return {"chain_ok": ok, "bad_entries": bad, "entries": self._ledger.count}
+        # at most BAD_KEPT line numbers (the reading stops there, 26/09/2026): say when the list is not the whole story
+        return {"chain_ok": ok, "bad_entries": bad, "bad_entries_truncated": len(bad) >= BAD_KEPT,
+                "entries": self._ledger.count}
 
     def stats(self) -> Dict[str, Any]:
         st = {"total": 0, "allow": 0, "deny": 0, "allow_with_approval": 0,

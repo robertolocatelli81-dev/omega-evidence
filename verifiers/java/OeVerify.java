@@ -328,10 +328,12 @@ public class OeVerify {
         {
             // LF lines cut on the BYTES (25/09/2026: decode, cut, re-encode and decode again held four copies of a long line);
             // for valid UTF-8 the bytes of a line are exactly the re-encoding of its decoded text
-            List<int[]> lines = new ArrayList<>(); int start = 0;
-            for (int k = 0; k < all.length; k++) if (all[k] == '\n') { lines.add(new int[]{start, k}); start = k + 1; }
-            if (start < all.length) lines.add(new int[]{start, all.length});
-            for (int[] ln : lines) {
+            // one line at a time: a List<int[]> of every line first ran out of memory on 64 MiB of empty lines (26/09/2026)
+            for (int start = 0; start <= all.length; ) {
+                int end = start; while (end < all.length && all[end] != '\n') end++;
+                int[] ln = {start, end}; start = end + 1;
+                if (!ok[0]) break;   // chain already broken, no caller reads its entries: stop accumulating (26/09: 22 M "{}" lines → OOM)
+                if (ln[0] == ln[1] && ln[1] == all.length && all.length > 0 && all[all.length - 1] == '\n') break;   // after a final LF: nothing
                 boolean blank = true; for (int k = ln[0]; k < ln[1]; k++) if (all[k] != ' ' && all[k] != '\t' && all[k] != '\r') { blank = false; break; }
                 if (blank) continue;
                 Object v; try { v = parse(ln[0] == 0 && ln[1] == all.length ? all : Arrays.copyOfRange(all, ln[0], ln[1])); } catch (Bad e) { ok[0] = false; n++; continue; }
@@ -344,7 +346,7 @@ public class OeVerify {
                 out.add(e); n++;
             }
         }
-        return out;
+        return ok[0] ? out : new ArrayList<>();
     }
     static boolean anchors(Obj e, String digest) {
         if (digest.equals(str(e, "anchored_pack_sha3"))) return true;

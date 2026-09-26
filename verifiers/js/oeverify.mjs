@@ -210,7 +210,13 @@ function ledgerEntries(path) {
   const out = []; let ok = true, prev = "0".repeat(64), n = 0;
   let ledgerText;   // a missing / unreadable / oversized / non-UTF-8 file is a broken ledger, never an uncaught ENOENT (0.8.3 review)
   try { ledgerText = readText(path); } catch { return { ok: false, entries: [] }; }   // bounded, non-blocking, regular file only (readInput)
-  for (const ln of ledgerText.split("\n")) {
+  // one line at a time: split("\n") built every line first (64 MiB of empty lines → ~1 GB, measured 26/09/2026)
+  for (let start = 0, more = true; more;) {
+    const end = ledgerText.indexOf("\n", start);
+    const ln = end < 0 ? ledgerText.slice(start) : ledgerText.slice(start, end);
+    if (end < 0) more = false; else start = end + 1;
+    if (!ok) break;   // the chain is already broken and no caller reads the entries of a broken chain: stop accumulating
+                      // (26/09/2026: 22 M lines "{}" kept 22 M objects, 1.95 GB)
     if (!ln.replace(/[ \t\r]/g, "")) continue;
     let e; try { e = parseStrict(ln); if (!e || typeof e !== "object" || Array.isArray(e)) throw new Error("x"); } catch { ok = false; n++; continue; }
     const sh = e.self_hash, ph = e.prev_hash;
@@ -219,7 +225,7 @@ function ledgerEntries(path) {
     if (typeof sh === "string") prev = sh;
     out.push(e); n++;
   }
-  return { ok, entries: out };
+  return { ok, entries: ok ? out : [] };
 }
 const anchors = (e, digest) => e.anchored_pack_sha3 === digest || (e.data && typeof e.data === "object" && e.data.anchored_pack_sha3 === digest);
 
@@ -243,7 +249,7 @@ export const INJECT_ENV = "OEVERIFY_INJECT_INTERNAL_ERROR";   // test hook, the 
 // A fault of the TOOL is not a finding about the pack (25/09/2026): the layer `internal` is FAIL with assessed=false, so the
 // run is NOT_ASSESSED (exit 77) unless a layer judged before the fault is adverse; never authenticated, never pq-protected.
 // Before, an uncaught exception here exited 1 — the code of FAIL. A V8 heap exhaustion is fatal, not catchable: the input
-// bound is what keeps it away.
+// bound, with the ledger read one line at a time, keeps it away on the shapes measured (README, 26/09/2026).
 function internalError(layers, e) {
   const ls = layers.concat([{ layer: "internal", status: "FAIL", detail: "verifier error, not a finding about the pack: " + ((e && e.name) || typeof e), assessed: false }]);
   const r = finish(ls, false, false, false);
