@@ -41,7 +41,7 @@ const InjectEnv = "OEVERIFY_INJECT_INTERNAL_ERROR"
 // symlink to /dev/zero exhausted memory): opened O_NONBLOCK so a FIFO does not block the open, accepted only if the
 // OPENED file is regular, read to at most MaxInputBytes+1 bytes. Every refusal is an error, reported by the caller as it
 // reports an unreadable file.
-// small-order / non-canonical Ed25519 keys (with the identity key R=identity, S=0 verifies on every message, other small-order points on a share of messages; OpenSSL accepts it, measured 25/09/2026 with the identity key) — same list as omega_evidence/signing.py WEAK_ED25519_KEYS
+// small-order / non-canonical Ed25519 keys (with the identity key R=identity, S=0 verifies on every message and OpenSSL accepts it, measured 25/09/2026; with any small-order key a signature on any message can be built by choosing R, measured 26/09/2026) — same list as omega_evidence/signing.py WEAK_ED25519_KEYS
 var weakEd25519Keys = map[string]bool{"0100000000000000000000000000000000000000000000000000000000000000": true, "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f": true, "0000000000000000000000000000000000000000000000000000000000000000": true, "0000000000000000000000000000000000000000000000000000000000000080": true, "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05": true, "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a": true, "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85": true, "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa": true, "0100000000000000000000000000000000000000000000000000000000000080": true, "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff": true}
 
 func weakEd25519(pk []byte) bool {

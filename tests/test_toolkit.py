@@ -2476,7 +2476,7 @@ class NemesisInputsAndFaults(unittest.TestCase):
 
 
 class WeakEd25519Keys20260925(unittest.TestCase):
-    """The identity key makes R=identity, S=0 verify on every message (OpenSSL accepts it; other small-order points on a share of messages): a pack with ANY content,
+    """The identity key makes R=identity, S=0 verify on every message (OpenSSL accepts it; with any small-order key a signature on any message can be built by choosing R, measured 26/09/2026): a pack with ANY content,
     that key in the sidecar and pinned in the trust store, was valid AND authenticated before this check."""
     def test_forged_pack_with_pinned_small_order_key_is_refused(self):
         from omega_evidence import pack as P, trust

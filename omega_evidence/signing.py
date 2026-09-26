@@ -87,9 +87,9 @@ class Identity:
         return base64.b64encode(_seed_sign(self._seed, message)).decode()
 
 
-# Ed25519 public keys of small order: with the identity key R=identity, S=0 is a valid signature on every message (other
-# small-order points: on a share of messages), which OpenSSL
-# accepts (measured 25/09/2026): the 8 canonical small-order encodings, the 2 encodings with the sign bit set on x = 0,
+# Ed25519 public keys of small order: with the identity key R=identity, S=0 is a valid signature on every message, which
+# OpenSSL accepts (measured 25/09/2026); with any small-order key a signature on any message can be built by choosing R
+# (measured 26/09/2026). Refused here: the 8 canonical small-order encodings, the 2 encodings with the sign bit set on x = 0,
 # and every non-canonical y >= p. Checked against curve arithmetic: 0 disagreements on 48 special and 200 000 random keys.
 # The same list is in the Go, Java and JS verifiers.
 WEAK_ED25519_KEYS = frozenset(bytes.fromhex(h) for h in (

@@ -253,7 +253,7 @@ public class OeVerify {
         byte[] spki = new byte[hdr.length + raw.length]; System.arraycopy(hdr, 0, spki, 0, hdr.length); System.arraycopy(raw, 0, spki, hdr.length, raw.length);
         return KeyFactory.getInstance(alg).generatePublic(new X509EncodedKeySpec(spki));
     }
-    // small-order / non-canonical Ed25519 keys (with the identity key R=identity, S=0 verifies on every message, other small-order points on a share of messages; OpenSSL accepts it, measured 25/09/2026 with the identity key) — same list as omega_evidence/signing.py WEAK_ED25519_KEYS
+    // small-order / non-canonical Ed25519 keys (with the identity key R=identity, S=0 verifies on every message and OpenSSL accepts it, measured 25/09/2026; with any small-order key a signature on any message can be built by choosing R, measured 26/09/2026) — same list as omega_evidence/signing.py WEAK_ED25519_KEYS
     static final java.util.Set<String> WEAK_ED25519 = java.util.Set.of("0100000000000000000000000000000000000000000000000000000000000000", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "0000000000000000000000000000000000000000000000000000000000000000", "0000000000000000000000000000000000000000000000000000000000000080", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85", "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", "0100000000000000000000000000000000000000000000000000000000000080", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
     static boolean weakEd25519(byte[] pk) {
         if (pk.length != 32) return true;
