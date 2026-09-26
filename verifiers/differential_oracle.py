@@ -267,7 +267,7 @@ def build_cases(d):
     else:
         print("  hybrid (ML-DSA-65) cases NOT measured: cryptography >= 48 absent")
     _nemesis_cases(d, cases, mk, idt, store)
-    # 25/09 (4-mind round 2, A1): small-order Ed25519 keys — R=identity, S=0 verifies on every message under OpenSSL;
+    # 25/09 (4-mind round 2, A1): small-order Ed25519 keys — with the identity key R=identity, S=0 verifies on every message under OpenSSL (other small-order points: a share of messages);
     # every port must refuse them, with and without the key pinned in a trust store
     for nm, keyhex in (("weak-key-identity", "01" + "00" * 31), ("weak-key-order8", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
                        ("weak-key-noncanonical", "ed" + "ff" * 30 + "7f")):
