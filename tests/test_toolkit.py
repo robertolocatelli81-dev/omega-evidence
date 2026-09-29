@@ -487,6 +487,12 @@ class TestCryptoAgility(unittest.TestCase):
             v = verify_pack(pp, trust_store=store)
             prod = [l for l in v["layers"] if l["layer"] == "producer-signature"][0]
             self.assertEqual(prod["status"], "SKIP")
+            # 0.10.0: the SKIP says that a signature is present and was not verified, and so does the authenticity layer;
+            # never authenticated; with require_signed the same pack is a FAIL (fail-closed)
+            self.assertTrue(prod["detail"].startswith("signature present, algorithm unsupported, not verified: martian-sig"))
+            self.assertFalse(v["authenticated"])
+            self.assertIn("not verified", [l for l in v["layers"] if l["layer"] == "authenticity"][0]["detail"])
+            self.assertFalse(verify_pack(pp, trust_store=store, require_signed=True)["valid"])
 
     def test_pq_present_without_backend_is_unverified_not_trusted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -868,7 +874,7 @@ class TestNemesisRegressions(unittest.TestCase):
             pp, lp = anchored("list")
             Path(lp).write_text("[1]\n", encoding="utf-8")
             self.assertFalse(verify_pack(pp)["valid"])
-            # review r1 (Opus): the .tsr.json sidecar was read with the loose json.loads — a float / duplicate key beside a
+            # review r1: the .tsr.json sidecar was read with the loose json.loads — a float / duplicate key beside a
             # correct digest was PASS in Python alone; a 100000-deep sidecar a RecursionError traceback
             for name, body in (("tsrf", '{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "x": 1.5}'),
                                ("tsrd", '{"digest_sha256": "%s", "digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA=="}'),
@@ -879,7 +885,7 @@ class TestNemesisRegressions(unittest.TestCase):
                 r = verify_pack(pp)
                 self.assertFalse(r["valid"], name)
                 self.assertEqual([l["status"] for l in r["layers"] if l["layer"] == "rfc3161"], ["FAIL"], name)
-            # review r2 (Opus): the Python reference had no lone-surrogate rule — an anchored pack holding "\\ud800" with a
+            # review r2: the Python reference had no lone-surrogate rule — an anchored pack holding "\\ud800" with a
             # correct hash, and a ledger entry the 0.8.2 producer itself wrote, were PASS here and FAIL in Go/Java/Node
             pp, lp = anchored("lone")
             dd = json.loads(Path(pp).read_text(encoding="utf-8")); dd["s"] = "\ud800"; dd.pop("pack_sha3")
@@ -901,7 +907,7 @@ class TestNemesisRegressions(unittest.TestCase):
             self.assertTrue(pack._honest_scope_declares_limit("does NOT\u00e9 prove x"))          # ASCII \b: boundary before é
             self.assertTrue(pack._honest_scope_declares_limit("fully cert\u0131fied; does NOT prove x"))   # ı is not i in ASCII folding
             self.assertFalse(pack._honest_scope_declares_limit("fully certified; does NOT prove x"))
-            # review r4 (Opus): the anchoring rule reads the ENTRY (top-level or data.anchored_pack_sha3) like the three; a
+            # review r4: the anchoring rule reads the ENTRY (top-level or data.anchored_pack_sha3) like the three; a
             # trust-store entry without "data" is a broken store, not a skipped line
             from omega_evidence.ledger import GENESIS, _hash_entry
             def entry(idx, prev, extra):
@@ -1044,6 +1050,49 @@ class TestAATInterop(unittest.TestCase):
         with self.assertRaises(ValueError):
             aat.jcs({"x": 2 ** 53 + 1})                                    # export: perdita di precisione → rifiutato
         self.assertEqual(aat.jcs({"x": 2 ** 53 + 1}, strict=False), b'{"x":9007199254740992}')   # verify: come ES6
+
+    def test_jcs_strict_integer_bound_20260928(self):
+        """PREREG 2 (28/09/2026): the export bound is ±(2^53-1), the package constant — not a second number. Until 0.9.1
+        `abs(x) > 2**53` let exactly ±2^53 through while canonical.py, ledger.py and the Go/JS/Java verifiers refused it."""
+        from omega_evidence.interop import aat
+        from omega_evidence import canonical, ledger
+        # behaviour FIRST, so that on the 0.9.1 code this test fails at "2^53 accepted", not on a missing attribute:
+        # strict (export): 2^53-1 accepted, 2^53 / -2^53 / 2^53+1 refused
+        self.assertEqual(aat.jcs({"x": 2 ** 53 - 1}), b'{"x":9007199254740991}')
+        self.assertEqual(aat.jcs({"x": -(2 ** 53 - 1)}), b'{"x":-9007199254740991}')
+        for bad in (2 ** 53, -(2 ** 53), 2 ** 53 + 1, -(2 ** 53) - 1):
+            with self.assertRaises(ValueError, msg=f"strict export accepted {bad}"):
+                aat.jcs({"x": bad})
+            with self.assertRaises(ValueError, msg=f"strict export accepted {bad}"):
+                aat.jcs({"x": bad}, strict=True)
+            with self.assertRaises(ValueError, msg=f"anchor_epoch accepted {bad}"):
+                aat.anchor_epoch([{"n": bad}], epoch_id=aat._uuid4_from("prereg2"))        # export path through leaf_hash
+        # one bound in the package: the constant is canonical's very object, not a second number
+        self.assertEqual(aat._SAFE_INT, 2 ** 53 - 1)
+        self.assertIs(aat._SAFE_INT, canonical._SAFE_INT)
+        self.assertIs(ledger._SAFE_INT, canonical._SAFE_INT)                # 0.10.0 (PREREG 3, R3): ledger.py imports it too
+        # the boundary is exactly one integer wide on each side
+        self.assertEqual(aat.jcs([2 ** 53 - 1, -(2 ** 53 - 1)]), b"[9007199254740991,-9007199254740991]")
+        # VERIFY mode (strict=False): unchanged — an integer outside the bound is serialised as ES6 would serialise the
+        # double; ±2^53 is exact as a double, so its text is the same as the integer's
+        self.assertEqual(aat.jcs({"x": 2 ** 53}, strict=False), b'{"x":9007199254740992}')
+        self.assertEqual(aat.jcs({"x": -(2 ** 53)}, strict=False), b'{"x":-9007199254740992}')
+        self.assertEqual(aat.jcs({"x": 2 ** 53 + 1}, strict=False), b'{"x":9007199254740992}')
+        self.assertEqual(aat.jcs({"x": 2 ** 53 - 1}, strict=False), b'{"x":9007199254740991}')
+        # the bench must know how to fail (positive control, in-suite): with the OLD bound (2^53) the export accepts 2^53
+        # — exactly the 0.9.1 behaviour — and refuses 2^53+1; restoring the constant restores the refusal. A test that
+        # could not tell the two bounds apart would prove nothing.
+        real = aat._SAFE_INT
+        try:
+            aat._SAFE_INT = 2 ** 53                                          # the 0.9.1 mutant
+            self.assertEqual(aat.jcs({"x": 2 ** 53}), b'{"x":9007199254740992}')   # accepted = the measured defect
+            with self.assertRaises(ValueError):
+                aat.jcs({"x": 2 ** 53 + 1})
+        finally:
+            aat._SAFE_INT = real
+        with self.assertRaises(ValueError):
+            aat.jcs({"x": 2 ** 53})
+        self.assertIs(aat._SAFE_INT, canonical._SAFE_INT)
         # ES6 Number::toString (RFC 8785 §3.2.2.3 + Appendix B): fissa per 1e-7 <= |x| < 1e21 (round 3)
         for f, exp in ((295147905179352825856.0, "295147905179352830000"), (5e-324, "5e-324"),
                        (1.7976931348623157e308, "1.7976931348623157e+308"), (0.000001, "0.000001"), (1e-7, "1e-7"),
@@ -1342,7 +1391,7 @@ class TestAAT04(unittest.TestCase):
             self.assertTrue(any("256 KB" in p["why"] for p in aat.verify_chain(big)["problems"]))
 
     def test_round1_tombstone_forgery_crashes_independent(self):
-        """Review round 1 (Gemini Pro, Opus, Sonnet, Haiku, 2026-09-19): a forged tombstone in a SIGNED chain must not
+        """Review round 1 (four independent reviewers, 2026-09-19): a forged tombstone in a SIGNED chain must not
         verify; hostile inputs must be problems, never crashes; independent recording must be signed."""
         from omega_evidence.interop import aat
         try:
@@ -1725,7 +1774,7 @@ class TestAAT04(unittest.TestCase):
             self.assertIn("'=cmd", line); self.assertNotIn(",=cmd", line)
 
     def test_round6_epoch_membership_tsa_failure_phase_basis_double_tombstone(self):
-        """Review round 6 (Opus): a copied record with the same record_id/leaf_index and altered content is not a member;
+        """Review round 6: a copied record with the same record_id/leaf_index and altered content is not a member;
         TSA anchoring that fails raises (no anchor without a token) and an anchor declaring a TSA without a token is
         malformed; an omega entry with consistent=false is refused; a tombstone of a tombstone keeps the original hash."""
         from omega_evidence.interop import aat
@@ -1754,7 +1803,7 @@ class TestAAT04(unittest.TestCase):
             self.assertTrue(any("agent_id is not a URI" in p["why"] for p in aat.verify_chain(bad_uri)["problems"]))
 
     def test_round6_guards_asserted_by_message(self):
-        """Review round 6 (Opus p3/p4): every guard the earlier tests reached only through prev_hash or the signature is
+        """Review round 6 (p3/p4): every guard the earlier tests reached only through prev_hash or the signature is
         asserted by its own message; deleting authorities are pinned (agent_kid / tombstone_kids); the synthesised close
         states session_outcome unknown; hostile CLI/JSON inputs are verdicts, not tracebacks."""
         from omega_evidence.interop import aat
@@ -1823,7 +1872,7 @@ class TestAAT04(unittest.TestCase):
             self.assertEqual(r.returncode, 2); self.assertIn('"ok": false', r.stdout); self.assertNotIn("Traceback", r.stderr)
 
     def test_round7_recorder_pin_legacy_effective_kid_close_tombstone(self):
-        """Review round 7 (Opus/Sonnet, 2026-09-20): the recorder of an independent session is pinned (recorder_kid, or the
+        """Review round 7 (2026-09-20): the recorder of an independent session is pinned (recorder_kid, or the
         first signing key) so a deleting-only key cannot rewrite the tail; the -03 fallback key is judged by its thumbprint
         like any other; a list-valued signer_kid_classical on a tombstone is a verdict, not a TypeError; tombstone_kids is
         typed; a tombstoned session close is refused; tool_response.parent_call_id must name an earlier tool_call."""
@@ -1888,7 +1937,7 @@ class TestAAT04(unittest.TestCase):
             self.assertFalse(any("parent_call_id" in p["why"] for p in aat.verify_chain(resp)["problems"]))
 
     def test_round8_close_reopen_self_recorded_rewrite_s13_types(self):
-        """Review round 8 (Opus/Haiku, 2026-09-20): a tombstoned close followed by appends is refused anywhere in the chain;
+        """Review round 8 (2026-09-20): a tombstoned close followed by appends is refused anywhere in the chain;
         a self-recorded session without agent_kid pins the genesis signer as the agent (a second key in the key set cannot
         rewrite the tail); §13 inference_config / environment values are typed."""
         from omega_evidence.interop import aat
@@ -2104,7 +2153,7 @@ class TestMlDsaHybrid(unittest.TestCase):
             v = verify_pack(pp, expected_pq_public_key_b64=idt.public_key_b64)
             self.assertFalse(v["valid"]); self.assertIsNot(v["pq_protected"], True)
 
-    # ── council 16/09 r1 (Fable 5.1 + Opus + Sonnet + Haiku on the real files) ─────────────────────────────────
+    # ── council 16/09 r1 (four independent reviewers on the real files) ─────────────────────────────────
     def _layer(self, v, name):
         return next(ly for ly in v["layers"] if ly["layer"] == name)
 
@@ -2227,7 +2276,7 @@ class TestMlDsaHybrid(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.m._mldsa65_raw_from_spki(spki[:-1])
 
-    # ── council 16/09 r2 (five minds incl. Gemini Pro) ────────────────────────────────────────────────────────
+    # ── council 16/09 r2 (five independent reviewers) ────────────────────────────────────────────────────────
     def test_authenticated_requires_integrity(self):
         """Body mutated after signing, pack_sha3 and sidecar intact: valid false AND authenticated false."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -2527,6 +2576,251 @@ class TestLedgerLines20260926(unittest.TestCase):
             v = gov.verify()
             self.assertFalse(v["chain_ok"])
             self.assertTrue(v.get("bad_entries_truncated"))
+
+def _mp_append_worker(path, n, k, durability, sabotage):
+    """A process appending n entries to the ledger at `path`. With `sabotage`, the cross-process file lock is disabled IN
+    THIS PROCESS ONLY (module attribute of its own copy of omega_evidence.ledger): the positive control of the lock."""
+    from omega_evidence import ledger as L
+    if sabotage:
+        L._lock_file = lambda fd, shared=False: None
+        L._unlock_file = lambda fd: None
+    try:
+        lg = L.Ledger(path, durability=durability, batch_size=7)
+        for i in range(n):
+            lg.append({"w": k, "i": i})
+        lg.close()
+    except RuntimeError:
+        os._exit(3)   # a broken chain seen while appending: reported to the parent as exit code 3
+
+
+class TestConcurrentAppend20260928(unittest.TestCase):
+    """N threads / N processes append to the SAME ledger: at the end verify() is OK, count = sum of the appends, every idx
+    present once, no chain break. The file lock (ledger._lock_file, POSIX flock) is what makes the process case hold;
+    the positive control disables it and must be able to break the ledger."""
+
+    W, N = 4, 60
+
+    def _check(self, p, expected):
+        lg = ledger.Ledger(p)
+        ok, bad = lg.verify()
+        self.assertTrue(ok, bad)
+        self.assertEqual(lg.count, expected)
+        idx = [e["idx"] for e in lg.raw_entries()]
+        self.assertEqual(idx, list(range(expected)))          # every idx once, in order: no duplicate, no hole
+        datas = [e["data"] for e in lg.raw_entries()]
+        self.assertEqual(len({json.dumps(d, sort_keys=True) for d in datas}), expected)   # no entry written twice
+
+    def test_threads_sharing_one_instance(self):
+        import threading
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "l.jsonl")
+            lg = ledger.Ledger(p, durability="batch", batch_size=16)
+            ths = [threading.Thread(target=lambda k=k: [lg.append({"w": k, "i": i}) for i in range(self.N)]) for k in range(self.W)]
+            [t.start() for t in ths]; [t.join() for t in ths]
+            lg.close()
+            self._check(p, self.W * self.N)
+
+    def test_threads_each_with_its_own_instance(self):
+        import threading
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "l.jsonl")
+            errors = []
+            def work(k):
+                try:
+                    lg = ledger.Ledger(p, durability="sync")
+                    for i in range(self.N):
+                        lg.append({"w": k, "i": i})
+                except Exception as e:  # noqa: BLE001
+                    errors.append(repr(e))
+            ths = [threading.Thread(target=work, args=(k,)) for k in range(self.W)]
+            [t.start() for t in ths]; [t.join() for t in ths]
+            self.assertEqual(errors, [])
+            self._check(p, self.W * self.N)
+
+    def _processes(self, durability, sabotage):
+        import multiprocessing as mp
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "l.jsonl")
+            ledger.Ledger(p).append({"genesis": True})
+            ps = [mp.Process(target=_mp_append_worker, args=(p, self.N, k, durability, sabotage)) for k in range(self.W)]
+            [x.start() for x in ps]; [x.join(120) for x in ps]
+            codes = [x.exitcode for x in ps]
+            lines = [ln for ln in Path(p).read_text(encoding="utf-8").split("\n") if ln.strip(" \t\r\n")]
+            ok, bad = ledger.verify_text(Path(p).read_text(encoding="utf-8"))
+            idx = []
+            for ln in lines:
+                try:
+                    idx.append(json.loads(ln).get("idx"))
+                except ValueError:
+                    idx.append(None)
+            return {"codes": codes, "lines": len(lines), "ok": ok, "bad": len(bad), "dup_idx": len(idx) - len(set(idx)),
+                    "expected": 1 + self.W * self.N, "path": p, "sound": ok and codes == [0] * self.W
+                    and len(lines) == 1 + self.W * self.N and len(idx) == len(set(idx))}
+
+    def test_processes_sync_mode(self):
+        r = self._processes("sync", sabotage=False)
+        self.assertTrue(r["sound"], r)
+
+    def test_processes_batch_mode(self):
+        r = self._processes("batch", sabotage=False)
+        self.assertTrue(r["sound"], r)
+
+    def test_positive_control_without_the_file_lock_the_ledger_breaks(self):
+        """Ablation: the same run with the file lock disabled in every worker. It must be ABLE to fail — a duplicate idx, a
+        broken chain, a missing line or a worker that saw a broken chain. Measured before the lock existed (28/09/2026,
+        4 x 200 appends): 401 lines of 801, verify FAIL, 200 duplicate idx. Three attempts, at least one must break."""
+        outcomes = [self._processes("sync", sabotage=True) for _ in range(3)]
+        self.assertTrue(any(not r["sound"] for r in outcomes), outcomes)
+
+    def test_instance_resyncs_after_another_writer(self):
+        """One instance keeps a stale view while a second one appends: the next append of the first must link to the
+        last hash on disk, not to its own stale one; a truncated file is refused."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "l.jsonl")
+            a = ledger.Ledger(p); a.append({"a": 1})
+            b = ledger.Ledger(p); b.append({"b": 1}); b.append({"b": 2})
+            e = a.append({"a": 2})
+            self.assertEqual(e["idx"], 3)
+            self.assertEqual(a.count, 4)
+            self._check(p, 4)
+            Path(p).write_text("", encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                a.append({"a": 3})
+
+
+class TestLedgerIteratorsSnapshot20260929(unittest.TestCase):
+    """0.10.0 (code review 29/09/2026, D7): entries() / raw_entries() read one snapshot under the shared file lock, like
+    verify(), and release it before yielding — so a caller that appends while iterating must never block on its own lock,
+    and what was iterated is the file as it was at the first entry (an append during the loop is not seen by that loop)."""
+
+    def test_append_while_iterating_does_not_deadlock_and_iterates_the_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "l.jsonl"); lg = ledger.Ledger(p)
+            for i in range(5):
+                lg.append({"i": i})
+            seen = []
+            for d in lg.entries():                       # appending inside the loop: the shared lock is already released
+                seen.append(d["i"]); lg.append({"i": 100 + d["i"]})
+            self.assertEqual(seen, [0, 1, 2, 3, 4])      # the snapshot, not the growing file
+            self.assertEqual([e["idx"] for e in lg.raw_entries()], list(range(10)))
+            self.assertTrue(lg.verify()[0])
+            for d in ledger.Ledger(p, durability="batch").entries():   # a second instance, batch mode, same file
+                self.assertIn("i", d)
+            # a snapshot that cannot be read is one RuntimeError, as _load() and verify() declare (P2 of the fuzzer)
+            with open(p, "ab") as f:
+                f.write(b"\xff\n")
+            with self.assertRaises(RuntimeError):
+                list(lg.entries())
+
+
+class TestSigAlg20260929(unittest.TestCase):
+    """0.10.0 (PREREG 3): the `sig_alg` field of the signature sidecar. Measured on 28/09/2026 by the fuzzer (seeds 1 and 2:
+    "eD25519", "ed2 5519"): a one-bit change of the field was an "unsupported algorithm" SKIP in the four verifiers, so a
+    signed pack that was also anchored stayed `valid` (verdict PASS, exit 0) with authenticated=false — a silent downgrade
+    of the tier. Now: (C1) a non-canonical spelling of a supported name is FAIL; (C2) a genuinely unknown name is SKIP and
+    both the producer-signature and the authenticity layer say that a signature is present and was not verified; (C3)
+    `require_signed` / `--require-signed` makes C2 and a missing sidecar FAIL. Every test here is red on 0.9.1."""
+    SCOPE = "Proves integrity; does NOT prove the claim."
+    VARIANTS = ("eD25519", "ED25519", "Ed25519", "ed2 5519", "ed-25519", "ed_25519", "ed25519\n", " ed25519", "ed25519 ", "ed25519​", "e d 2 5 5 1 9")
+    UNKNOWN = ("rsa-pss", "martian-sig", "ml-dsa-65", "ed25519ph", "еd25519")   # a look-alike letter makes a name UNKNOWN (declared limit)
+
+    def _pack(self, tmp, name, alg="ed25519", anchored=True, signed=True):
+        p = os.path.join(tmp, name + ".json")
+        pack.write_pack(p, pack.build_pack("demo", {"claim": "x"}, self.SCOPE))
+        if anchored:
+            pack.anchor_pack(p, p[:-5] + ".ledger.jsonl")
+        if signed:
+            pack.sign_pack(p, signing.Identity("acme")); sp = p[:-5] + ".sig.json"; sd = json.load(open(sp))
+            if alg is None:
+                sd.pop("sig_alg")
+            else:
+                sd["sig_alg"] = alg
+            json.dump(sd, open(sp, "w"), ensure_ascii=False)
+        return p
+
+    @staticmethod
+    def _layer(v, name):
+        return next(ly for ly in v["layers"] if ly["layer"] == name)
+
+    def test_fold_rule(self):
+        for s in self.VARIANTS:
+            self.assertEqual(verifier._fold_alg(s), "ed25519", s)
+        for s in self.UNKNOWN:
+            self.assertNotEqual(verifier._fold_alg(s), "ed25519", s)
+        self.assertEqual(verifier._fold_alg(""), "")
+        self.assertEqual(verifier.SUPPORTED_SIG_ALGS, ("ed25519",))
+
+    def test_c1_variant_of_a_supported_name_is_fail_not_a_downgrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, alg in enumerate(self.VARIANTS):
+                with self.subTest(alg=alg):
+                    p = self._pack(tmp, f"v{i}", alg)                     # anchored AND signed: a SKIP would read PASS
+                    v = verify_pack(p)
+                    self.assertFalse(v["valid"]); self.assertFalse(v["authenticated"])
+                    ly = self._layer(v, "producer-signature")
+                    self.assertEqual(ly["status"], "FAIL")
+                    self.assertEqual(ly["detail"], f"sig_alg is not the canonical name of a supported algorithm (got {alg}; supported: ed25519)")
+                    self.assertEqual(self._layer(v, "authenticity")["detail"], "producer signature present but invalid")
+                    self.assertFalse(verify_pack(p, require_signed=True)["valid"])
+
+    def test_c2_unknown_name_is_a_said_skip_tier_from_the_other_layers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, alg in enumerate(self.UNKNOWN):
+                with self.subTest(alg=alg):
+                    p = self._pack(tmp, f"u{i}", alg)
+                    v = verify_pack(p)
+                    self.assertTrue(v["valid"]); self.assertFalse(v["authenticated"])   # the tier the ledger earns: anchored, not signed
+                    ly = self._layer(v, "producer-signature")
+                    self.assertEqual((ly["status"], ly["detail"]), ("SKIP", f"signature present, algorithm unsupported, not verified: {alg}"))
+                    self.assertEqual(self._layer(v, "authenticity")["detail"],
+                                     "anchored (integrity/time, not identity) — a signature is present but its algorithm is unsupported and was not verified")
+            p = self._pack(tmp, "nu", "rsa-pss", anchored=False)      # no anchor either: FAIL, and the unverified signature is still named
+            v = verify_pack(p)
+            self.assertFalse(v["valid"]); self.assertFalse(v["authenticated"])
+            self.assertEqual(self._layer(v, "authenticity")["detail"],
+                             "no anchor and no verified signature: cannot authenticate — a signature is present but its algorithm is unsupported and was not verified")
+
+    def test_c3_require_signed_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            good = self._pack(tmp, "g", "ed25519"); legacy = self._pack(tmp, "l", None)
+            for p in (good, legacy):                                        # a verified signature satisfies the requirement
+                v = verify_pack(p, require_signed=True); self.assertTrue(v["valid"]); self.assertTrue(v["authenticated"])
+            unknown = self._pack(tmp, "u", "rsa-pss"); v = verify_pack(unknown, require_signed=True)
+            self.assertFalse(v["valid"]); self.assertFalse(v["authenticated"])
+            ly = self._layer(v, "producer-signature")
+            self.assertEqual((ly["status"], ly["detail"]), ("FAIL", "signature present, algorithm unsupported, not verified: rsa-pss — a required signature that cannot be checked is not a pass"))
+            self.assertEqual(self._layer(v, "authenticity")["detail"], "producer signature required but absent or not verified")
+            unsigned = self._pack(tmp, "n", signed=False)
+            self.assertTrue(verify_pack(unsigned)["valid"])                 # anchored: PASS without the requirement...
+            v = verify_pack(unsigned, require_signed=True)                  # ...FAIL with it
+            self.assertFalse(v["valid"]); self.assertEqual(self._layer(v, "producer-signature")["detail"], "signature required but the pack is not signed")
+            self.assertEqual(self._layer(v, "authenticity")["detail"], "producer signature required but absent or not verified")
+            # the CLI: --require-signed / -require-signed, and no value on the boolean flag (one grammar in the four)
+            def cli(args):
+                return subprocess.run([sys.executable, "-m", "omega_evidence"] + args, capture_output=True, text=True, timeout=60,
+                                      cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            for flag in ("--require-signed", "-require-signed"):
+                self.assertEqual((json.loads(cli([unsigned, flag]).stdout)["verdict"], cli([unsigned, flag]).returncode), ("FAIL", 1))
+                self.assertEqual((json.loads(cli([good, flag]).stdout)["verdict"], cli([good, flag]).returncode), ("PASS", 0))
+            self.assertEqual(cli([unsigned]).returncode, 0)
+            self.assertEqual(cli([good, "--require-signed=false"]).returncode, 2)
+
+    def test_positive_control_the_0_9_1_rule_would_pass_the_variant(self):
+        """The bench must know how to fail: with the fold rule disabled (0.9.1 had none, every non-"ed25519" string was an
+        unsupported-algorithm SKIP) the anchored pack with sig_alg "eD25519" verifies PASS — exactly the measured defect; the
+        rule restored, it is FAIL again. A test that could not tell the two apart would prove nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._pack(tmp, "pc", "eD25519")
+            real = verifier._fold_alg
+            try:
+                verifier._fold_alg = lambda s: s
+                v = verify_pack(p)
+                self.assertTrue(v["valid"]); self.assertFalse(v["authenticated"])    # the silent downgrade of 0.9.1
+                self.assertEqual(self._layer(v, "producer-signature")["status"], "SKIP")
+            finally:
+                verifier._fold_alg = real
+            self.assertFalse(verify_pack(p)["valid"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

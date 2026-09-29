@@ -1,3 +1,5 @@
 # gitleaks false positive, reviewed 26/09/2026: a PUBLIC small-order Ed25519 point (order 8) used as a test key that
 # every verifier must refuse — not a secret.
 474122b54816b63f96626c066b897c4864a2e133:verifiers/differential_oracle.py:generic-api-key:269
+# the same public point, same line moved to 280 by the 0.10.0 oracle cases (directory scan, no commit; reviewed 29/09/2026)
+verifiers/differential_oracle.py:generic-api-key:280

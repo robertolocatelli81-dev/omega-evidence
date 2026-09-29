@@ -59,6 +59,32 @@ func weakEd25519(pk []byte) bool {
 	return true
 }
 
+// supportedSigAlgs: the classical producer-signature algorithms of the four verifiers, canonical names (Ed25519 only).
+var supportedSigAlgs = map[string]bool{"ed25519": true}
+
+// foldAlg: the shape under which a VARIANT of a supported algorithm name is recognised (0.10.0) — ASCII letters lowercased,
+// every byte that is not an ASCII letter or digit dropped (spaces, hyphens, underscores, non-ASCII). "eD25519", "ED25519",
+// "ed2 5519", "ed-25519" fold to "ed25519" and are refused as non-canonical spellings; until 0.9.1 each was an
+// "unsupported algorithm" SKIP and an anchored, signed pack stayed valid on a one-bit change of the field (measured
+// 28/09/2026). The same rule, character for character, as omega_evidence/verifier.py _fold_alg, OeVerify.java, oeverify.mjs.
+func foldAlg(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			out = append(out, c+32)
+		case (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'):
+			out = append(out, c)
+		}
+	}
+	return string(out)
+}
+
+// unverifiedNote: the same words in the four verifiers — a signature that is present and was not verified is NAMED in the
+// tier the pack falls to, never a silent downgrade (0.10.0).
+const unverifiedNote = " — a signature is present but its algorithm is unsupported and was not verified"
+
 func readInput(path string) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -293,15 +319,22 @@ func sidecarPath(pack, suffix string) string {
 }
 
 // VerifyPack mirrors omega_evidence.verifier.verify_pack. expectedPQ pins the ML-DSA-65 key (and requires the
-// layer); requirePQ requires a pinned, valid layer (through the trust registry).
-func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ bool) (out Receipt) {
+// layer); requirePQ requires a pinned, valid layer (through the trust registry). The signature is the one of 0.7.0-0.9.1
+// (an importer of this module keeps compiling); the 0.10.0 requirement is VerifyPackRequireSigned.
+func VerifyPack(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ bool) Receipt {
+	return VerifyPackRequireSigned(packPath, ledgerPath, trustStore, expectedPQ, requirePQ, false)
+}
+
+// VerifyPackRequireSigned is VerifyPack with requireSigned (0.10.0): fail-closed on the classical layer — no sidecar, or a
+// signature whose algorithm cannot be checked here, is FAIL, never "anchored".
+func VerifyPackRequireSigned(packPath, ledgerPath, trustStore, expectedPQ string, requirePQ, requireSigned bool) (out Receipt) {
 	r := &Receipt{Layers: []Layer{}, Verifier: "oeverify (Go, stdlib)"}
 	defer func() {
 		if p := recover(); p != nil {
 			out = InternalError(r.Layers, fmt.Sprintf("%T", p))
 		}
 	}()
-	return verifyPack(r, packPath, ledgerPath, trustStore, expectedPQ, requirePQ)
+	return verifyPack(r, packPath, ledgerPath, trustStore, expectedPQ, requirePQ, requireSigned)
 }
 
 // InternalError: a fault of the TOOL is not a finding about the pack (25/09/2026). The layer "internal" is FAIL with
@@ -319,7 +352,7 @@ func InternalError(layers []Layer, what string) Receipt {
 	return r
 }
 
-func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string, requirePQ bool) Receipt {
+func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string, requirePQ, requireSigned bool) Receipt {
 	r := rp
 	add := func(l, s, d string) { r.Layers = append(r.Layers, Layer{l, s, d, nil}) }
 	packBytes, err := readInput(packPath) // read ONCE: the timestamp binding hashes these bytes, not a second read
@@ -398,12 +431,18 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 	} else {
 		add("timestamp", "SKIP", "no timestamp sidecar")
 	}
-	// producer signature
-	sigStatus, trusted, trustFailed := "SKIP", false, false
+	// producer signature. why: "" ordinarily; "unverified" = a signature is PRESENT with an algorithm unknown here (SKIP,
+	// said in the authenticity layer); "required" = requireSigned not met (FAIL, fail-closed) — 0.10.0
+	sigStatus, trusted, trustFailed, why := "SKIP", false, false, ""
 	sp := sidecarPath(packPath, ".sig.json")
 	var side *Object
 	if _, e := os.Stat(sp); e != nil {
-		add("producer-signature", "SKIP", "pack not signed")
+		if requireSigned {
+			add("producer-signature", "FAIL", "signature required but the pack is not signed")
+			sigStatus, why = "FAIL", "required"
+		} else {
+			add("producer-signature", "SKIP", "pack not signed")
+		}
 	} else if side, err = readObject(sp); err != nil {
 		add("producer-signature", "FAIL", "malformed sidecar: "+err.Error())
 		sigStatus = "FAIL"
@@ -419,10 +458,21 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 		if algPresent && (!hasAlg || alg == "") { // present but not a string, or "": malformed (council 16/09 r1; 25/09/2026 for "")
 			add("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a non-empty string")
 			sigStatus = "FAIL"
-		} else if alg != "ed25519" {
-			add("producer-signature", "SKIP", "unsupported sig_alg: "+alg)
+		} else if !supportedSigAlgs[alg] {
+			// 0.10.0: a non-canonical spelling of a supported name is a judgment (FAIL: no producer writes it); a genuinely
+			// unknown name is SKIP with the presence of the signature said, FAIL when a signature is required
+			if supportedSigAlgs[foldAlg(alg)] {
+				add("producer-signature", "FAIL", "sig_alg is not the canonical name of a supported algorithm (got "+alg+"; supported: ed25519)")
+				sigStatus = "FAIL"
+			} else if requireSigned {
+				add("producer-signature", "FAIL", "signature present, algorithm unsupported, not verified: "+alg+" — a required signature that cannot be checked is not a pass")
+				sigStatus, why = "FAIL", "required"
+			} else {
+				add("producer-signature", "SKIP", "signature present, algorithm unsupported, not verified: "+alg)
+				why = "unverified"
+			}
 		} else if pk, sig := b64Strict(pkB64, 32), b64Strict(sigB64, 64); pk == nil || sig == nil || !hex64.MatchString(declared) {
-			// council r3 (Fable): the reference refuses malformed fields BEFORE any signature check, so a really-signed
+			// council r3: the reference refuses malformed fields BEFORE any signature check, so a really-signed
 			// uppercase digest must not reach the PQ layer here either (it gave pq_protected null vs false)
 			add("producer-signature", "FAIL", "malformed sidecar fields (strict base64 32/64, lowercase hex digest)")
 			sigStatus = "FAIL"
@@ -447,7 +497,7 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 					if requirePQ || expectedPQ != "" { // 0.8.3 r8: the receipt carries the same layers as the other three
 						add("pq-signature", "FAIL", "post-quantum layer required but the pack carries no valid classical signature (hybrid = both)")
 					}
-					add("authenticity", "FAIL", "producer signature present but invalid") // r9 (Sonnet): the ledger may be fine here
+					add("authenticity", "FAIL", "producer signature present but invalid") // r9: the ledger may be fine here
 					return finish(*r, declared, false, false, "", requirePQ || expectedPQ != "")
 				}
 				add("producer-signature", "PASS", "signed by "+sid+" (ed25519)")
@@ -490,8 +540,14 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 	if (requirePQ || expectedPQ != "") && sigStatus != "PASS" {
 		add("pq-signature", "FAIL", "post-quantum layer required but the pack carries no valid classical signature (hybrid = both)")
 	}
-	// authenticity
+	// authenticity (the wording is the one of the four; a present, unverified signature is named in the tier — 0.10.0)
+	note := ""
+	if why == "unverified" {
+		note = unverifiedNote
+	}
 	switch {
+	case sigStatus == "FAIL" && why == "required":
+		add("authenticity", "FAIL", "producer signature required but absent or not verified")
 	case sigStatus == "FAIL":
 		add("authenticity", "FAIL", "producer signature present but invalid")
 	case trustFailed:
@@ -501,9 +557,9 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 	case sigStatus == "PASS":
 		add("authenticity", "PASS", "signed (identity not checked against a registry)")
 	case ledgerOK: // 0.8.3 r8: "|| tsStatus == PASS" was dead (the token is never verified here)
-		add("authenticity", "PASS", "anchored (integrity/time, not identity)")
+		add("authenticity", "PASS", "anchored (integrity/time, not identity)"+note)
 	default:
-		add("authenticity", "FAIL", "no anchor and no signature: cannot authenticate")
+		add("authenticity", "FAIL", "no anchor and no verified signature: cannot authenticate"+note)
 	}
 	// authenticated = a producer identity signed AND was not refused by the registry (council 16/09 r1: Go said
 	// true for a revoked signer while the authenticity layer was FAIL; Python says false)

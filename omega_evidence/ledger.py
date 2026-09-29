@@ -29,7 +29,29 @@ import threading
 import time
 from typing import Dict, List, Tuple
 
+try:
+    import fcntl                       # POSIX: the cross-process lock below
+except ImportError:                    # Windows: no flock; see _lock_file
+    fcntl = None
+
 GENESIS = "0" * 64
+
+
+def _lock_file(fd: int, shared: bool = False) -> None:
+    """Advisory lock on the OPEN ledger file (POSIX flock), exclusive for a writer, shared for a reader. Held for one
+    append (or one load), so N processes appending to the same ledger serialize and each one re-reads what the others
+    wrote before it writes (28/09/2026: measured before this lock, 4 processes x 200 appends to one file left 401 lines
+    of 801, verify() FAIL, 200 duplicate idx, two processes refused to open the file mid-write). The threading.Lock of
+    the instance covers threads of ONE process sharing ONE instance; this covers everything else on the same inode.
+    Advisory: a writer that does not use this module is not stopped. Not on Windows (no fcntl: single writer process
+    per ledger there), not reliable on NFS. Module-level on purpose: a test disables it to show the failure it prevents."""
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+
+
+def _unlock_file(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 # One bound for every file a verifier reads (pack, .sig.json, .tsr.json, ledger, trust store) — and so for any single
 # ledger line — the same number in the Python, Node, Go and Java verifiers (25/09/2026). Chosen where the peak memory of
@@ -65,7 +87,7 @@ def read_input(path: str, limit: int = MAX_INPUT_BYTES) -> bytes:
         os.close(fd)
 
 
-_SAFE_INT = (1 << 53) - 1
+from .canonical import _SAFE_INT   # noqa: E402 — ±(2^53-1): ONE integer bound for the whole package (0.10.0; it was a second copy of the same number)
 _MAX_DEPTH = 512
 
 
@@ -119,7 +141,7 @@ def _hex4(s: str, i: int):
 
 def _has_lone_surrogate(text: str) -> bool:
     """Linear scan of the raw JSON text for a \\uD800-\\uDBFF escape not followed by \\uDC00-\\uDFFF, or a low
-    surrogate escape on its own — the rule Go/Java/Node apply (prescan.go HasLoneSurrogate). 0.8.3 review r2 (Opus):
+    surrogate escape on its own — the rule Go/Java/Node apply (prescan.go HasLoneSurrogate). 0.8.3 review r2:
     the Python reference had no such rule, so an anchored pack holding "\\ud800" was PASS here and FAIL in the three."""
     i, n = 0, len(text)
     while i < n:
@@ -195,6 +217,13 @@ class Ledger:
         un-fsynced entries. The hash-chain of what survived on disk stays valid
         (append-only). Use flush()/close() or the context manager to force the
         final fsync. Trade-off DECLARED, not hidden.
+
+    Concurrency (28/09/2026): threads sharing one instance are serialized by the instance lock; instances in other
+      threads or other PROCESSES appending to the same file are serialized by an advisory POSIX file lock (flock) held
+      for one append, under which the instance first replays what the others appended since its last write, so every
+      entry links to the last hash on disk and carries the next idx. A file truncated by someone else is refused. Not
+      on Windows (no fcntl: one writer process per ledger), advisory only, not reliable on NFS. Measured in
+      tests/test_toolkit.py (TestConcurrentAppend20260928) with the lock disabled as the positive control.
     """
 
     def __init__(self, path: str, durability: str = "sync", batch_size: int = 256):
@@ -206,6 +235,7 @@ class Ledger:
         self._lock = threading.Lock()
         self._count = 0
         self._last = GENESIS
+        self._size = 0             # bytes of the file that _count/_last account for (other processes may add more)
         self._fh = None            # persistent handle in batch mode
         self._pending = 0          # appends written but not yet fsynced
         self._load()
@@ -239,17 +269,31 @@ class Ledger:
     def _load(self) -> None:
         if not os.path.exists(self.path):
             return
-        prev = GENESIS
         try:   # 0.8.3 review: a non-UTF-8 byte (UnicodeDecodeError), an unreadable file (OSError) — one exception type out
             with open(self.path, "rb") as fh:   # of here, RuntimeError, for every caller (verifier, trust store, agent, pack)
-                lines = fh.read().decode("utf-8").split("\n")   # LF only, like verify(): splitlines() would also split on U+2028
-        except (OSError, UnicodeDecodeError) as e:
+                _lock_file(fh.fileno(), shared=True)   # 28/09/2026: never read a line another process is still writing
+                try:
+                    raw = fh.read()
+                finally:
+                    _unlock_file(fh.fileno())
+        except OSError as e:
             raise RuntimeError(f"ledger unreadable: {e}") from e
-        for i, line in enumerate(lines):
-            line = line.strip(" \t\r\n")   # blank = ASCII space/tab/CR only, the rule of verify() and of the three (r6, Sonnet)
+        self._count, self._last = self._replay(raw, 0, GENESIS, 0)
+        self._size = len(raw)
+
+    @staticmethod
+    def _replay(raw: bytes, count: int, prev: str, first_line: int) -> Tuple[int, str]:
+        """Walk `raw` (whole file, or the bytes appended after the ones already accounted for) from the known state
+        (count, prev); RuntimeError on the first line that does not continue the chain."""
+        try:
+            lines = raw.decode("utf-8").split("\n")   # LF only, like verify(): splitlines() would also split on U+2028
+        except UnicodeDecodeError as e:
+            raise RuntimeError(f"ledger unreadable: {e}") from e
+        for i, line in enumerate(lines, first_line):
+            line = line.strip(" \t\r\n")   # blank = ASCII space/tab/CR only, the rule of verify() and of the three (r6)
             if not line:
                 continue
-            try:   # 0.8.3 review (Opus): a non-object line raised AttributeError, a non-JSON line JSONDecodeError
+            try:   # 0.8.3 review: a non-object line raised AttributeError, a non-JSON line JSONDecodeError
                 entry = loads_strict(line)
                 if not isinstance(entry, dict):
                     raise ValueError("ledger line is not a JSON object")
@@ -258,49 +302,86 @@ class Ledger:
             if entry.get("prev_hash") != prev or entry.get("self_hash") != _hash_entry(entry):
                 raise RuntimeError(f"ledger corrotto alla riga {i + 1}: catena rotta")
             prev = entry["self_hash"]
-            self._count += 1
-        self._last = prev
+            count += 1
+        return count, prev
+
+    def _resync_locked(self, fd: int) -> None:
+        """Under the exclusive file lock: if the file grew past what this instance accounts for, another process (or
+        another instance) appended — replay those bytes so the next entry links to THEIR last hash and carries the right
+        idx. A file shorter than accounted for was truncated under us: refused (the chain on disk is not ours any more)."""
+        size = os.fstat(fd).st_size
+        if size == self._size:
+            return
+        if size < self._size:
+            raise RuntimeError(f"ledger truncated by another writer: {size} < {self._size} bytes")
+        with open(self.path, "rb") as fh:
+            fh.seek(self._size)
+            raw = fh.read(size - self._size)
+        # the line number reported is approximate here (a count of LF up to _size would cost a scan of the file)
+        self._count, self._last = self._replay(raw, self._count, self._last, self._count)
+        self._size = size
 
     def append(self, data: Dict) -> Dict:
         _check_portable(data)   # 0.7.0: what cannot be verified byte-for-byte elsewhere is refused at write time
         with self._lock:
-            entry = {"idx": self._count,
-                     "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                     "data": data, "prev_hash": self._last, "self_hash": ""}
-            entry["self_hash"] = _hash_entry(entry)
-            line = json.dumps(entry, separators=(",", ":"), allow_nan=False) + "\n"
             if self.durability == "sync":
                 # comportamento di default INVARIATO: open+write+flush+fsync per entry
                 os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
                 with open(self.path, "a", encoding="utf-8") as f:
-                    f.write(line)
-                    f.flush()
-                    os.fsync(f.fileno())
+                    _lock_file(f.fileno())          # 28/09/2026: one writer at a time on this inode, across processes
+                    try:
+                        self._resync_locked(f.fileno())
+                        entry, line = self._entry_locked(data)
+                        f.write(line)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    finally:
+                        _unlock_file(f.fileno())
             else:
                 # batch: handle persistente, fsync ogni batch_size (o su flush/close)
                 if self._fh is None:
                     os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
                     self._fh = open(self.path, "a", encoding="utf-8")
-                self._fh.write(line)
-                # flush del buffer Python → OS ad ogni append (economico): garantisce
-                # che verify()/entries(), che riaprono il file in lettura, vedano TUTTO.
-                # Il fsync → disco (costoso, la durabilità) è batchato.
-                self._fh.flush()
-                self._pending += 1
-                if self._pending >= self.batch_size:
-                    self._flush_locked()
+                _lock_file(self._fh.fileno())
+                try:
+                    self._resync_locked(self._fh.fileno())
+                    entry, line = self._entry_locked(data)
+                    self._fh.write(line)
+                    # flush del buffer Python → OS ad ogni append (economico): garantisce
+                    # che verify()/entries(), che riaprono il file in lettura, vedano TUTTO —
+                    # e che un altro processo, preso il lock, legga la riga intera.
+                    # Il fsync → disco (costoso, la durabilità) è batchato.
+                    self._fh.flush()
+                    self._pending += 1
+                    if self._pending >= self.batch_size:
+                        self._flush_locked()
+                finally:
+                    _unlock_file(self._fh.fileno())
             self._last = entry["self_hash"]
             self._count += 1
+            self._size += len(line.encode("utf-8"))
             return entry
+
+    def _entry_locked(self, data: Dict) -> Tuple[Dict, str]:
+        """The next entry from the state re-synced under the file lock, and its line."""
+        entry = {"idx": self._count,
+                 "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                 "data": data, "prev_hash": self._last, "self_hash": ""}
+        entry["self_hash"] = _hash_entry(entry)
+        return entry, json.dumps(entry, separators=(",", ":"), allow_nan=False) + "\n"
 
     def verify(self) -> Tuple[bool, List[int]]:
         if not os.path.exists(self.path):
             return True, []
         # 0.7.0: the same acceptance profile as the cryptovalid verifiers (Python/JS/Go/Rust/Java agree):
         # LF-only lines, blank = ASCII space/tab/CR, strict JSON, sequential idx, content → self_hash → prev link
-        try:   # r5 (Sonnet): strict decode here too (surrogateescape never raised); a non-UTF-8 file is a broken chain
+        try:   # r5: strict decode here too (surrogateescape never raised); a non-UTF-8 file is a broken chain
             with open(self.path, "rb") as fh:
-                text = fh.read().decode("utf-8")
+                _lock_file(fh.fileno(), shared=True)   # 28/09/2026: a whole snapshot, never a line another process is writing
+                try:
+                    text = fh.read().decode("utf-8")
+                finally:
+                    _unlock_file(fh.fileno())
         except (OSError, UnicodeDecodeError):
             return False, [0]
         return verify_text(text)
@@ -309,34 +390,49 @@ class Ledger:
     def count(self) -> int:
         return self._count
 
+    def _snapshot(self) -> str:
+        """The file as ONE read under the shared file lock — the same snapshot rule as _load() and verify() (0.10.0, code
+        review 29/09/2026 D7: the two iterators read line by line with no lock, so a reader could in principle see a line
+        another process was still writing). The lock is released BEFORE any entry is yielded: a generator that held it
+        while the caller appends (`for d in lg.entries(): lg.append(...)`) would block on its own exclusive lock. Cost: the
+        text is held in memory while iterating, as verify() already does."""
+        try:
+            with open(self.path, "rb") as fh:
+                _lock_file(fh.fileno(), shared=True)
+                try:
+                    raw = fh.read()
+                finally:
+                    _unlock_file(fh.fileno())
+            return raw.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as e:   # one exception type out of here, RuntimeError, like _load()
+            raise RuntimeError(f"ledger unreadable: {e}") from e
+
     def entries(self):
         if not os.path.exists(self.path):
             return
-        with open(self.path, encoding="utf-8", newline="\n") as fh:
-            for line in fh:
-                line = line.strip(" \t\r\n")
-                if line:
-                    e = loads_strict(line)          # 0.7.0: the strict profile also on replay (no duplicate keys)
-                    if not isinstance(e, dict):
-                        raise ValueError("ledger line is not a JSON object")
-                    yield e.get("data")     # 0.8.3 r4: no default — an entry without "data" is what it is (the trust store
-                                            # treats it as broken, like Go/Java/Node; Python used to skip it silently)
+        for line in _lines(self._snapshot()):
+            line = line.strip(" \t\r\n")
+            if line:
+                e = loads_strict(line)          # 0.7.0: the strict profile also on replay (no duplicate keys)
+                if not isinstance(e, dict):
+                    raise ValueError("ledger line is not a JSON object")
+                yield e.get("data")     # 0.8.3 r4: no default — an entry without "data" is what it is (the trust store
+                                        # treats it as broken, like Go/Java/Node; Python used to skip it silently)
 
     def raw_entries(self):
         """The whole entries (idx, ts, data, prev_hash, self_hash, and any extra key), strict profile. The anchoring rule
-        reads the ENTRY (`anchored_pack_sha3` top-level or under `data`), as the three other verifiers do — 0.8.3 r4 (Opus):
+        reads the ENTRY (`anchored_pack_sha3` top-level or under `data`), as the three other verifiers do — 0.8.3 r4:
         the reference read `data` instead, so a top-level anchor was PASS in the three and FAIL here, and a
         `data.data.anchored_pack_sha3` the reverse."""
         if not os.path.exists(self.path):
             return
-        with open(self.path, encoding="utf-8", newline="\n") as fh:
-            for line in fh:
-                line = line.strip(" \t\r\n")
-                if line:
-                    e = loads_strict(line)
-                    if not isinstance(e, dict):
-                        raise ValueError("ledger line is not a JSON object")
-                    yield e
+        for line in _lines(self._snapshot()):
+            line = line.strip(" \t\r\n")
+            if line:
+                e = loads_strict(line)
+                if not isinstance(e, dict):
+                    raise ValueError("ledger line is not a JSON object")
+                yield e
 
 
 def _lines(text: str):

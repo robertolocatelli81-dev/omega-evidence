@@ -26,6 +26,52 @@ jobs:
       - name: Run tests
         run: python tests/test_toolkit.py
 
+  fuzz-smoke:
+    # Short, deterministic (fixed seed): the same 3 000 mutations on every push, plus the six positive controls
+    # (a verifier with one check disabled must make the fuzzer report violations). The weekly job explores further.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
+        run: python -m pip install --no-deps . && python -m pip install cryptography
+      - name: "Fuzz: 3 000 seeded mutations, no violation allowed"
+        run: python tests/fuzz_toolkit.py --seed 20260928 --iterations 3000 --findings-dir fuzz-findings --json fuzz-smoke.json
+      - name: "Positive controls: each disabled check must be seen"
+        # shell: bash adds -o pipefail (the default shell is `bash -e` only): without it the exit code of this step was
+        # tail's, so a fuzzer blind to an ablation (exit 1) passed green — found by the 29/09/2026 code review (D1)
+        shell: bash
+        run: |
+          for a in signature pack-sha3 ledger-chain strict-json sig-alg-canonical require-signed; do
+            python tests/fuzz_toolkit.py --seed 20260928 --iterations 3000 --ablate "$a" --findings-dir "ablation-$a" | tail -1
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-findings
+          path: |
+            fuzz-findings
+            fuzz-smoke.json
+
+  bench-smoke:
+    # Only that the bench RUNS end to end on a small scale. No time threshold: a shared runner measures nothing.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
+        run: python -m pip install --no-deps . && python -m pip install cryptography
+      - name: "Bench smoke (scale 2 000, 20 000-entry batch run, latencies, memory)"
+        run: python tests/bench_toolkit.py --smoke --json bench-smoke.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-smoke
+          path: bench-smoke.json
+
   independent-verifiers:
     runs-on: ubuntu-latest
     steps:

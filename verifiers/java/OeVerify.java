@@ -7,7 +7,7 @@
 // SHA3-256), ledger-chain (strict chain + dedicated anchored_pack_sha3 entry), producer-signature (Ed25519 over the
 // pack_sha3 hex bytes), pq-signature (ML-DSA-65, empty context, PINNED tri-state), trusted-signer (replay of the
 // hash-chained trust registry), authenticity. RFC 3161 sidecars are NOT verified here (declared SKIP).
-// Run:  java OeVerify.java <pack.json> [-ledger L] [-trust-store T] [-expect-pq-key B64] [-require-pq]
+// Run:  java OeVerify.java <pack.json> [-ledger L] [-trust-store T] [-expect-pq-key B64] [-require-pq] [-require-signed]
 import java.io.*;
 import java.nio.charset.*;
 import java.nio.file.*;
@@ -387,9 +387,9 @@ public class OeVerify {
         return r;
     }
     static String val(String[] args, int k) { if (k >= args.length || args[k].isEmpty() || args[k].startsWith("-")) usage(); return args[k]; }   // "" or a flag as a value: usage (21/09/2026)
-    static void usage() { System.err.println("usage: java OeVerify.java <pack.json> [-ledger L] [-trust-store T] [-expect-pq-key B64] [-require-pq]"); System.exit(2); }
+    static void usage() { System.err.println("usage: java OeVerify.java <pack.json> [-ledger L] [-trust-store T] [-expect-pq-key B64] [-require-pq] [-require-signed]"); System.exit(2); }
     static void run(String[] args) throws Exception {
-        String pack = null, ledger = "", trust = "", epq = ""; boolean reqPQ = false;
+        String pack = null, ledger = "", trust = "", epq = ""; boolean reqPQ = false, reqSigned = false;
         for (int k = 0; k < args.length; k++) {
             String a = args[k]; String v = null; if (a.startsWith("--") && a.length() > 2) a = a.substring(1);   // r4: -flag and --flag alike
             int eq = a.indexOf('=');
@@ -400,23 +400,28 @@ public class OeVerify {
                     case "-trust-store": trust = v != null ? val(new String[]{v}, 0) : val(args, ++k); break;
                     case "-expect-pq-key": epq = v != null ? val(new String[]{v}, 0) : val(args, ++k); break;
                     case "-require-pq": if (v != null) { usage(); return; } reqPQ = true; break;
+                    case "-require-signed": if (v != null) { usage(); return; } reqSigned = true; break;   // 0.10.0: fail-closed on the classical layer
                     default: if (a.startsWith("-") || a.isEmpty() || pack != null || v != null) { usage(); return; } pack = a;
                 }
             } catch (ArrayIndexOutOfBoundsException e) { usage(); return; }
         }
         if (pack == null) { usage(); return; }
-        Map<String, Object> r = verifyPack(pack, ledger, trust, epq, reqPQ);
+        Map<String, Object> r = verifyPack(pack, ledger, trust, epq, reqPQ, reqSigned);
         System.out.println(j(r));
         String v = (String) r.get("verdict");
         System.exit("PASS".equals(v) ? 0 : "FAIL".equals(v) ? 1 : 77);   // 77 = the check did not run on this JDK
     }
 
     static Map<String, Object> verifyPack(String packPath, String ledgerPath, String trustStore, String expectedPQ, boolean requirePQ) {
+        return verifyPack(packPath, ledgerPath, trustStore, expectedPQ, requirePQ, false);
+    }
+    // requireSigned (0.10.0): no sidecar, or a signature whose algorithm cannot be checked here, is FAIL — never "anchored"
+    static Map<String, Object> verifyPack(String packPath, String ledgerPath, String trustStore, String expectedPQ, boolean requirePQ, boolean requireSigned) {
         List<Map<String, Object>> layers = new ArrayList<>();
-        try { return verifyPackIn(layers, packPath, ledgerPath, trustStore, expectedPQ, requirePQ); }
+        try { return verifyPackIn(layers, packPath, ledgerPath, trustStore, expectedPQ, requirePQ, requireSigned); }
         catch (Throwable t) { return internalError(layers, t); }
     }
-    static Map<String, Object> verifyPackIn(List<Map<String, Object>> layers, String packPath, String ledgerPath, String trustStore, String expectedPQ, boolean requirePQ) throws Exception {
+    static Map<String, Object> verifyPackIn(List<Map<String, Object>> layers, String packPath, String ledgerPath, String trustStore, String expectedPQ, boolean requirePQ, boolean requireSigned) throws Exception {
         java.util.function.BiConsumer<String[], String> add = (ls, d) -> { Map<String, Object> m = new LinkedHashMap<>(); m.put("layer", ls[0]); m.put("status", ls[1]); m.put("detail", d); layers.add(m); };
         boolean required = requirePQ || !expectedPQ.isEmpty();
         Obj pack; byte[] packBytes;   // read ONCE: the timestamp binding hashes these bytes, not a second read
@@ -449,10 +454,14 @@ public class OeVerify {
             else add.accept(new String[]{"timestamp", "SKIP"}, "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
         }
         else add.accept(new String[]{"timestamp", "SKIP"}, "no timestamp sidecar");
-        // producer signature
-        String sigStatus = "SKIP"; boolean trusted = false, trustFailed = false;
+        // producer signature. why: "" ordinarily; "unverified" = a signature is PRESENT with an algorithm unknown here (SKIP, said
+        // in the authenticity layer); "required" = requireSigned not met (FAIL, fail-closed) — 0.10.0
+        String sigStatus = "SKIP", why = ""; boolean trusted = false, trustFailed = false;
         String sp = sidecar(packPath, ".sig.json");
-        if (!Files.exists(Path.of(sp))) add.accept(new String[]{"producer-signature", "SKIP"}, "pack not signed");
+        if (!Files.exists(Path.of(sp))) {
+            if (requireSigned) { add.accept(new String[]{"producer-signature", "FAIL"}, "signature required but the pack is not signed"); sigStatus = "FAIL"; why = "required"; }
+            else add.accept(new String[]{"producer-signature", "SKIP"}, "pack not signed");
+        }
         else {
             Obj side = null;
             try { side = readObject(sp); } catch (Exception e) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar: " + e.getMessage()); sigStatus = "FAIL"; }
@@ -461,7 +470,13 @@ public class OeVerify {
                 String alg = algPresent ? str(side, "sig_alg") : "ed25519";
                 String signedDigest = str(side, "signed_pack_sha3"), pkB64 = str(side, "public_key_b64"), sigB64 = str(side, "signature_b64");
                 if (algPresent && (alg == null || alg.isEmpty())) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar fields: sig_alg is not a non-empty string"); sigStatus = "FAIL"; }  // council 16/09 r1; "" is present and malformed (25/09/2026)
-                else if (!"ed25519".equals(alg)) add.accept(new String[]{"producer-signature", "SKIP"}, "unsupported sig_alg: " + alg);
+                else if (!SUPPORTED_SIG_ALGS.contains(alg)) {
+                    // 0.10.0: a non-canonical spelling of a supported name is a judgment (FAIL: no producer writes it); a genuinely
+                    // unknown name is SKIP with the presence of the signature said, FAIL when a signature is required
+                    if (SUPPORTED_SIG_ALGS.contains(foldAlg(alg))) { add.accept(new String[]{"producer-signature", "FAIL"}, "sig_alg is not the canonical name of a supported algorithm (got " + alg + "; supported: ed25519)"); sigStatus = "FAIL"; }
+                    else if (requireSigned) { add.accept(new String[]{"producer-signature", "FAIL"}, "signature present, algorithm unsupported, not verified: " + alg + " — a required signature that cannot be checked is not a pass"); sigStatus = "FAIL"; why = "required"; }
+                    else { add.accept(new String[]{"producer-signature", "SKIP"}, "signature present, algorithm unsupported, not verified: " + alg); why = "unverified"; }
+                }
                 else {
                     byte[] pk = b64Strict(pkB64, 32), sig = b64Strict(sigB64, 64);
                     if (pk == null || sig == null || !declared.matches("[0-9a-f]{64}")) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar fields (strict base64 32/64, lowercase hex digest)"); sigStatus = "FAIL"; }   // council r3
@@ -495,12 +510,15 @@ public class OeVerify {
             }
         }
         if (required && !"PASS".equals(sigStatus)) add.accept(new String[]{"pq-signature", "FAIL"}, "post-quantum layer required but the pack carries no valid classical signature (hybrid = both)");
-        if ("FAIL".equals(sigStatus)) add.accept(new String[]{"authenticity", "FAIL"}, "producer signature present but invalid");
+        // authenticity (the wording of the four; a present, unverified signature is named in the tier — 0.10.0)
+        String note = "unverified".equals(why) ? UNVERIFIED_NOTE : "";
+        if ("FAIL".equals(sigStatus) && "required".equals(why)) add.accept(new String[]{"authenticity", "FAIL"}, "producer signature required but absent or not verified");
+        else if ("FAIL".equals(sigStatus)) add.accept(new String[]{"authenticity", "FAIL"}, "producer signature present but invalid");
         else if (trustFailed) add.accept(new String[]{"authenticity", "FAIL"}, "valid signature but signer not trusted/revoked");
         else if (trusted) add.accept(new String[]{"authenticity", "PASS"}, "trusted-signed");
         else if ("PASS".equals(sigStatus)) add.accept(new String[]{"authenticity", "PASS"}, "signed (identity not checked against a registry)");
-        else if (ledgerOK) add.accept(new String[]{"authenticity", "PASS"}, "anchored (integrity/time, not identity)");
-        else add.accept(new String[]{"authenticity", "FAIL"}, "no anchor and no signature: cannot authenticate");
+        else if (ledgerOK) add.accept(new String[]{"authenticity", "PASS"}, "anchored (integrity/time, not identity)" + note);
+        else add.accept(new String[]{"authenticity", "FAIL"}, "no anchor and no verified signature: cannot authenticate" + note);
         return finish(layers, trusted, "PASS".equals(sigStatus) && !trustFailed, required);   // council 16/09 r1: never authenticated for a revoked/untrusted signer
     }
 
@@ -520,6 +538,24 @@ public class OeVerify {
 
     // PQ algorithms the project implements a backend for somewhere; membership does not mean THIS JDK has it.
     static final java.util.Set<String> KNOWN_PQ_ALGS = java.util.Set.of("ml-dsa-65", "slh-dsa-sha2-128s");
+    // The classical producer-signature algorithms of the four verifiers, canonical names (Ed25519 only).
+    static final java.util.Set<String> SUPPORTED_SIG_ALGS = java.util.Set.of("ed25519");
+    // The same words in the four verifiers: a present, unverified signature is NAMED in the tier the pack falls to (0.10.0).
+    static final String UNVERIFIED_NOTE = " — a signature is present but its algorithm is unsupported and was not verified";
+    // foldAlg: the shape under which a VARIANT of a supported algorithm name is recognised (0.10.0) — ASCII letters lowercased,
+    // every character that is not an ASCII letter or digit dropped (spaces, hyphens, underscores, non-ASCII). "eD25519",
+    // "ED25519", "ed2 5519", "ed-25519" fold to "ed25519" and are refused as non-canonical spellings; until 0.9.1 each was an
+    // "unsupported algorithm" SKIP and an anchored, signed pack stayed valid on a one-bit change of the field (measured
+    // 28/09/2026). The same rule, character for character, as verifier.py _fold_alg, pack.go foldAlg, oeverify.mjs foldAlg.
+    static String foldAlg(String s) {
+        StringBuilder b = new StringBuilder();
+        for (int k = 0; k < s.length(); k++) {
+            char c = s.charAt(k);
+            if (c >= 'A' && c <= 'Z') b.append((char) (c + 32));
+            else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) b.append(c);
+        }
+        return b.toString();
+    }
 
     static void checkPQ(List<Map<String, Object>> layers, Obj side, String digest, String expectedPQ, boolean requirePQ) {
         java.util.function.BiConsumer<String, String> add = (s, d) -> { Map<String, Object> m = new LinkedHashMap<>(); m.put("layer", "pq-signature"); m.put("status", s); m.put("detail", d); layers.add(m); };

@@ -33,7 +33,7 @@ from .signing import Identity
 
 import re as _re
 
-# 0.8.3 review r3 (Opus): ASCII word boundaries and ASCII case folding, the semantics of Go's RE2, Node without the u flag and
+# 0.8.3 review r3: ASCII word boundaries and ASCII case folding, the semantics of Go's RE2, Node without the u flag and
 # Java without UNICODE_CASE — Python's Unicode \b and its i ≡ ı (U+0131) folding made "does NOTé" and "certıfied" verdicts differ
 _SCOPE_LIMIT = _re.compile(r"\bNOT\b", _re.ASCII)   # standalone word, not NOTE/NOTHING/CANNOT
 _SCOPE_OVERCLAIM = _re.compile(r"\b(accredited|certified|qualified|guaranteed)\b", _re.I | _re.ASCII)

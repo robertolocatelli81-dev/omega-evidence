@@ -9,7 +9,7 @@
 // SubjectPublicKeyInfo with OID 2.16.840.1.101.3.4.3.18 and checked with crypto.verify, empty context — measured
 // 2026-09-19 on Node 24.21.0/OpenSSL 3.5.8 and 22.23.2/OpenSSL 3.5.7 against cryptography-produced signatures);
 // on an older OpenSSL the layer is reported as before: present-but-unverified (null), never true.
-// Usage: node oeverify.mjs <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]
+// Usage: node oeverify.mjs <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq] [--require-signed]
 import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
 import { closeSync, constants as FS, existsSync, fstatSync, openSync, readSync } from "node:fs";
 
@@ -91,7 +91,7 @@ export function jsonNestingDepth(text) {
   return max;
 }
 // a number token with '.', 'e' or 'E' outside a string: JSON.parse("1.0") is the integer 1 and canon() cannot see the lexeme
-// (a pack with "n":1.0 hashed as "n":1 verified PASS here alone — 0.8.3 review r3, Opus); Python's parse_float, Go and Java
+// (a pack with "n":1.0 hashed as "n":1 verified PASS here alone — 0.8.3 review r3); Python's parse_float, Go and Java
 // refuse it on the text, so does this
 export function hasFloatLexeme(text) {
   let inStr = false, esc = false;
@@ -141,7 +141,7 @@ const SPKI = Buffer.from("302a300506032b6570032100", "hex");
 // is refused as an unreadable one is.
 export const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 const SCOPE_LIMIT = /\bNOT\b/, SCOPE_OVERCLAIM = /\b(accredited|certified|qualified|guaranteed)\b/i, SCOPE_NEGATED = /\bNOT\b[^.]{0,40}(accredit|certif|qualif|guarant)/i;
-// r4 (Opus): without the u flag `[^.]{0,40}` counts UTF-16 code units — 21 astral characters between NOT and "guarant" are 42
+// r4: without the u flag `[^.]{0,40}` counts UTF-16 code units — 21 astral characters between NOT and "guarant" are 42
 // units here and 21 code points in Python/Go/Java; each astral character is folded to one BMP placeholder before the tests
 // (the u flag is not used: with /iu the \b and \w semantics would diverge from the ASCII ones of the other three)
 const oneUnitPerCodePoint = (s) => s.replace(/[\u{10000}-\u{10FFFF}]/gu, "\ufffd");   // one pass, no array of code points (25/09/2026)
@@ -158,6 +158,24 @@ function signedUtcOK(v) {
   return y >= 1 && mo >= 1 && mo <= 12 && d >= 1 && d <= dim[mo - 1] && h <= 23 && mi <= 59 && se <= 59;
 }
 const sidecar = (p, suf) => (p.endsWith(".json") ? p.slice(0, -5) + suf : p + suf);
+// The classical producer-signature algorithms of the four verifiers, canonical names (Ed25519 only).
+const SUPPORTED_SIG_ALGS = new Set(["ed25519"]);
+// The same words in the four verifiers: a present, unverified signature is NAMED in the tier the pack falls to (0.10.0).
+const UNVERIFIED_NOTE = " — a signature is present but its algorithm is unsupported and was not verified";
+// foldAlg: the shape under which a VARIANT of a supported algorithm name is recognised (0.10.0) — ASCII letters lowercased,
+// every UTF-16 unit that is not an ASCII letter or digit dropped (spaces, hyphens, underscores, non-ASCII). "eD25519",
+// "ED25519", "ed2 5519", "ed-25519" fold to "ed25519" and are refused as non-canonical spellings; until 0.9.1 each was an
+// "unsupported algorithm" SKIP and an anchored, signed pack stayed valid on a one-bit change of the field (measured
+// 28/09/2026). The same rule, character for character, as verifier.py _fold_alg, pack.go foldAlg, OeVerify.java foldAlg.
+export function foldAlg(s) {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 65 && c <= 90) out += String.fromCharCode(c + 32);
+    else if ((c >= 97 && c <= 122) || (c >= 48 && c <= 57)) out += s[i];
+  }
+  return out;
+}
 
 // trim ASCII space/tab/CR/LF by index: the former /^[ \t\r\n]+|[ \t\r\n]+$/g is quadratic on long inner whitespace runs
 function trimJsonWs(text) {
@@ -230,7 +248,7 @@ function ledgerEntries(path) {
 const anchors = (e, digest) => e.anchored_pack_sha3 === digest || (e.data && typeof e.data === "object" && e.data.anchored_pack_sha3 === digest);
 
 function trustState(path) {
-  const { ok, entries } = ledgerEntries(path); const st = Object.create(null);   // r5 (Opus): with {} a signer_id "toString" or "__proto__" read through Object.prototype (a revoke of "__proto__" then a trust of "toString" was FAIL here alone, and polluted the prototype)
+  const { ok, entries } = ledgerEntries(path); const st = Object.create(null);   // r5: with {} a signer_id "toString" or "__proto__" read through Object.prototype (a revoke of "__proto__" then a trust of "toString" was FAIL here alone, and polluted the prototype)
   if (!ok) return { ok, st };
   for (const e of entries) {
     const d = e.data; if (!d || typeof d !== "object" || Array.isArray(d)) return { ok: false, st };   // council r2: malformed record = broken store
@@ -259,7 +277,8 @@ export function verifyPack(packPath, opts = {}) {
   const layers = [];
   try { return verifyPackIn(layers, packPath, opts); } catch (e) { return internalError(layers, e); }
 }
-function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ = "", requirePQ = false } = {}) {
+// requireSigned (0.10.0): no sidecar, or a signature whose algorithm cannot be checked here, is FAIL — never "anchored"
+function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ = "", requirePQ = false, requireSigned = false } = {}) {
   const add = (layer, status, detail = "", assessed = true) => layers.push(assessed ? { layer, status, detail } : { layer, status, detail, assessed });
   const required = requirePQ || Boolean(expectPQ);
   let pack, packBytes;   // read ONCE; the timestamp binding hashes these bytes, not a second read
@@ -284,15 +303,26 @@ function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ
     else if (ts.digest_sha256 !== sha256Hex(packBytes)) add("timestamp", "FAIL", "pack changed after stamping");
     else add("timestamp", "SKIP", "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
   } else add("timestamp", "SKIP", "no timestamp sidecar");
-  let sigStatus = "SKIP", trusted = false, trustFailed = false;
+  // why: "" ordinarily; "unverified" = a signature is PRESENT with an algorithm unknown here (SKIP, said in the authenticity
+  // layer); "required" = requireSigned not met (FAIL, fail-closed) — 0.10.0
+  let sigStatus = "SKIP", trusted = false, trustFailed = false, why = "";
   const sp = sidecar(packPath, ".sig.json");
-  if (!existsSync(sp)) add("producer-signature", "SKIP", "pack not signed");
+  if (!existsSync(sp)) {
+    if (requireSigned) { add("producer-signature", "FAIL", "signature required but the pack is not signed"); sigStatus = "FAIL"; why = "required"; }
+    else add("producer-signature", "SKIP", "pack not signed");
+  }
   else {
     let side = null; try { side = readObject(sp); } catch (e) { add("producer-signature", "FAIL", "malformed sidecar: " + e.message); sigStatus = "FAIL"; }
     if (side) {
       const alg = "sig_alg" in side ? side.sig_alg : "ed25519";
       if ("sig_alg" in side && (typeof alg !== "string" || alg === "")) { add("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a non-empty string"); sigStatus = "FAIL"; }  // council 16/09 r1; "" is present and malformed (25/09/2026)
-      else if (alg !== "ed25519") add("producer-signature", "SKIP", "unsupported sig_alg: " + alg);
+      else if (!SUPPORTED_SIG_ALGS.has(alg)) {
+        // 0.10.0: a non-canonical spelling of a supported name is a judgment (FAIL: no producer writes it); a genuinely
+        // unknown name is SKIP with the presence of the signature said, FAIL when a signature is required
+        if (SUPPORTED_SIG_ALGS.has(foldAlg(alg))) { add("producer-signature", "FAIL", "sig_alg is not the canonical name of a supported algorithm (got " + alg + "; supported: ed25519)"); sigStatus = "FAIL"; }
+        else if (requireSigned) { add("producer-signature", "FAIL", "signature present, algorithm unsupported, not verified: " + alg + " — a required signature that cannot be checked is not a pass"); sigStatus = "FAIL"; why = "required"; }
+        else { add("producer-signature", "SKIP", "signature present, algorithm unsupported, not verified: " + alg); why = "unverified"; }
+      }
       else {
         const pk = b64Strict(side.public_key_b64, 32), sig = b64Strict(side.signature_b64, 64);
         let okSig = false;
@@ -325,12 +355,15 @@ function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ
     }
   }
   if (required && sigStatus !== "PASS") add("pq-signature", "FAIL", "post-quantum layer required but the pack carries no valid classical signature (hybrid = both)");
-  if (sigStatus === "FAIL") add("authenticity", "FAIL", "producer signature present but invalid");
+  // authenticity (the wording of the four; a present, unverified signature is named in the tier — 0.10.0)
+  const note = why === "unverified" ? UNVERIFIED_NOTE : "";
+  if (sigStatus === "FAIL" && why === "required") add("authenticity", "FAIL", "producer signature required but absent or not verified");
+  else if (sigStatus === "FAIL") add("authenticity", "FAIL", "producer signature present but invalid");
   else if (trustFailed) add("authenticity", "FAIL", "valid signature but signer not trusted/revoked");
   else if (trusted) add("authenticity", "PASS", "trusted-signed");
   else if (sigStatus === "PASS") add("authenticity", "PASS", "signed (identity not checked against a registry)");
-  else if (ledgerOK) add("authenticity", "PASS", "anchored (integrity/time, not identity)");
-  else add("authenticity", "FAIL", "no anchor and no signature: cannot authenticate");
+  else if (ledgerOK) add("authenticity", "PASS", "anchored (integrity/time, not identity)" + note);
+  else add("authenticity", "FAIL", "no anchor and no verified signature: cannot authenticate" + note);
   return finish(layers, trusted, sigStatus === "PASS" && !trustFailed, required);   // council 16/09 r1: never authenticated for a revoked/untrusted signer
 }
 
@@ -399,13 +432,13 @@ function finish(layers, trusted, signed, pqRequired) {
 
 function main(argv) {
   // one grammar in the four CLIs (21/09/2026): an unknown flag, a value flag without a value or with "", a second positional = usage
-  const usage = () => { console.error("usage: node oeverify.mjs <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]"); process.exit(2); };
+  const usage = () => { console.error("usage: node oeverify.mjs <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq] [--require-signed]"); process.exit(2); };
   const VALUE = new Set(["--ledger", "--trust-store", "--expect-pq-key"]); const opts = {}; let pack = null;
   const norm = (a) => (/^-[a-z]/.test(a) ? "-" + a : a);   // r4: -ledger and --ledger are the same flag in the four CLIs
   const badValue = (v) => v === undefined || v === "" || v.startsWith("-");
   for (let i = 0; i < argv.length; i++) {
     const a = norm(argv[i]);
-    if (a === "--require-pq") { opts[a] = true; continue; }
+    if (a === "--require-pq" || a === "--require-signed") { opts[a] = true; continue; }
     if (VALUE.has(a)) { const v = argv[i + 1]; if (badValue(v)) usage(); opts[a] = v; i++; continue; }
     const eq = a.indexOf("=");   // --flag=value, the form Python's argparse and Go's flag accept (one grammar in the four)
     if (eq > 0 && VALUE.has(a.slice(0, eq))) { const v = a.slice(eq + 1); if (badValue(v)) usage(); opts[a.slice(0, eq)] = v; continue; }
@@ -415,10 +448,13 @@ function main(argv) {
   if (!pack) usage();
   let r, out;
   try {
-    r = verifyPack(pack, { ledger: opts["--ledger"] ?? "", trustStore: opts["--trust-store"] ?? "", expectPQ: opts["--expect-pq-key"] ?? "", requirePQ: Boolean(opts["--require-pq"]) });
+    r = verifyPack(pack, { ledger: opts["--ledger"] ?? "", trustStore: opts["--trust-store"] ?? "", expectPQ: opts["--expect-pq-key"] ?? "", requirePQ: Boolean(opts["--require-pq"]), requireSigned: Boolean(opts["--require-signed"]) });
     out = JSON.stringify(r, null, 1);
   } catch (e) { r = internalError([], e); out = JSON.stringify(r, null, 1); }   // a fault outside verifyPack's own guard: exit 77, never 1
-  console.log(out);
-  process.exit(r.verdict === "PASS" ? 0 : r.verdict === "FAIL" ? 1 : 77);   // 77 = nothing adverse found, the check did not run here
+  const code = r.verdict === "PASS" ? 0 : r.verdict === "FAIL" ? 1 : 77;   // 77 = nothing adverse found, the check did not run here
+  // The receipt is written with a callback and the process exits only once it is drained: with `console.log` followed by an
+  // immediate `process.exit`, a receipt longer than the pipe buffer (64 KiB — e.g. a layer detail quoting a 70 000-byte
+  // sig_alg) reached a piped reader truncated and unparsable, while a file got it whole (0.9.1 too; 29/09/2026 code review, D3)
+  process.stdout.write(out + "\n", () => process.exit(code));
 }
 if (process.argv[1] && process.argv[1].endsWith("oeverify.mjs")) main(process.argv.slice(2));

@@ -29,6 +29,11 @@ Graduated authenticity (strongest first):
   anchored        — valid ledger chain (integrity/time); an RFC 3161 token is recorded and bound, not a tier
   none            — internal consistency only  →  FAIL, cannot authenticate
 
+A signature sidecar whose `sig_alg` is a non-canonical spelling of a supported name ("eD25519", "ed2 5519") is a
+  FAIL of the producer-signature layer (0.10.0); one whose algorithm is genuinely unknown here is SKIP, the pack
+  falls to the tier its other layers earn, and both the producer-signature and the authenticity layer say that a
+  signature is present and was not verified. `require_signed` makes either a FAIL (fail-closed).
+
 A bare fabricated pack (no ledger, no signature) cannot pass. A SELF-MADE ledger anchor,
   however, only proves integrity/time — read `authenticated` (not just `valid`). The RFC 3161
   layer is SKIP here as in Go/Java/Node (no trust anchor reaches verify_pack; the cryptographic
@@ -56,6 +61,27 @@ from .trust import TrustRegistry
 # PQ algorithms this project implements a backend for. Membership does not mean a backend is LOADED here: that is the
 # point — a known algorithm with no loaded backend is an absence on this host, an unknown name is a judgment.
 KNOWN_PQ_ALGS = frozenset({"ml-dsa-65", "slh-dsa-sha2-128s"})
+
+# The classical producer-signature algorithms the four verifiers implement, by their canonical names (0.10.0: one
+# list in the four; the classical layer is Ed25519 only — a PQ backend is never a producer signature).
+SUPPORTED_SIG_ALGS = ("ed25519",)
+
+
+def _fold_alg(s: str) -> str:
+    """The shape under which a VARIANT of a supported algorithm name is recognised (0.10.0): ASCII letters lowercased,
+    every character that is not an ASCII letter or digit dropped (spaces, tabs, hyphens, underscores, non-ASCII). So
+    "eD25519", "ED25519", "ed2 5519", "ed-25519", "ed25519\\n" all fold to "ed25519" and are REFUSED as non-canonical
+    spellings of a supported name — until 0.9.1 each was an "unsupported algorithm" SKIP, and a signed pack that was
+    also anchored verified `valid` on a one-bit change of this field (measured 28/09/2026 by the fuzzer: seeds 1 and 2).
+    A name that folds to something else is genuinely unknown (declared limit: a non-ASCII look-alike letter makes a
+    name unknown, not a variant). The same rule, character for character, is in the Go, Java and Node verifiers."""
+    out = []
+    for ch in s:
+        if "A" <= ch <= "Z":
+            out.append(chr(ord(ch) + 32))
+        elif "a" <= ch <= "z" or "0" <= ch <= "9":
+            out.append(ch)
+    return "".join(out)
 
 
 def _layer(name: str, status: str, detail: str = "") -> Dict[str, str]:
@@ -102,7 +128,7 @@ def _anchors_pack(entry: Any, digest: str) -> bool:
 def _read_pack(path: str) -> Dict[str, Any]:
     """For callers of the _check_* helpers without a pack already read (verify_pack passes its own)."""
     try:
-        pk = loads_strict(read_input(path).decode("utf-8"))   # r5 (Sonnet): the same parser as the integrity layer
+        pk = loads_strict(read_input(path).decode("utf-8"))   # r5: the same parser as the integrity layer
     except (OSError, ValueError, RecursionError):
         return {}
     return pk if isinstance(pk, dict) else {}
@@ -150,7 +176,7 @@ def _check_timestamp(path: str, layers: List, pack_bytes: Optional[bytes] = None
     try:
         if pack_bytes is None:
             pack_bytes = read_input(path)
-        side = loads_strict(read_input(ts_side).decode("utf-8"))   # 0.8.3 review (Opus): json.loads let a float / duplicate
+        side = loads_strict(read_input(ts_side).decode("utf-8"))   # 0.8.3 review: json.loads let a float / duplicate
         if not isinstance(side, dict):                                # key sidecar through (PASS in Python, FAIL in the other three)
             raise ValueError("sidecar is not a JSON object")
     except (OSError, ValueError, RecursionError) as e:
@@ -166,7 +192,7 @@ def _check_timestamp(path: str, layers: List, pack_bytes: Optional[bytes] = None
     layers.append(_layer("rfc3161", st, (str(side.get("tsa", "")) + " — " + str(r.get("note", ""))).strip(" —")))   # r6: say WHY it is SKIP
     vm = side.get("validation_material")     # LTV material captured at stamping time
     if isinstance(vm, dict) and vm.get("available"):
-        raw_crls = vm.get("crls_b64", [])   # r3 (Opus): an int here was a TypeError traceback, no verdict (the three answered)
+        raw_crls = vm.get("crls_b64", [])   # r3: an int here was a TypeError traceback, no verdict (the three answered)
         crls = [c for c in (raw_crls if isinstance(raw_crls, list) else []) if isinstance(c, dict) and "crl_b64" in c]
         layers.append(_layer("ltv-material", "SKIP",
                              f"captured: {vm.get('cert_count', 0)} cert(s), {len(crls)} CRL(s) "
@@ -267,54 +293,74 @@ def _fingerprint_of(pk_raw: bytes) -> str:
 
 def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: List,
                                expected_pq: Optional[str] = None, require_pq: bool = False,
-                               pack: Optional[Dict[str, Any]] = None):
+                               pack: Optional[Dict[str, Any]] = None, require_signed: bool = False):
+    """Returns (sig_status, trusted, trust_failed, why). `why` is "" ordinarily; "unverified" when a signature is
+    PRESENT but its algorithm is unknown here, so it was not checked (the authenticity layer says so: never a silent
+    downgrade to "anchored"); "required" when `require_signed` was not met (no sidecar, or a signature that could not
+    be verified) — then the layer is FAIL, fail-closed, like a required post-quantum layer."""
     sig_side = path[:-5] + ".sig.json" if path.endswith(".json") else path + ".sig.json"
     if not os.path.exists(sig_side):
+        if require_signed:
+            layers.append(_layer("producer-signature", "FAIL", "signature required but the pack is not signed"))
+            return "FAIL", False, False, "required"
         layers.append(_layer("producer-signature", "SKIP", "pack not signed"))
-        return "SKIP", False, False
+        return "SKIP", False, False, ""
     try:
         side = loads_strict(read_input(sig_side).decode("utf-8").strip(" \t\r\n"))
         if not isinstance(side, dict):
             raise ValueError("sidecar is not a JSON object")
     except (OSError, ValueError) as e:              # unreadable (permissions, race) is a FAIL, not a crash (council r2)
         layers.append(_layer("producer-signature", "FAIL", f"malformed sidecar: {e}"))
-        return "FAIL", False, False
+        return "FAIL", False, False, ""
     pk_obj = pack if isinstance(pack, dict) else _read_pack(path)
     current = pk_obj.get("pack_sha3", "")
     # The classical layer is Ed25519 ONLY — the same rule as the Go/Java/JS verifiers (council 16/09 r1: a
     # registered PQ backend must never be accepted here as the producer signature; a sig_alg that is not a
-    # string is a malformed sidecar, an unknown string is an honest SKIP, never a crash)
+    # string is a malformed sidecar, never a crash)
     alg = side.get("sig_alg", "ed25519")
     if not isinstance(alg, str) or not alg:   # 25/09/2026: "" is a present, malformed field (it was an "unsupported" SKIP)
         layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a non-empty string"))
-        return "FAIL", False, False
-    if alg != "ed25519":
-        layers.append(_layer("producer-signature", "SKIP", f"unsupported sig_alg: {alg}"))
-        return "SKIP", False, False
+        return "FAIL", False, False, ""
+    if alg not in SUPPORTED_SIG_ALGS:
+        # 0.10.0 (measured 28/09/2026): a one-bit change of this field ("eD25519") used to be an "unsupported
+        # algorithm" SKIP, and a signed pack that was also anchored stayed `valid` with authenticated=false — a
+        # silent downgrade of the tier. Now: a non-canonical spelling of a supported name is a FAIL (a judgment: no
+        # producer writes it); a genuinely unknown name is still SKIP, but the layer and the authenticity layer both
+        # say that a signature is present and was not verified; with `require_signed` that SKIP is a FAIL.
+        if _fold_alg(alg) in SUPPORTED_SIG_ALGS:
+            layers.append(_layer("producer-signature", "FAIL",
+                                 f"sig_alg is not the canonical name of a supported algorithm (got {alg}; supported: ed25519)"))
+            return "FAIL", False, False, ""
+        if require_signed:
+            layers.append(_layer("producer-signature", "FAIL",
+                                 f"signature present, algorithm unsupported, not verified: {alg} — a required signature that cannot be checked is not a pass"))
+            return "FAIL", False, False, "required"
+        layers.append(_layer("producer-signature", "SKIP", f"signature present, algorithm unsupported, not verified: {alg}"))
+        return "SKIP", False, False, "unverified"
     # 0.7.0 (oracle 16/09: Python took a base64 signature with a space that Go/Java/Node refuse): the
     # sidecar fields are decoded STRICTLY — canonical base64 of exactly 32 / 64 bytes, lowercase hex digest
     from .pqbackends.mldsa import b64_strict
     if (b64_strict(side.get("public_key_b64"), 32) is None or b64_strict(side.get("signature_b64"), 64) is None
             or not isinstance(current, str) or not _re.fullmatch(r"[0-9a-f]{64}", current)):
         layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields (strict base64 32/64, lowercase hex digest)"))
-        return "FAIL", False, False
+        return "FAIL", False, False, ""
     # 25/09/2026 (NEMESIS): the two fields the producer writes beside the signature were never read, so "", 0, null,
     # true, [] or {} left the pack PASS and authenticated. Absent is legacy and fine; present must be what sign_pack
     # writes — the fingerprint DERIVED from this public key, the instant in its exact form — else the layer is FAIL.
     if "fingerprint" in side and side["fingerprint"] != _fingerprint_of(base64.b64decode(side["public_key_b64"])):
         layers.append(_layer("producer-signature", "FAIL", "malformed sidecar field: fingerprint is not the one derived from public_key_b64"))
-        return "FAIL", False, False
+        return "FAIL", False, False, ""
     if "signed_utc" in side and not _signed_utc_ok(side["signed_utc"]):
         layers.append(_layer("producer-signature", "FAIL", "malformed sidecar field: signed_utc is not YYYY-MM-DDTHH:MM:SS+00:00"))
-        return "FAIL", False, False
+        return "FAIL", False, False, ""
     if not isinstance(side.get("signer_id"), str) or not side["signer_id"]:
         # council r2: a list / missing signer_id gave three outcomes in three verifiers (crash, FAIL, JS coercion PASS)
         layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields: signer_id must be a non-empty string"))
-        return "FAIL", False, False
+        return "FAIL", False, False, ""
     result = verify_signature(side["public_key_b64"], side["signature_b64"], current.encode())
     if current != side.get("signed_pack_sha3") or not result:
         layers.append(_layer("producer-signature", "FAIL", "signature invalid or pack changed"))
-        return "FAIL", False, False
+        return "FAIL", False, False, ""
     layers.append(_layer("producer-signature", "PASS",
                          f"signed by {side.get('signer_id')} ({alg})"))
     sid, pk = side.get("signer_id"), side.get("public_key_b64")
@@ -332,23 +378,29 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
     pinned_pq = expected_pq or (tr.pq_pubkey(sid) if trusted_now else None)
     _check_pq_cosignature(side, current, layers, pinned_pq, require_pq)   # hybrid PQ, pinned, fail-closed
     if not trust_store:
-        return "PASS", False, False
+        return "PASS", False, False, ""
     if tr_broken:
         layers.append(_layer("trusted-signer", "FAIL", f"trust store unreadable or broken ({tr_broken})"))
-        return "PASS", False, True
+        return "PASS", False, True, ""
     if trusted_now:
         layers.append(_layer("trusted-signer", "PASS", f"{sid} in trust registry"))
-        return "PASS", True, False
+        return "PASS", True, False, ""
     st = tr.status(sid)
     detail = (f"{sid}: key revoked" if st.get("known") and st.get("revoked")
               else f"{sid}: key differs" if st.get("known") else f"{sid}: not in trust registry")
     layers.append(_layer("trusted-signer", "FAIL", detail))
-    return "PASS", False, True
+    return "PASS", False, True, ""
 
 
-def _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, ts_status):
+# The authenticity layer's wording is the same in the four verifiers (0.10.0): a signature that is present and was not
+# verified is NAMED in the tier the pack falls to, so a reader of the layers never mistakes it for an unsigned pack.
+UNVERIFIED_NOTE = " — a signature is present but its algorithm is unsupported and was not verified"
+
+
+def _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, ts_status, why=""):
     if sig_status == "FAIL":
-        layers.append(_layer("authenticity", "FAIL", "producer signature present but invalid"))
+        layers.append(_layer("authenticity", "FAIL", "producer signature required but absent or not verified" if why == "required"
+                             else "producer signature present but invalid"))
     elif trust_failed:
         layers.append(_layer("authenticity", "FAIL", "valid signature but signer not trusted/revoked"))
     elif trusted:
@@ -356,21 +408,24 @@ def _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, t
     elif sig_status == "PASS":
         layers.append(_layer("authenticity", "PASS", "signed (identity not checked against a registry)"))
     elif ledger_ok:   # r7/r8: the "or ts_status == PASS" branch was dead (never PASS here); removed from Go too in r8
-        layers.append(_layer("authenticity", "PASS", "anchored (integrity/time, not identity) — ledger"))
+        layers.append(_layer("authenticity", "PASS", "anchored (integrity/time, not identity)" + (UNVERIFIED_NOTE if why == "unverified" else "")))
     else:
-        layers.append(_layer("authenticity", "FAIL", "no anchor and no signature: cannot authenticate"))
+        layers.append(_layer("authenticity", "FAIL", "no anchor and no verified signature: cannot authenticate" + (UNVERIFIED_NOTE if why == "unverified" else "")))
 
 
 def verify_pack(path: str, ledger_path: Optional[str] = None,
                 trust_store: Optional[str] = None, expected_pq_public_key_b64: Optional[str] = None,
-                require_pq: bool = False) -> Dict[str, Any]:
+                require_pq: bool = False, require_signed: bool = False) -> Dict[str, Any]:
     """Verify an evidence pack across all layers. Returns {valid, layers, ...}.
     `expected_pq_public_key_b64` pins the ML-DSA-65 key (and REQUIRES the layer); `require_pq` alone requires the
     layer to be present, valid and pinned through the trust registry. `pq_protected` in the result is the tri-state
-    true / null (present, not confirmed) / false (absent or broken) — never true on a self-declared key."""
+    true / null (present, not confirmed) / false (absent or broken) — never true on a self-declared key.
+    `require_signed` (0.10.0, CLI `--require-signed`) is fail-closed on the classical layer: a pack with no signature
+    sidecar, or with a signature whose algorithm this verifier cannot check, is FAIL instead of falling to the
+    "anchored" tier — read `authenticated` without it."""
     layers: List[Dict[str, str]] = []
     try:
-        return _verify_pack(layers, path, ledger_path, trust_store, expected_pq_public_key_b64, require_pq)
+        return _verify_pack(layers, path, ledger_path, trust_store, expected_pq_public_key_b64, require_pq, require_signed)
     except Exception as e:  # noqa: BLE001 — MemoryError and RecursionError included
         return internal_error_receipt(layers, e)
 
@@ -392,7 +447,7 @@ def internal_error_receipt(layers: List[Dict[str, Any]], e: BaseException) -> Di
     return roll
 
 
-def _verify_pack(layers, path, ledger_path, trust_store, expected_pq_public_key_b64, require_pq) -> Dict[str, Any]:
+def _verify_pack(layers, path, ledger_path, trust_store, expected_pq_public_key_b64, require_pq, require_signed=False) -> Dict[str, Any]:
     try:
         # 0.7.0: the family's strict acceptance profile (no duplicate keys, no floats, bounded integers, nesting
         # <= 512) — the same rule the Go/Java/JS pack verifiers apply, so an ambiguous encoding is refused, not guessed.
@@ -428,29 +483,28 @@ def _verify_pack(layers, path, ledger_path, trust_store, expected_pq_public_key_
 
     ledger_ok = _check_ledger(path, ledger_path, layers, pack)
     ts_status = _check_timestamp(path, layers, pack_bytes)
-    sig_status, trusted, trust_failed = _check_signature_and_trust(path, trust_store, layers,
-                                                                   expected_pq_public_key_b64, require_pq, pack)
+    sig_status, trusted, trust_failed, why = _check_signature_and_trust(path, trust_store, layers, expected_pq_public_key_b64,
+                                                                        require_pq, pack, require_signed=require_signed)
     if (require_pq or expected_pq_public_key_b64) and sig_status != "PASS":
         layers.append(_layer("pq-signature", "FAIL", "post-quantum layer required but the pack carries no valid classical signature (hybrid = both)"))
-    _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, ts_status)
+    _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, ts_status, why)
     roll = _rollup(layers)
     pq_layer = next((ly for ly in layers if ly["layer"] == "pq-signature"), None)
     roll["pq_protected"] = (True if pq_layer and pq_layer["status"] == "PASS"
                             else None if pq_layer and pq_layer["status"] == "SKIP" else False)
-    auth = next((ly for ly in layers if ly["layer"] == "authenticity"), {})
-    # `valid` = integrity + intactness. `authenticated` = a real producer identity signed it
-    # (a self-made ledger anchor proves integrity/time, NOT authenticity — read this field).
-    # council r2 (Sonnet): a body mutated after signing, pack_sha3 and sidecar intact, gave valid=false but
+    # `valid` = integrity + intactness. `authenticated` = a real producer identity signed it and the registry (if any)
+    # did not refuse it (a self-made ledger anchor proves integrity/time, NOT authenticity — read this field).
+    # council r2: a body mutated after signing, pack_sha3 and sidecar intact, gave valid=false but
     # authenticated=true — a single-boolean gate would accept content nobody signed. `authenticated` therefore also
-    # requires the pack-sha3 integrity layer to PASS (same in Go/Java/JS).
+    # requires the pack-sha3 integrity layer to PASS. The same three booleans as Go/Java/JS (0.10.0: it was read off
+    # the wording of the authenticity layer, which now carries a note about an unverified signature).
     integrity = next((ly for ly in layers if ly["layer"] == "pack-sha3"), {}).get("status") == "PASS"
-    roll["authenticated"] = integrity and auth.get("status") == "PASS" and (
-        "signed" in auth.get("detail", "") or "trusted" in auth.get("detail", ""))
+    roll["authenticated"] = integrity and sig_status == "PASS" and not trust_failed
     return roll
 
 
 def main(argv=None) -> int:
-    """`python -m omega_evidence.verifier <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq]`
+    """`python -m omega_evidence.verifier <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq] [--require-signed]`
     prints the receipt as JSON; exit 0 only when `valid` (and, with a PQ requirement, `pq_protected`)."""
     import argparse
     p = argparse.ArgumentParser(allow_abbrev=False, add_help=False, prog="omega-evidence-verify")   # r3: -h/--help exit 0 here, 2 in the three (usage on stderr documents the flags)
@@ -459,16 +513,18 @@ def main(argv=None) -> int:
     p.add_argument("--trust-store")
     p.add_argument("--expect-pq-key", help="pinned ML-DSA-65 public key (base64): requires the hybrid layer")
     p.add_argument("--require-pq", action="store_true", help="require a pinned, valid post-quantum layer (trust registry)")
+    p.add_argument("--require-signed", action="store_true", help="fail-closed: a missing or unverifiable producer signature is FAIL, never 'anchored'")
     raw = list(sys.argv[1:] if argv is None else argv)
     # r4/r5: one dash or two is the same flag in the four CLIs — the EXACT single-dash spellings are mapped here (registering
     # "-ledger" as an option string would let argparse resolve "-l" / "-ledg" by prefix even with allow_abbrev=False)
-    ONE_DASH = {"-ledger": "--ledger", "-trust-store": "--trust-store", "-expect-pq-key": "--expect-pq-key", "-require-pq": "--require-pq"}
+    ONE_DASH = {"-ledger": "--ledger", "-trust-store": "--trust-store", "-expect-pq-key": "--expect-pq-key", "-require-pq": "--require-pq",
+                "-require-signed": "--require-signed"}
     raw = [ONE_DASH.get(x.split("=", 1)[0], x.split("=", 1)[0]) + ("=" + x.split("=", 1)[1] if "=" in x else "") if x.split("=", 1)[0] in ONE_DASH else x for x in raw]
-    if "--" in raw or any(x.startswith("--require-pq=") for x in raw):   # no "--" terminator, no value on the boolean flag (one grammar in the four)
+    if "--" in raw or any(x.startswith(("--require-pq=", "--require-signed=")) for x in raw):   # no "--" terminator, no value on a boolean flag (one grammar in the four)
         p.error("unexpected argument")
     VALUE = ("--ledger", "--trust-store", "--expect-pq-key")
     i = 0
-    while i < len(raw):   # r13 (Opus): validate EVERY occurrence — argparse keeps the last value, so `--ledger "" --ledger L` slipped through
+    while i < len(raw):   # r13: validate EVERY occurrence — argparse keeps the last value, so `--ledger "" --ledger L` slipped through
         tok = raw[i]
         if tok in VALUE:
             v = raw[i + 1] if i + 1 < len(raw) else None
@@ -489,7 +545,7 @@ def main(argv=None) -> int:
         if v is not None and (v == "" or v.startswith("-")):   # "" or a flag as a value would silently mean "not given" (one grammar in the four, 21/09/2026)
             p.error(f"--{flag.replace('_', '-')} needs a value (got {v!r})")
     try:
-        r = verify_pack(a.pack, a.ledger, a.trust_store, a.expect_pq_key, a.require_pq)
+        r = verify_pack(a.pack, a.ledger, a.trust_store, a.expect_pq_key, a.require_pq, a.require_signed)
         # `assessed` gates PASS too: a run where a present layer could not be read here is inconclusive, not a pass.
         passed = r.get("valid") and r.get("assessed", True) and (not (a.require_pq or a.expect_pq_key) or r.get("pq_protected") is True)
         r["verdict"] = "PASS" if passed else ("FAIL" if r.get("assessed", True) else "NOT_ASSESSED")

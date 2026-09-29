@@ -1,0 +1,59 @@
+name: Fuzz (weekly)
+
+# A longer fuzz run every week on a NEW seed (the run number), so each week explores mutations the fixed-seed smoke job
+# never reaches; the seed is printed and stored, so a finding is reproduced with `--seed <that number>`. 20 minutes per
+# Python version, with and without the native Ed25519 backend. A violation fails the job (the steps run under
+# `shell: bash`, i.e. with pipefail, so the fuzzer's exit code is the step's), and the findings are uploaded either way.
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"   # Mondays 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "time budget per matrix cell (seconds)"
+        default: "1200"
+      seed:
+        description: "seed (empty = the run number)"
+        default: ""
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+        cryptography: ["yes", "no"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: |
+          python -m pip install --no-deps .
+          if [ "${{ matrix.cryptography }}" = "yes" ]; then python -m pip install cryptography; fi
+      - name: "Fuzz for the time budget on this run's seed"
+        # shell: bash adds -o pipefail: with the default `bash -e` the exit code of a `… | tail` step is tail's, so a
+        # violation found by the fuzzer never failed the job (29/09/2026 code review, D1) — and the upload below never told
+        shell: bash
+        run: |
+          SEED="${{ github.event.inputs.seed }}"; SEED="${SEED:-${{ github.run_number }}}"
+          SECS="${{ github.event.inputs.seconds }}"; SECS="${SECS:-1200}"
+          echo "seed=$SEED seconds=$SECS python=${{ matrix.python-version }} cryptography=${{ matrix.cryptography }}"
+          python tests/fuzz_toolkit.py --seed "$SEED" --iterations 0 --seconds "$SECS" \
+            --findings-dir "fuzz-findings-${{ matrix.python-version }}-${{ matrix.cryptography }}" \
+            --json "fuzz-${{ matrix.python-version }}-${{ matrix.cryptography }}.json" | tail -3
+      - name: "Positive control on the same seed (signature check disabled: violations expected)"
+        shell: bash
+        run: |
+          SEED="${{ github.event.inputs.seed }}"; SEED="${SEED:-${{ github.run_number }}}"
+          python tests/fuzz_toolkit.py --seed "$SEED" --iterations 5000 --ablate signature --findings-dir "ablation-${{ matrix.python-version }}-${{ matrix.cryptography }}" | tail -1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: "fuzz-${{ matrix.python-version }}-cryptography-${{ matrix.cryptography }}"
+          path: |
+            fuzz-*.json
+            fuzz-findings-*

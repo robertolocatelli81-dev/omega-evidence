@@ -16,8 +16,13 @@ under `prlimit --data=$OEVERIFY_DATA_MAX` (default 1.5 GB; 26/09/2026: at 2.5 GB
 ledger line, still fitted and a revert went unseen — at 1.5 GB it crashes and the case turns DIFF), falling back to
 `systemd-run --user --scope -p MemoryMax=$OEVERIFY_MEMORY_MAX`, which is INERT on a cgroup-v1 host (measured: 500 MB
 allocated under MemoryMax=100M) — the oracle says so when it falls back. OEVERIFY_JS points the
-Node column at another tree; OEVERIFY_ONLY=prefix,... runs only the matching cases (ablations)."""
-import base64, glob, json, os, shutil, subprocess, sys, tempfile
+Node column at another tree; OEVERIFY_ONLY=prefix,... runs only the matching cases (ablations).
+29/09/2026 (0.10.0): the `sig_alg` cases — a non-canonical spelling of a supported name (FAIL in the four), a genuinely
+unknown name (a SKIP that names the unverified signature; the tier the other layers earn), the fail-closed
+`--require-signed` flag; for every case whose name starts with `sig-alg-` the four must also agree on the (status, detail)
+of the producer-signature and authenticity layers, so the reason is one reason in the four, not only the verdict.
+The Java column is found through OEVERIFY_JAVA, JAVA_HOME or the javac on PATH (a JDK >= 24)."""
+import base64, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -37,6 +42,8 @@ PY_CWD = None   # set from OEVERIFY_PYTHONPATH (ablation)
 EXPECT = {}     # name -> the verdict EVERY verifier must give (a wrong outcome shared by the four is still a disagreement)
 CASE_ENV = {}   # name -> extra environment (the internal-error injection hook)
 HAZARD = set()  # names whose input used to block or exhaust memory: run with a memory cap (prlimit) and a short timeout
+DETAILS = {}    # name -> {verifier command: {layer: (status, detail)}} for the producer-signature / authenticity layers (29/09/2026)
+DETAIL_LAYERS = ("producer-signature", "authenticity")
 
 
 def build_cases(d):
@@ -81,7 +88,7 @@ def build_cases(d):
     bs = mk("trust-broken"); P.sign_pack(bs, idt); store_b = os.path.join(d, "trust_broken.jsonl"); trust.TrustRegistry(store_b).trust("acme", idt.public_key_b64)
     ln = json.loads(open(store_b).read().splitlines()[0]); ln["ts"] = "1999-01-01T00:00:00Z"; open(store_b, "w").write(json.dumps(ln, separators=(",", ":")) + "\n")
     cases["trust-broken-chain"] = (bs, ["--trust-store", store_b], None)
-    acme2 = signing.Identity("acme")   # r10 (Opus): a SECOND key under the trusted name, so a last-wins replay pins it and says trusted-signed
+    acme2 = signing.Identity("acme")   # r10: a SECOND key under the trusted name, so a last-wins replay pins it and says trusted-signed
     dk = mk("trust-dup"); P.sign_pack(dk, acme2); store_d = os.path.join(d, "trust_dup.jsonl"); trust.TrustRegistry(store_d).trust("acme", idt.public_key_b64)
     txt = open(store_d).read(); txt = txt.replace('"pubkey":"' + idt.public_key_b64 + '"', '"pubkey":"' + idt.public_key_b64 + '","pubkey":"' + acme2.public_key_b64 + '"', 1)
     e = json.loads(txt); e2 = {k: v for k, v in e.items() if k != "self_hash"}; import hashlib as _h; e["self_hash"] = _h.sha256(json.dumps(e2, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -93,7 +100,7 @@ def build_cases(d):
                     ("sig-signer-id-missing", lambda sd: {k: v for k, v in sd.items() if k != "signer_id"})):
         p = mk(nm); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
         cases[nm] = (p, ["--trust-store", store], None)
-    cases["sig-signer-id-missing-required-pq"] = (cases["sig-signer-id-missing"][0], ["--require-pq"], None)   # r14 (Sonnet): the early-return branch in Go under the PQ requirement
+    cases["sig-signer-id-missing-required-pq"] = (cases["sig-signer-id-missing"][0], ["--require-pq"], None)   # r14: the early-return branch in Go under the PQ requirement
     sdk = mk("sig-dup-key"); P.sign_pack(sdk, idt); sp = sdk[:-5] + ".sig.json"; txt = open(sp).read().rstrip().rstrip("}")
     open(sp, "w").write(txt + ', "public_key_b64": "' + idt.public_key_b64 + '"}'); cases["sig-dup-key"] = (sdk, [], None)   # r8: the SAME value twice — a last-wins parser verifies and says PASS; strict = malformed
     def _store_with(name, edit):
@@ -118,7 +125,7 @@ def build_cases(d):
     P.add_pq_signature(hp, "ml-dsa-65", base64.b64encode(b"\x03" * 1952).decode(), base64.b64encode(b"\x04" * 3309).decode())
     cases["pq-required-host-side"] = (hp, ["--require-pq"], None)
     # honest scope variants and pack shapes — every one ANCHORED with the hash a lenient verifier would accept (review r2,
-    # Opus: a bare pack is FAIL whatever the verifier does with floats / duplicate keys / depth / scope, so the case could
+    # a bare pack is FAIL whatever the verifier does with floats / duplicate keys / depth / scope, so the case could
     # not fail); hashes computed with json.dumps directly where the toolkit itself refuses the content
     import hashlib as _hs
     def _lax_sha3(dd):
@@ -146,7 +153,7 @@ def build_cases(d):
     lone_p = cases["lone-surrogate"][0]; ld = json.load(open(lone_p)); ld["s"] = "\ud800"
     h = _hs.sha3_256(json.dumps({k: v for k, v in ld.items() if k != "pack_sha3"}, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
     ld["pack_sha3"] = h; open(lone_p, "w").write(json.dumps(ld)); open(lone_p[:-5] + ".ledger.jsonl", "w").close(); anchor_hash(lone_p, h)
-    # review r3 (Opus): a float LEXEME with an integer value — JSON.parse("1.0") is 1 and Node's canon() could not see it (PASS
+    # review r3: a float LEXEME with an integer value — JSON.parse("1.0") is 1 and Node's canon() could not see it (PASS
     # in Node alone, hashed as "n":1); the honest_scope regexes with Unicode \b / i≡ı folding in Python vs ASCII in the three
     # ("does NOTé" and "certıfied": FAIL in Python, PASS in the three); typed LTV material (an int was a Python traceback)
     def mk_text(name, dd, text):
@@ -161,7 +168,7 @@ def build_cases(d):
     for nm, vm in (("tsr-vm-crls-int", '{"available": true, "crls_b64": 1}'), ("tsr-vm-crls-list-of-int", '{"available": true, "crls_b64": [1]}')):
         tp = mk(nm); P.anchor_pack(tp, tp[:-5] + ".ledger.jsonl"); dg = _hs.sha256(open(tp, "rb").read()).hexdigest()
         open(tp[:-5] + ".tsr.json", "w").write('{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "validation_material": %s}' % (dg, vm)); cases[nm] = (tp, [], None)
-    # review r4 (Opus): the anchoring rule reads the ENTRY in the three and read `data` in Python (a top-level
+    # review r4: the anchoring rule reads the ENTRY in the three and read `data` in Python (a top-level
     # anchored_pack_sha3: PASS in the three, FAIL in Python; data.data.anchored_pack_sha3: the reverse); a trust-store entry
     # without "data" was skipped by Python and a broken store for the three; Node's `[^.]{0,40}` counted UTF-16 units
     from omega_evidence.ledger import GENESIS as _G, _hash_entry as _he4
@@ -176,7 +183,7 @@ def build_cases(d):
     cases["trust-entry-without-data"] = (tw, ["--trust-store", st_w], None)
     dd = {"kind": "d", "honest_scope": "guaranteed; does NOT " + "\U0001F600" * 21 + " guarantee x", "n": 1}
     cases["scope-astral-21-between-NOT-and-guarant"] = (mk_text("astral", dd, json.dumps(dict(dd, pack_sha3="%H"), ensure_ascii=False)), [], None)
-    # review r5 (Opus): the reserved type-tag key is a producer rule — Python's verifier refused it (pack-sha3 FAIL alone);
+    # review r5: the reserved type-tag key is a producer rule — Python's verifier refused it (pack-sha3 FAIL alone);
     # Node's trust state was a plain {} (a revoke of "__proto__" then a trust of "toString" read Object.prototype: FAIL alone)
     for nm, body in (("pack-reserved-tag-key-top-level", {"kind": "d", "honest_scope": "does NOT x", "__omega_reserved_type__": "Decimal", "value": "1"}),
                      ("pack-reserved-tag-key-nested", {"kind": "d", "honest_scope": "does NOT x", "x": {"__omega_reserved_type__": 1}})):
@@ -184,7 +191,7 @@ def build_cases(d):
     pid = signing.Identity("toString"); tsp = mk("proto-trust"); P.sign_pack(tsp, pid); st_p = os.path.join(d, "trust_proto.jsonl"); Lp_ = Ledger(st_p)
     Lp_.append({"action": "revoke", "signer_id": "__proto__", "reason": "x"}); Lp_.append({"action": "trust", "signer_id": "toString", "pubkey": pid.public_key_b64})
     cases["trust-revoke-proto-then-trust-toString"] = (tsp, ["--trust-store", st_p], None)
-    # r10 (Opus): a producer-made pack whose top-level key is "__proto__" (build_pack accepts it, hash correct): PASS in the four;
+    # r10: a producer-made pack whose top-level key is "__proto__" (build_pack accepts it, hash correct): PASS in the four;
     # 0.8.2 Node dropped the key while copying and said FAIL alone
     pph = os.path.join(d, "proto-hashed.json"); P.write_pack(pph, P.build_pack("demo", {"__proto__": {"x": 1}, "claim": "x"}, SCOPE)); P.anchor_pack(pph, pph[:-5] + ".ledger.jsonl")
     cases["pack-proto-key-hashed-by-producer"] = (pph, [], None)
@@ -199,7 +206,7 @@ def build_cases(d):
     # JS and Java said PASS), a raw byte in a key (Python raised UnicodeDecodeError instead of a verdict), a ledger line that is not
     # an object. Every one is FAIL in the four verifiers.
     from omega_evidence.ledger import _hash_entry as _he
-    pp = mk("proto-pack"); P.anchor_pack(pp, pp[:-5] + ".ledger.jsonl")   # anchored FIRST: a bare pack is FAIL whatever its hash (review r1, Opus)
+    pp = mk("proto-pack"); P.anchor_pack(pp, pp[:-5] + ".ledger.jsonl")   # anchored FIRST: a bare pack is FAIL whatever its hash (review r1)
     txt = open(pp).read(); open(pp, "w").write('{"__proto__": {"evil": 1}, ' + txt[1:]); cases["pack-proto-key-hash-untouched"] = (pp, [], None)
     pl = mk("proto-ledger"); P.anchor_pack(pl, pl[:-5] + ".ledger.jsonl"); lpp = pl[:-5] + ".ledger.jsonl"; txt = open(lpp).read()
     open(lpp, "w").write('{"__proto__": {"evil": 1}, ' + txt[1:]); cases["ledger-proto-key-hash-untouched"] = (pl, [], None)
@@ -217,7 +224,7 @@ def build_cases(d):
     rb = mk("raw-ledger"); P.anchor_pack(rb, rb[:-5] + ".ledger.jsonl"); lpr = rb[:-5] + ".ledger.jsonl"; bb = open(lpr, "rb").read()
     open(lpr, "wb").write(bb.replace(b'"ts"', b'"t\xffs"', 1)); cases["ledger-raw-byte-in-key"] = (rb, [], None)
     ll = mk("list-ledger"); P.anchor_pack(ll, ll[:-5] + ".ledger.jsonl"); open(ll[:-5] + ".ledger.jsonl", "a").write("[1]\n"); cases["ledger-line-not-object"] = (ll, [], None)   # r14: APPENDED — a verifier that skips the line says PASS
-    # review r1 (Opus, 21/09): a missing --ledger path was an uncaught ENOENT in Node; the .tsr.json sidecar was read with the
+    # review r1 (21/09): a missing --ledger path was an uncaught ENOENT in Node; the .tsr.json sidecar was read with the
     # LOOSE json.loads in Python (a float / duplicate key beside a matching digest: PASS in Python, FAIL in the other three;
     # 100000 "[" a RecursionError traceback); a trust-store line that is not an object raised AttributeError in Python
     import hashlib as _hl
@@ -267,6 +274,7 @@ def build_cases(d):
     else:
         print("  hybrid (ML-DSA-65) cases NOT measured: cryptography >= 48 absent")
     _nemesis_cases(d, cases, mk, idt, store)
+    _sigalg_cases(d, cases, mk, idt, store)
     # 25/09 (4-mind round 2, A1): small-order Ed25519 keys — with the identity key R=identity, S=0 verifies on every message under OpenSSL (with any small-order key a signature on any message can be built by choosing R, measured 26/09/2026);
     # every port must refuse them, with and without the key pinned in a trust store
     for nm, keyhex in (("weak-key-identity", "01" + "00" * 31), ("weak-key-order8", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
@@ -370,6 +378,55 @@ def _nemesis_cases(d, cases, mk, idt, store):
         CASE_ENV[nm] = {"OEVERIFY_INJECT_INTERNAL_ERROR": "1"}; EXPECT[nm] = want
 
 
+def _sigalg_cases(d, cases, mk, idt, store):
+    """29/09/2026 (0.10.0). Until 0.9.1 any string other than "ed25519" in `sig_alg` was an "unsupported algorithm" SKIP, so a
+    one-bit change of the field ("eD25519") on a pack that was signed AND anchored left it PASS with authenticated=false: a
+    silent downgrade of the tier (measured on 28/09/2026 by the fuzzer). Every case here has an EXPECTED verdict, and the
+    `sig-alg-` prefix makes main() compare the (status, detail) of the producer-signature and authenticity layers too."""
+    def anchored_signed(name, alg):
+        p = mk(name); P.anchor_pack(p, p[:-5] + ".ledger.jsonl"); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; sd = json.load(open(sp))
+        if alg is None:
+            sd.pop("sig_alg")
+        else:
+            sd["sig_alg"] = alg
+        json.dump(sd, open(sp, "w"), ensure_ascii=False); return p
+    # C1: a non-canonical spelling of a supported name — FAIL, with or without the requirement (anchored: a SKIP would read PASS)
+    variants = {"case": "eD25519", "upper": "ED25519", "space": "ed2 5519", "hyphen": "ed-25519", "underscore": "ed_25519",
+                "trailing-newline": "ed25519\n", "leading-space": " ed25519", "zero-width-space": "ed25519​"}
+    for nm, alg in variants.items():
+        p = anchored_signed(f"sigalg-variant-{nm}", alg)
+        cases[f"sig-alg-variant-{nm}"] = (p, [], None); EXPECT[f"sig-alg-variant-{nm}"] = "FAIL"
+        cases[f"sig-alg-variant-{nm}-required-signed"] = (p, ["--require-signed"], None); EXPECT[f"sig-alg-variant-{nm}-required-signed"] = "FAIL"
+    # C2: a genuinely unknown name — the tier the other layers earn (anchored: PASS, authenticated=false), the unverified
+    # signature named in two layers; C3: FAIL under --require-signed. A look-alike letter makes a name UNKNOWN (declared limit).
+    unknowns = {"rsa-pss": "rsa-pss", "pq-name": "ml-dsa-65", "cyrillic-e": "еd25519"}
+    for nm, alg in unknowns.items():
+        p = anchored_signed(f"sigalg-unknown-{nm}", alg)
+        cases[f"sig-alg-unknown-{nm}-anchored"] = (p, [], None); EXPECT[f"sig-alg-unknown-{nm}-anchored"] = "PASS"
+        cases[f"sig-alg-unknown-{nm}-required-signed"] = (p, ["--require-signed"], None); EXPECT[f"sig-alg-unknown-{nm}-required-signed"] = "FAIL"
+    EXPECT["sig-alg-unknown"] = "PASS"   # the 0.7.0 case (rsa-pss, anchored): the verdict is unchanged, the reason is now said
+    un = mk("sigalg-unknown-unanchored"); P.sign_pack(un, idt); sp = un[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["sig_alg"] = "rsa-pss"; json.dump(sd, open(sp, "w"))
+    cases["sig-alg-unknown-unanchored"] = (un, [], None); EXPECT["sig-alg-unknown-unanchored"] = "FAIL"
+    cases["sig-alg-unknown-unanchored-required-signed"] = (un, ["--require-signed"], None); EXPECT["sig-alg-unknown-unanchored-required-signed"] = "FAIL"
+    # positive controls of the flag: a verified signature (canonical name, or the legacy sidecar without the field) satisfies it
+    p = anchored_signed("sigalg-legacy-absent", None)
+    cases["sig-alg-legacy-absent"] = (p, [], None); EXPECT["sig-alg-legacy-absent"] = "PASS"
+    cases["sig-alg-legacy-absent-required-signed"] = (p, ["--require-signed"], None); EXPECT["sig-alg-legacy-absent-required-signed"] = "PASS"
+    p = anchored_signed("sigalg-canonical", "ed25519")
+    cases["sig-alg-canonical-required-signed"] = (p, ["--require-signed"], None); EXPECT["sig-alg-canonical-required-signed"] = "PASS"
+    cases["sig-alg-canonical-required-signed-one-dash"] = (p, ["-require-signed"], None); EXPECT["sig-alg-canonical-required-signed-one-dash"] = "PASS"
+    cases["sig-alg-signed-trusted-required-signed"] = (cases["signed"][0], ["--trust-store", store, "--require-signed"], None); EXPECT["sig-alg-signed-trusted-required-signed"] = "PASS"
+    # C3 on a pack that is not signed at all: anchored is PASS without the requirement and FAIL with it
+    cases["sig-alg-unsigned-anchored-required-signed"] = (cases["anchored"][0], ["--require-signed"], None); EXPECT["sig-alg-unsigned-anchored-required-signed"] = "FAIL"
+    # 29/09/2026 (code review, D3): a sig_alg of 70 000 bytes — the layer detail quotes it whole, so the receipt exceeds a pipe
+    # buffer (64 KiB); Node wrote 65 536 bytes and exited (unparsable receipt on a pipe, whole in a file) in 0.9.1 and before the
+    # fix. The oracle reads through a pipe, so this case is the regression test of the four writers; expected PASS (anchored,
+    # unknown name) with the two layers identical — the 70 KB detail included.
+    big = anchored_signed("sigalg-unknown-70kib", "rsa-pss-" + "x" * 70000)
+    cases["sig-alg-unknown-70kib-anchored"] = (big, [], None); EXPECT["sig-alg-unknown-70kib-anchored"] = "PASS"
+    cases["sig-alg-unknown-70kib-required-signed"] = (big, ["--require-signed"], None); EXPECT["sig-alg-unknown-70kib-required-signed"] = "FAIL"
+
+
 EXIT_OF = {"PASS": 0, "FAIL": 1, "NOT_ASSESSED": 77}
 MEM_WRAP = None   # memory-cap prefix for the HAZARD cases (a verifier that reads /dev/zero must not take the host down)
 
@@ -413,6 +470,7 @@ def run(cmd, path, flags, go_style, name=""):
     try:
         r = json.loads(out.stdout)
         v = (r["verdict"], r.get("pq_protected"), r.get("authenticated"))
+        DETAILS.setdefault(name, {})[tuple(cmd)] = {ly.get("layer"): (ly.get("status"), ly.get("detail")) for ly in r.get("layers", []) if ly.get("layer") in DETAIL_LAYERS}
     except Exception:  # noqa: BLE001
         return (f"NONJSON/CRASH(exit {out.returncode})", None, None)
     if EXIT_OF.get(v[0]) != out.returncode:   # 25/09/2026: the exit code is part of the verdict (Java printed FAIL on a fault)
@@ -438,7 +496,7 @@ def main():
         print("  go verifier NOT measured (no OEVERIFY_GO and no Go toolchain)")
     java = os.environ.get("OEVERIFY_JAVA")
     if not java:
-        for bdir in [os.path.join(os.environ.get("JAVA_HOME", ""), "bin")] + sorted(glob.glob(os.path.expanduser("~/.local/jdk/jdk-*/bin")), reverse=True) + [os.path.dirname(shutil.which("javac") or "/x/javac")]:
+        for bdir in [os.path.join(os.environ.get("JAVA_HOME", ""), "bin"), os.path.dirname(shutil.which("javac") or "/x/javac")]:
             javac = os.path.join(bdir, "javac")
             if os.path.exists(javac):
                 ver = subprocess.run([os.path.join(bdir, "java"), "-version"], capture_output=True, text=True).stderr
@@ -480,14 +538,22 @@ def main():
         cases = {n: c for n, c in cases.items() if any(n.startswith(o) for o in only.split(","))}
     for name, (path, flags, decl) in cases.items():
         res = {k: run(cmd, path, flags, k in ("go", "java"), name) for k, cmd in avail.items()}
+        # 29/09/2026: on the sig_alg cases the REASON must be one reason in the four — the (status, detail) of the
+        # producer-signature and authenticity layers are compared too, not only the verdict tuple
+        layer_bad = {}
+        if name.startswith("sig-alg-"):
+            det = {k: DETAILS.get(name, {}).get(tuple(cmd)) for k, cmd in avail.items()}
+            layer_bad = {k: v for k, v in det.items() if v != det.get("python")}
+            if layer_bad:
+                print(f"  [DIFF] {name:34} producer-signature / authenticity layers differ from python's {det.get('python')}: {layer_bad}")
         if name in EXPECT:
             # a case with an expected verdict: every verifier must give it (so a wrong outcome shared by all is visible),
             # and the tuples must agree; NOT_ASSESSED is judged like any verdict here (the injected fault expects it)
             ref = res.get("python")
             bad = {k: v for k, v in res.items() if v[0] != EXPECT[name] or v != ref}
-            if bad:
+            if bad or layer_bad:
                 diffs += 1
-            print(f"  [{'OK ' if not bad else 'DIFF'}] {name:34} {res}  <- expected {EXPECT[name]} from each")
+            print(f"  [{'OK ' if not (bad or layer_bad) else 'DIFF'}] {name:34} {res}  <- expected {EXPECT[name]} from each")
             continue
         # 25/09/2026: an outcome that is not a verdict (crash, timeout, no JSON, exit code not the verdict's) is never agreement
         if any(v[0] not in EXIT_OF for v in res.values()):
@@ -512,6 +578,7 @@ def main():
             declared += 1
             print(f"  [DECL] {name:34} {res}  <- declared: this Node has no ML-DSA (OpenSSL < 3.5)")
             continue
+        bad.update(layer_bad)
         if bad:
             diffs += 1
         tag = "OK " if not bad else "DIFF"
@@ -524,23 +591,24 @@ def main():
     valid = all_cases["bare"][0]
     cli = {"cli-unknown-flag": ["--no-such-flag"], "cli-ledger-empty": ["--ledger", ""], "cli-ledger-missing-value": ["--ledger"],
            "cli-ledger-flag-as-value": ["--ledger", "--require-pq"], "cli-abbreviation": ["--ledg", valid], "cli-two-positionals": [valid],
-           # review r1 (Opus): the pack path itself "" or "-" (an unset $PACK), the "--" terminator, a value on the boolean flag
+           # review r1: the pack path itself "" or "-" (an unset $PACK), the "--" terminator, a value on the boolean flag
            "cli-empty-pack": ["--pack", ""], "cli-dash-pack": ["--pack", "-"], "cli-double-dash": ["--"], "cli-bool-eq-false": ["--require-pq=false"],
+           "cli-bool-signed-eq-false": ["--require-signed=false"],   # 29/09/2026: the second boolean flag, the same grammar
            "cli-help": ["--help"], "cli-h": ["-h"],
            "cli-one-dash-abbreviation": ["-ledg", valid], "cli-one-dash-short": ["-l", valid],
-           # r13 (Opus): a REPEATED value flag — Go's flag.Visit and argparse saw the final value only (Go even ate -require-pq as a value)
-           "cli-repeated-flag-empty-first": ["--ledger", "", "--ledger", valid], "cli-repeated-flag-as-value-first": ["--ledger", "--require-pq", "--ledger", valid]}   # r5: argparse resolved -l / -ledg by prefix (a verdict in Python alone)   # r3 (Sonnet): argparse answered --help with exit 0 while the three said usage
-    cli["cli-other-dash-spelling-verdict"] = ["--other-dash"]   # r4 (Sonnet): -ledger in Python/Node, --ledger in Go/Java → a verdict, the same flag
+           # r13: a REPEATED value flag — Go's flag.Visit and argparse saw the final value only (Go even ate -require-pq as a value)
+           "cli-repeated-flag-empty-first": ["--ledger", "", "--ledger", valid], "cli-repeated-flag-as-value-first": ["--ledger", "--require-pq", "--ledger", valid]}   # r5: argparse resolved -l / -ledg by prefix (a verdict in Python alone)   # r3: argparse answered --help with exit 0 while the three said usage
+    cli["cli-other-dash-spelling-verdict"] = ["--other-dash"]   # r4: -ledger in Python/Node, --ledger in Go/Java → a verdict, the same flag
     if only:
         cli = {}
     for name, extra in cli.items():
         row = {}
         for k, cmd in avail.items():
             gs = k in ("go", "java")
-            ex = [(a.replace("--", "-", 1) if gs and a.startswith("--") and a != "--" else a) for a in extra]   # the exact "--" is sent as is (r2: Sonnet/Opus)
+            ex = [(a.replace("--", "-", 1) if gs and a.startswith("--") and a != "--" else a) for a in extra]   # the exact "--" is sent as is (r2)
             # Go/Java take flags before the positional: a bare value flag is run LAST with nothing after it (otherwise the
             # pack path would be eaten as its value and the usage error would come from the missing positional — review
-            # 21/09, Sonnet); there the missing-value path is the flag library's own ("flag needs an argument") and Java's
+            # 21/09); there the missing-value path is the flag library's own ("flag needs an argument") and Java's
             # bounds guard, while the "" and flag-as-value cases are the ones that exercise flag.Visit / val()
             if gs and name == "cli-ledger-missing-value":
                 args = list(cmd) + ex

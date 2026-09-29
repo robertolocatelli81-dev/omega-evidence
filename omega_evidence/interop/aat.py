@@ -52,7 +52,9 @@ Declared choices where the draft is silent or ambiguous (each is also reported t
   * Records of -00 (no `record_phase`) are refused with an explicit reason: re-export them.
 
 Honest scope: JCS (RFC 8785) is implemented for objects, arrays, strings, booleans, null and NUMBERS serialised
-the ES6 way; integers beyond 2^53 are refused on EXPORT and serialised as doubles on VERIFY, as ES6 does. The
+the ES6 way; integers outside ±(2^53-1) (RFC 7493 §2.2, RFC 8785 Appendix B note 1 — the same bound as the rest of
+the package, `canonical._SAFE_INT`) are refused on EXPORT and serialised as doubles on VERIFY, as ES6 does. Until
+0.9.1 the export accepted exactly ±2^53 (the check was `> 2^53`, not `> 2^53-1`); corrected in 0.10.0. The
 mapping from omega records is lossy by design but never FABRICATES: an unknown omega action/outcome, a missing
 agent id, an unparsable timestamp, or an omega action whose §7 REQUIRED detail fields cannot be derived raise
 instead of being guessed. Identifiers are UUID v4-FORMAT values derived deterministically from the omega
@@ -71,6 +73,8 @@ import csv
 import io
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from ..canonical import _SAFE_INT          # ±(2^53-1): ONE integer bound for the whole package (0.10.0, PREREG 2)
 
 
 AAT_DRAFT = "draft-sharif-agent-audit-trail-04 (2026-09-15, expires 2027-03-19; individual Internet-Draft)"
@@ -160,9 +164,12 @@ JCS_MAX_DEPTH = 512
 
 def jcs(obj: Any, strict: bool = True) -> bytes:
     """JSON Canonicalization Scheme (RFC 8785): keys sorted by UTF-16 code units, no whitespace, JSON.stringify
-    string escapes, ES6 number serialisation. `strict=True` (export) refuses integers beyond 2^53; verification
-    uses strict=False and serialises them as doubles, as ES6 would. Nesting deeper than JCS_MAX_DEPTH (512, the
-    acceptance profile shared with the pack verifiers) is refused with ValueError, never a RecursionError."""
+    string escapes, ES6 number serialisation. `strict=True` (export) refuses integers outside ±(2^53-1)
+    (`canonical._SAFE_INT`, the bound of canonical.py, ledger.py and the Go/JS/Java verifiers; 2^53-1 is the last
+    integer every IEEE-754 double represents exactly, RFC 7493 §2.2); verification uses strict=False and serialises
+    them as doubles, as ES6 would (±2^53 is exact as a double, so its text is the same either way). Nesting deeper
+    than JCS_MAX_DEPTH (512, the acceptance profile shared with the pack verifiers) is refused with ValueError,
+    never a RecursionError."""
     def enc(x: Any, depth: int = 0) -> str:
         if depth > JCS_MAX_DEPTH:
             raise ValueError("JCS: nesting deeper than 512 refused")
@@ -173,9 +180,9 @@ def jcs(obj: Any, strict: bool = True) -> bytes:
         if x is False:
             return "false"
         if isinstance(x, int):
-            if abs(x) > 2 ** 53:
+            if abs(x) > _SAFE_INT:                        # > 2^53-1, i.e. |x| >= 2^53 — the package bound, not a local one
                 if strict:
-                    raise ValueError("JCS: integers beyond 2^53 lose precision in ES6 — refused on export")
+                    raise ValueError("JCS: integer outside the portable range +/-(2^53-1) — refused on export")
                 try:
                     return _es6_number(float(x))
                 except OverflowError:
@@ -650,7 +657,7 @@ def anchor_epoch(records: List[Dict[str, Any]], epoch_id: Optional[str] = None,
         raise ValueError("epoch_id must be a canonical UUID v4") from None
     for r in records:
         r.pop("batch", None)
-    leaves = [leaf_hash(r, strict=True) for r in records]      # export: integers beyond 2^53 refused, as for prev_hash
+    leaves = [leaf_hash(r, strict=True) for r in records]      # export: integers outside ±(2^53-1) refused, as for prev_hash
     root = merkle_root(leaves)
     paths = audit_paths(leaves)
     for i, r in enumerate(records):

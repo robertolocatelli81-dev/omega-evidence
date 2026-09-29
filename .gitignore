@@ -3,3 +3,10 @@ omega_evidence.egg-info/
 __pycache__/
 build/
 *.egg-info/
+# local work folders (measurement logs, scratch builds) and virtual environments: never part of a release
+# (29/09/2026 code review, D2: an untracked, un-ignored work folder is one `git add -A` away from the public tag)
+_maturity_work/
+_*_work/
+*_work/
+venv*/
+.venv/

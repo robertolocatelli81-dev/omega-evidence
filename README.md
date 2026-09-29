@@ -53,7 +53,11 @@ anchored        valid ledger chain (integrity/time) — an RFC 3161 token is rec
 none            internal consistency only  →  rejected, cannot authenticate
 ```
 
-A bare fabricated pack (no ledger, no signature) **cannot pass**.
+A bare fabricated pack (no ledger, no signature) **cannot pass**. A signed pack whose signature this verifier cannot check
+does not fall silently to `anchored`: a `sig_alg` that is a non-canonical spelling of a supported name (`"eD25519"`,
+`"ed2 5519"`) is a **FAIL**; a genuinely unknown algorithm is a SKIP that says "signature present, algorithm unsupported,
+not verified", in the signature layer and in the authenticity layer, and `--require-signed` (`require_signed=True`)
+turns it, and a missing signature, into a FAIL (0.10.0, below).
 
 ## Quick start
 
@@ -108,7 +112,7 @@ audit paths (roots and paths identical to cryptovalid's implementation for 1…2
 RFC 3161 token (verified only against a trust anchor, never green without one). Exports: JSONL (§10.1, the JCS form, so
 the file re-reads to the same hashes) and CSV (§10.3, lossy, declared).
 
-Six review rounds (Gemini 3.1 Pro, Claude Opus 5, Sonnet 5, Haiku 4.5, 19 September 2026; the dossier lists every finding;
+Six independent review rounds (19 September 2026; the dossier lists every finding;
 every guard is asserted by its own message in the tests and ablated) found and we fixed, each re-measured — round 1: a **forged tombstone** (`tombstone_hash` := the next record's public `prev_hash`, stale signature kept)
 made any signed record disappear with `ok: true` — the draft's §9.3 "retains the signature field" is exactly that hole,
 so this module DEVIATES: a tombstone is signed anew by the deleting authority (`tombstone(..., key=)`) and verified like
@@ -141,7 +145,8 @@ recorder per session; a whole epoch missing from the chain is a problem under `r
 an epoch boundary); a record's `external_timestamp` is verified over the record's own digest only — a token over some
 Merkle root never counts for a record (adding the token changes the record's leaf hash, so no inclusion proof can bind
 the two: epoch-root tokens live in the epoch anchor); audit paths are built bottom-up (O(n log n), 4 000 records in
-well under a second instead of quadratic); `anchor_epoch` refuses integers beyond 2^53 like every export; uppercase or
+well under a second instead of quadratic); `anchor_epoch` refuses integers outside ±(2^53−1) like every export (until
+0.9.1 the AAT export alone let exactly ±2^53 through: see the 0.10.0 notes); uppercase or
 braced session ids are the same session; `keys={}` still means every record must be signed; a tombstone's `deleted_at`
 before the record's own timestamp is a problem. Not checked and stated: §4.3 (a pre-execution record before every
 state-changing action of a high-risk system) — which actions change state is not in the record; `time_verified` in
@@ -279,7 +284,7 @@ a raw byte in a ledger key, a ledger line that is not an object): 0 disagreement
 with 4 verifiers (21 September 2026); the hostile pack cases are anchored with the hash a lenient verifier would accept,
 so the named layer decides (except `non-utf8` and `ledger-raw-byte-in-key`, which only detect a crash — a lossy decoder fails them on the hash anyway; the lossy-decoder cases are the two `…-hashed-as-fffd`); the signed-sidecar shape cases are anchored too, so a layer SKIP and a layer FAIL give different verdicts; on a Node without ML-DSA the two Node divergences are declared, not hidden. None of the four verifies the RFC 3161 token inside the
 pack verdict: `verify_pack` checks the sidecar's shape and its digest→pack binding and reports the layer as SKIP with the
-reason (round 6, Opus: the earlier sentence "verified by the Python reference only" was not true of the code — no trust
+reason (round 6: the earlier sentence "verified by the Python reference only" was not true of the code — no trust
 anchor reaches `verify_pack`); the cryptographic check exists as `timestamp.verify(tsr_b64, digest, ca_file=<TSA roots>)`
 for the operator. The ledger profile is the cryptovalid one, so cryptovalid's five verifiers also
 accept omega-evidence ledgers unchanged (measured 16/09/2026).
@@ -289,6 +294,7 @@ go run ./verifiers/go/cmd/oeverify -trust-store trust.jsonl -require-pq pack.jso
 java verifiers/java/OeVerify.java pack.json -expect-pq-key <b64>
 node verifiers/js/oeverify.mjs pack.json --ledger pack.ledger.jsonl
 python -m omega_evidence pack.json --trust-store trust.jsonl --require-pq
+python -m omega_evidence pack.json --require-signed     # 0.10.0: a missing or unverifiable producer signature is FAIL (the four CLIs)
 ```
 
 ## Standards
@@ -338,6 +344,94 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 `drop_pq=True`. Without `cryptography` ≥ 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0; the backend is
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
+
+### 0.10.0 — two limits that were not declared, and a silent downgrade (28–29 September 2026)
+
+(a) and (b) were found on 28/09/2026 by an independent review of 0.9.1 and confirmed by measurement before any code was
+written; neither was stated anywhere in the 0.9.1 documentation. (c) was found the same day by the fuzzer added in this
+release. The fixes are in this release; the description of what was wrong is this entry. **What changes for a user of
+0.9.1** is listed at the end of the entry.
+
+- **(a) Several processes appending to the same ledger corrupted it.** Up to 0.9.1 `Ledger.append` was guarded by a
+  `threading.Lock` only, so two *processes* (not threads) writing the same file interleaved their lines: measured on
+  commit `6728ced`, 4 processes × 200 appends left 601 lines of 801, `verify()` FAIL, 399 duplicate `idx`; another run
+  gave 401 lines and 200 duplicates. 0.10.0 holds an exclusive advisory `fcntl.flock` on the open ledger file for each
+  append (shared for a load); under it the instance first replays what other writers appended since its last write, so
+  every entry links to the last hash on disk and carries the next `idx`. POSIX only: on Windows there is no `fcntl` and
+  the ledger has one writer process, advisory only, not reliable on NFS — all stated in `ledger.py` and below. The test
+  suite now has N threads and N processes appending to one ledger, plus a positive control that disables the lock and
+  must break the chain. Cost and the full measurement: "Performance and robustness" below.
+- **(b) The AAT export (`aat.jcs`, strict mode) accepted exactly ±2^53.** `omega_evidence/interop/aat.py` refused
+  `abs(x) > 2**53`, so 9007199254740992 and −9007199254740992 went through the export while `canonical.py`, `ledger.py`
+  and the Go, Java and Node verifiers refuse anything outside ±(2^53−1) — the I-JSON bound (RFC 7493 §2.2; RFC 8785
+  Appendix B note 1). The exported text was still correct (2^53 is exact as a double, ES6 prints it as
+  `9007199254740992`), so no hash changed; what was wrong is that one bound in the package was one integer wider than the
+  other, and the docstrings said "beyond 2^53" where the rest says "outside ±(2^53−1)". 0.10.0 imports the package
+  constant (`canonical._SAFE_INT`) into `aat.py` instead of a second hand-written number; strict export now refuses
+  ±2^53, accepts ±(2^53−1); the verify path (`strict=False`) is unchanged (an out-of-range integer is serialised as ES6
+  would serialise the double). Test `test_jcs_strict_integer_bound_20260928` covers 2^53−1 / 2^53 / −2^53 / 2^53+1 and
+  contains its own positive control (with the 0.9.1 bound put back, the test sees 2^53 accepted). The text of the AAT
+  Internet-Draft -04 (IETF archive, 115 736 bytes, SHA-256 `c75a8fdf…`, read on 28/09/2026) contains no integer of 16
+  digits or more and no test vector, so no published AAT vector sits on this boundary; no fixture in this repository
+  uses 2^53 exactly. Nothing that verified before verifies differently now: only an export of a record carrying exactly
+  ±2^53 changes, from accepted to refused. `ledger.py` had its own copy of the same number; it now imports the one
+  constant too (no behaviour changes; the test asserts the three names are one object).
+- **(c) A one-bit change of `sig_alg` downgraded a signed pack silently.** Since 0.7.0 the producer-signature layer
+  accepted `sig_alg: "ed25519"` only and reported any other string as an "unsupported algorithm" SKIP — in the four
+  verifiers alike. Measured on 28/09/2026 by the seeded fuzzer (seeds 1 and 2: `"eD25519"`, `"ed2 5519"`): on a pack that
+  was signed AND anchored, that SKIP left the verdict `PASS` / exit 0, with `authenticated: false` — the pack fell from
+  `signed` to `anchored` and nothing but the `authenticated` field said so. No forgery, but a silent downgrade of the
+  tier that a relying party reading the exit code would not see. 0.10.0, the same in Python, Go, Java and Node:
+  - a `sig_alg` that is a **non-canonical spelling of a supported name** — the name folded to ASCII lowercase letters and
+    digits, everything else dropped, equals `ed25519`: `"eD25519"`, `"ED25519"`, `"ed2 5519"`, `"ed-25519"`,
+    `"ed25519\n"`, `" ed25519"`, a zero-width space appended — is a **FAIL** of the producer-signature layer ("sig_alg is
+    not the canonical name of a supported algorithm"): no producer writes such a name, so it is a judgment about the
+    sidecar, not an absence;
+  - a **genuinely unknown** name (`"rsa-pss"`, a post-quantum name in the classical field, a name with a non-ASCII
+    look-alike letter — declared limit: such a letter makes the name unknown, not a variant) stays a SKIP, the pack
+    earns the tier its other layers give it, and the SKIP is never silent: the layer reads "signature present, algorithm
+    unsupported, not verified: <name>" and the authenticity layer carries "— a signature is present but its algorithm is
+    unsupported and was not verified" (also when the pack then fails for want of an anchor);
+  - **`--require-signed`** in the four CLIs (`verify_pack(..., require_signed=True)` in the library; one dash or two, no
+    value on the flag, as the other boolean) is fail-closed on the classical layer: a pack with no signature sidecar
+    ("signature required but the pack is not signed") or with a signature that could not be verified is `FAIL`, never
+    `anchored`; a verified signature (canonical name, or the legacy sidecar without `sig_alg`) satisfies it.
+
+  Measured on 29/09/2026 on this tree, the four verifiers on 32 sidecar / flag shapes: the same verdict, exit code,
+  `authenticated` and the same two layer texts in all four. The differential oracle gained 32 `sig_alg` cases with an
+  expected verdict each — for every `sig-alg-` case the oracle also compares the (status, detail) of the producer-signature
+  and authenticity layers, so the reason is one reason in the four — and one CLI-grammar case: 0 disagreements over 193
+  cases with the four verifiers on 29/09/2026; 37 of the `sig-alg-` cases run against the four 0.9.1 verifiers
+  (Python, Go, Java and Node built from commit `6728ced`) are red on 32 of them and green only on the 5 whose behaviour
+  did not change (positive control). The fuzzer gained the property "no silent downgrade" (a mutator that produces
+  spellings and unknown names, and a second `require_signed` call on every mutant) and two positive controls that
+  disable the canonical-name rule and the requirement (26 and 160 violations seen on the smoke seed); the unit tests a
+  class that is red on 0.9.1 (11 spellings verify `valid` there) and carries its own positive control.
+
+  **What changes for a user of 0.9.1.** (1) Any sidecar whose `sig_alg` folds to `ed25519` without being exactly
+  `ed25519` now verifies `FAIL` where it verified SKIP + the tier of its other layers. The producer of this toolkit has
+  only ever written `"ed25519"`; only hand-written or altered sidecars are affected. (2) The text of the SKIP for an
+  unknown algorithm changed from "unsupported sig_alg: X" to "signature present, algorithm unsupported, not verified: X",
+  the authenticity texts changed as described above, and Python's "anchored … — ledger" is now the wording of the other
+  three (layer `detail` strings are declared non-normative; the verdict tuple is unchanged for these). (3) A new flag
+  and a new keyword argument, both opt-in; nothing changes for a caller who does not pass them. (4) `verify_pack`'s
+  `authenticated` is computed from the same three booleans as in Go, Java and Node (signature PASS, registry not
+  refusing, integrity PASS) instead of being read off the wording of the authenticity layer — the same value in every
+  case the oracle and the tests exercise. (5) **A ledger truncated or replaced under an open `Ledger` instance is refused**:
+  the next `append()` raises `RuntimeError("ledger truncated by another writer …")`, and so does every later one from that
+  instance — recreate the `Ledger` after a log rotation (`os.rename` + a new file) or any external truncation. 0.9.1 went
+  on writing a fresh file starting at the next `idx` with a broken chain, silently (measured on `6728ced` by the 29/09
+  review). In batch mode both versions keep writing to the old inode through their open handle. A filesystem that
+  refuses `flock` makes `append()` raise `OSError` (not wrapped). (6) Go: the exported `VerifyPack` keeps its 0.7.0
+  signature; the requirement is `VerifyPackRequireSigned(…, requirePQ, requireSigned)`. Java keeps the 5-argument
+  `verifyPack` and adds a 6-argument one; Node takes `requireSigned` in its options object. (7) The private Python helper
+  `verifier._check_signature_and_trust` returns a 4-tuple (a fourth element saying why the layer is not PASS) instead of
+  a 3-tuple. (8) `Ledger.entries()` and `raw_entries()` read the file as one snapshot under the shared file lock, like
+  `verify()` (0.9.1 read line by line with no lock, so a concurrent writer's half-written line could in principle be
+  seen); the lock is released before the first entry is yielded, so appending while iterating cannot deadlock, and the
+  text is held in memory while iterating. (9) The Node verifier writes its receipt and exits only once the write is
+  drained: with a receipt longer than a pipe buffer (64 KiB, e.g. a layer detail quoting a 70 000-byte `sig_alg`) a piped
+  reader got 65 536 bytes of unparsable JSON in 0.9.1; the oracle now carries that case (the four write it whole).
 
 ### Corrections (2026-09-26)
 
@@ -440,7 +534,7 @@ added after the 152 above), 124 tests (1 skipped).
 ### 0.8.3 — verifier hygiene from the cra-evidence review (21 September 2026)
 
 Twelve review rounds on cra-evidence 0.3.0, whose verifiers are re-implementations of these, found defect classes in
-shared code; a review round on this release (Opus, Sonnet, Haiku — Gemini Pro out of credits) found more of the same
+shared code; a review round on this release (three independent reviewers; a fourth was unavailable) found more of the same
 class here. Measured on 21/09/2026 with a four-verifier probe before each fix and with the differential oracle after
 (103 cases, 0 disagreements); the same oracle run against the four 0.8.2 verifiers (Python, Go, Java, Node from tag
 v0.8.2) is red on 46 cases, and against a deliberately lenient Python (loose parser, no scope check, no reserved-tag /
@@ -455,10 +549,10 @@ surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21
   the ledger, `AttributeError` on a ledger or trust-store line that is not an object, `JSONDecodeError` on a ledger
   that is not JSON, `RecursionError` on a 100000-deep `.tsr.json`. `Ledger` now loads with the strict parser and
   raises one `RuntimeError`; the verifier reports the layer as `FAIL`.
-- **The Python reference had no lone-surrogate rule** (round 2, Opus): an anchored pack holding `"\ud800"` with a correct
+- **The Python reference had no lone-surrogate rule** (round 2): an anchored pack holding `"\ud800"` with a correct
   hash — and a ledger entry the 0.8.2 producer itself wrote — verified PASS in Python and FAIL in Go, Java and Node. The
   linear pre-scan of the three (`HasLoneSurrogate`) is now in `loads_strict`, and the producer refuses such strings.
-- **Node accepted a float lexeme with an integer value** (round 3, Opus): `JSON.parse("1.0")` is the integer 1 and the
+- **Node accepted a float lexeme with an integer value** (round 3): `JSON.parse("1.0")` is the integer 1 and the
   canonical form could not see the lexeme, so a pack with `"n":1.0` hashed as `"n":1` verified PASS in Node alone
   (Python's `parse_float`, Go and Java refuse it on the text). A linear scan of the raw text now refuses `.`/`e`/`E` in
   a number outside a string.
@@ -467,7 +561,7 @@ surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21
   flag) and Java (no `UNICODE_CASE`). Python now uses `re.ASCII`, the semantics of the three.
 - **The Python reference crashed on typed-wrong LTV material**: `validation_material.crls_b64` as an int or a list of
   ints beside a correct digest was a `TypeError` traceback while the three gave a verdict. Typed now.
-- **The anchoring rule was read at two levels** (round 4, Opus): Go, Java and Node look for `anchored_pack_sha3` in the
+- **The anchoring rule was read at two levels** (round 4): Go, Java and Node look for `anchored_pack_sha3` in the
   ledger ENTRY (top-level or under `data`); the Python reference looked inside `data` (so `data.anchored_pack_sha3` or
   `data.data.anchored_pack_sha3`). A chain-valid entry with a top-level anchor was PASS in the three and FAIL in Python;
   one under `data.data` the reverse. Python now reads the entry. A trust-store entry without `data` was skipped by
@@ -475,7 +569,7 @@ surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21
 - **Node's `[^.]{0,40}` counted UTF-16 code units** (no `u` flag): 21 astral characters between `NOT` and `guarant`
   were 42 units in Node and 21 code points elsewhere, so the negation was seen by three verifiers and not by Node.
   Astral characters are folded to one placeholder unit before the three scope tests.
-- **The reserved type-tag key was a verifier rule in Python only** (round 5, Opus): a pack carrying
+- **The reserved type-tag key was a verifier rule in Python only** (round 5): a pack carrying
   `__omega_reserved_type__` (top-level or nested) was `pack-sha3 FAIL` in Python and PASS in the three, which hash the
   text as it is. The key is a producer rule (an object must not forge the tag the encoder emits for `Decimal`); the
   verifier now hashes what it read (`sha3(obj, from_text=True)`), the producer still refuses it.
@@ -494,7 +588,7 @@ surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21
   repeated with a bad value first (round 13: Go's `flag.Visit` and argparse checked the final value only — `-ledger
   -require-pq -ledger L` ran in Go with the post-quantum requirement silently eaten as a value). `--flag=value` is accepted by all four (argparse and Go's `flag` did
   natively; Java and Node now do), and so is one dash or two (`-ledger` / `--ledger`: Go's `flag` took both, Java one,
-  Python and Node two — round 4, Sonnet). Before: `python -m omega_evidence anchored.json --ledger ""` was **PASS** with the
+  Python and Node two — round 4). Before: `python -m omega_evidence anchored.json --ledger ""` was **PASS** with the
   operator's ledger silently replaced by the sidecar (measured on v0.8.2), Node gave a verdict on an unknown flag,
   Go and Java took `""` as "not given" and a flag as a path, Python accepted `--ledg` and crashed on it.
 
@@ -543,9 +637,11 @@ Two Go files carried an `AGPL-3.0-or-later` SPDX header in this Apache-2.0 repos
   sidecars and trust stores with **floats**, duplicate keys, integers beyond ±(2^53−1), nesting deeper than 512,
   NaN/Infinity, CR line endings or non-sequential `idx` are refused. A 0.6.x ledger or pack holding a float
   (e.g. `{"amount": 10.5}`) no longer verifies: store such values as strings (`"10.5"`) or `Decimal`.
-- The producer-signature layer accepts **`sig_alg: "ed25519"` only** (missing = ed25519); any other string is an
-  honest SKIP, a non-string is a malformed sidecar (since the *Unreleased* change below the empty string is a malformed
-  sidecar too, no longer a SKIP). A post-quantum backend is never a classical producer signature.
+- The producer-signature layer accepts **`sig_alg: "ed25519"` only** (missing = ed25519); a non-string is a malformed
+  sidecar (since 0.9.1 the empty string is a malformed sidecar too, no longer a SKIP). Any other string was an
+  "unsupported algorithm" SKIP up to 0.9.1; since 0.10.0 a non-canonical spelling of `ed25519` is a FAIL and a genuinely
+  unknown name is a SKIP that names the unverified signature (see the 0.10.0 notes). A post-quantum backend is never a
+  classical producer signature.
 - A trust store that fails the strict chain verification raises `ValueError` on load and is a `trusted-signer`
   FAIL in the verifier (it used to crash, or trust the last of two duplicated keys).
 - `TrustRegistry.rotate()` keeps the pinned post-quantum key unless `drop_pq=True` (it used to drop it silently).
@@ -554,10 +650,80 @@ The normative output of every verifier is the tuple `(verdict, pq_protected, aut
 status; layer `detail` strings are human-readable and non-normative (their wording and the order in which two
 malformations are reported may differ between implementations).
 
+## Performance and robustness (measured)
+
+Every number below was produced on **28 September 2026** by the command next to it, on one host: **Intel Core i3-N305, 8
+CPU, 6 471 MiB RAM, Linux 6.6 x86_64, CPython 3.11.2, `cryptography` 50.0.1 as the Ed25519 backend**, ext4 on flash.
+They describe that host and nothing else; a shared CI runner gives other numbers, which is why the CI bench job has no
+threshold. Reproduce: `python3 tests/bench_toolkit.py --json bench.json` (about 3 minutes; the JSON carries the host,
+the parameters and every figure, including the ones not shown here).
+
+| Operation | Throughput | Latency p50 / p95 / p99 |
+|---|---|---|
+| canonical SHA3-256 of a small object | 86 096 ops/s | — |
+| `Ledger.append`, sync (fsync per entry) | 487 ops/s | 1 994 / 2 581 / 3 587 µs (n = 1 000) |
+| `Ledger.append`, batch (fsync every 256) | 30 542 ops/s | 24 / 33 / 55 µs (n = 20 000) |
+| `verify_text` of a 20 100-entry ledger (read + verify) | 34 040 entries/s | 591 / 598 / 598 ms per run (n = 5); peak Python allocations 8.4 MiB |
+| `Ledger(path)` open, strict replay of 20 100 entries | 34 215 entries/s | 586 / 599 / 599 ms per run (n = 5) |
+| Ed25519 sign | 14 541 ops/s | 67 / 75 / 85 µs (n = 20 000) |
+| Ed25519 verify | 9 299 ops/s | 105 / 116 / 136 µs (n = 20 000) |
+| `verify_pack` end to end (pack + ledger + signature + trust store, files re-read each call) | 2 106 ops/s | 467 / 518 / 591 µs (n = 250) |
+
+The tail percentiles (p95 / p99) are from ONE run. Measured on 28/09/2026 on this host with a second, independent full run of
+the same bench 36 minutes later (71 numeric figures compared): throughput, totals, medians and memory agreed within 8 %;
+of the 14 p95 / p99 figures, 8 differed by more than 10 % and 5 by more than 20 %, the largest by 34 % (`verify_pack`
+p95: 518 → 694 µs); the per-run maxima by up to 71 %. Read the p95 / p99 column as an order of magnitude, not a bound.
+
+- **Scale, batch mode, 1 000 000 entries** (`{"e": i, "p": "payload-i"}`, file 230 MiB): append 35.6 s (28 127
+  entries/s), open with strict replay 31.8 s, `verify()` 32.4 s (30 869 entries/s), chain OK; peak Python allocations of
+  `verify_text` (read + verify) 461 MiB, process `ru_maxrss` 812 MiB after the run (55 MiB before). The library's
+  `Ledger.verify()` has no size bound: the 64 MiB bound belongs to the verifiers, which refuse such a file.
+- **Tamper detection at scale**: one byte changed in the middle entry of the 20 100-entry ledger is reported as a broken
+  chain (1 bad line) in 585 ms.
+- **Concurrent appends (`tests/test_toolkit.py`, `TestConcurrentAppend20260928`)**: 4 threads sharing one instance, 4
+  threads with an instance each, and 4 processes with an instance each, in sync and in batch mode, all appending to one
+  ledger: at the end `verify()` is OK, the count is the sum of the appends, every `idx` present exactly once. Before the
+  file lock of 28/09/2026 (commit `6728ced`, `threading.Lock` only), 4 processes × 200 appends left 601 lines of 801,
+  `verify()` FAIL, 399 duplicate `idx`, and one process refused to open the file mid-write ("catena rotta"); another run
+  of the same probe gave 401 lines and 200 duplicates (the outcome depends on the interleaving). The positive control in the
+  test suite disables the lock in every worker and must be able to break the ledger: measured on the final code, 4 × 60
+  appends, lock disabled, sync and batch, every worker exited on a broken chain and the file held 5 and 16 lines of 241.
+  The lock costs a band of 12–28 % of batch-mode throughput on this host (median 17 %: 6 alternated pairs of 20 000
+  appends, HEAD ledger against this one, each run in its own process; two further 3-pair runs gave 13 % and 20 %, a
+  re-run of the 6-pair script 15.6–20.8 %, median 17.3 %) — a band because run-to-run noise on this host is of the same
+  order as the effect; the sync mode is bound by fsync and unaffected within noise.
+- **Fuzz (`tests/fuzz_toolkit.py`, stdlib, seeded)**: byte, JSON-structure, ledger-line and `sig_alg` mutations of four
+  valid cases (anchored, signed, full, stamped) against `verify_pack` (plain and with `require_signed=True`) and the
+  library API. Measured on 29/09/2026 (the figures of 28/09 changed with the `sig_alg` mutator: the mutation sequence of a
+  seed is a function of the mutator list). Seed 20260928, 3 000 iterations: 0 violations, 545 PASS / 2 455 FAIL, twice
+  with an identical verdict sequence (SHA-256 `2698f366…`), and the same sequence on CPython 3.9.25, 3.11.2 and 3.13.15
+  — this is the CI smoke job. Seed 1, 30 000 iterations: 0 violations (5 598 PASS). Seed 2, 90 s: 53 899 iterations, 0
+  violations (10 200 PASS; a time-bound count, 52–54 000 across three runs of the day). Positive controls on seed 20260928, 3 000 iterations, one check of the verifier disabled at a
+  time: producer signature 2 violations, pack-sha3 recomputation 181, ledger chain 312, strict JSON profile 60, the
+  canonical-name rule of `sig_alg` 26, the `require_signed` requirement 160 — the fuzzer sees each. Two properties of
+  the family the fuzz confirmed and encodes: a ledger cut at its tail to a valid prefix that still holds the anchor is a
+  valid chain (undetectable without a close record or an external anchor); a signature sidecar whose `sig_alg` became a
+  genuinely unknown string is a SKIP that names the unverified signature, so a pack that is also anchored still verifies
+  `valid` with `authenticated: false` — read `authenticated`, or pass `--require-signed`; a non-canonical spelling of
+  `ed25519` is a FAIL (0.10.0; on 28/09 both were a silent SKIP). Found and fixed in the fuzzer itself on 29/09: its
+  lenient re-read of a mutant used `json.loads`, whose recursion limit is the interpreter's (3.11 refused a 5 000-deep
+  mutant, 3.13 parsed it), so one seed gave two verdict sequences on two interpreters from iteration 796 — the re-read is
+  now bounded at a fixed depth, and `--trace` writes one line per iteration to compare two runs.
+  A weekly job (`fuzz-weekly.yml`) runs 20 minutes per Python version on a new seed each week.
+
+The figures above are from CPython 3.11.2 only. The test suite (137 tests) was run on 29/09/2026 on CPython 3.9.25,
+3.11.2 and 3.13.15, each with `cryptography` 50.0.1, all green; the differential oracle over the four pack verifiers
+(Python 3.11.2, Go 1.27.1, JDK 27, Node 22.23) was run the same day on this tree: 0 disagreements over 193 cases, every
+runtime ML-DSA capable. The oracle exercises the pack verifiers, not the AAT module. Not measured here: Windows (no `fcntl`: the ledger has no cross-process
+lock there), NFS, other hardware.
+
 ## Tests
 
 ```bash
-python3 tests/test_toolkit.py
+python3 tests/test_toolkit.py                       # unit + end-to-end, incl. N threads / N processes appending to one ledger
+python3 tests/fuzz_toolkit.py --iterations 3000     # seeded mutation fuzz of the verifier and the ledger (exit 1 on a violation)
+python3 tests/fuzz_toolkit.py --ablate signature    # positive control: the sabotaged verifier must make the fuzzer red (6 ablations)
+python3 tests/bench_toolkit.py --json bench.json    # latencies, throughput, memory, the 1 000 000-entry run (see below)
 ```
 
 ## Releasing (maintainers)
@@ -582,4 +748,4 @@ CI (`ci.yml`) runs the test suite on every push and pull request across Python 3
 - **Pilots**: the author runs short evaluation pilots (four to six weeks, scoped and priced up front) with teams building agents or AI systems under the AI Act that need an interoperable, offline-verifiable audit trail. Write with the use case; the answer says what is measured and what is not.
 - **Licence**: Apache-2.0: use it freely, also in closed products. If you build on it, a note in Discussions helps the roadmap (and tells the author the work is used).
 - **Citation**: DOI [10.5281/zenodo.22539633](https://doi.org/10.5281/zenodo.22539633) (Zenodo, concept DOI: always the latest version).
-- Author: Roberto Locatelli, 2026. Public interventions by his AI agent (Noûs) are signed as such.
+- Author: Roberto Locatelli, 2026. Noûs, AI agent operating under a revocable mandate from Roberto Locatelli, who reviews and is accountable.

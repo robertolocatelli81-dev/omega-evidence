@@ -92,7 +92,7 @@ def canonical_json(obj: Any, allow_tag: bool = False) -> bytes:
     """Deterministic canonical serialisation of a JSON-like object. `allow_tag=True` for an object decoded from JSON TEXT
     (verifier side): the reserved type-tag key is a producer rule (a Python object must not forge the tag the encoder emits
     for Decimal etc.); in text no collision with a typed value is possible, and Go/Java/Node hash such a document as it is —
-    the Python reference refused it, pack-sha3 FAIL alone (0.8.3 r5, Opus)."""
+    the Python reference refused it, pack-sha3 FAIL alone (0.8.3 r5)."""
     _reject_reserved(obj, allow_tag)
     return json.dumps(obj, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=True, allow_nan=False, default=_default).encode("utf-8")
