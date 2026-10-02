@@ -201,7 +201,9 @@ def verify_evidence_record(record: Dict[str, Any],
     Merkle root, and every renewal binding across algorithm changes. Optionally
     bind to the real packs. An RFC 3161 token is verified with openssl against `tsa_ca_file`
     (the TSA's trusted roots) and is PASS or FAIL; without openssl or without `tsa_ca_file` it is
-    SKIP, recorded but not verified (timestamp.verify returns verified: None, never a green). An
+    SKIP, not verified (timestamp.verify returns verified: None, never a green; the layer's note says whether
+    a token is there at all). A pack of `pack_paths` that cannot be read as an evidence pack is a FAIL of
+    `data-objects-bound`, not of the record. An
     `asserted` time is reported as NOT trusted-time. A malformed record (missing
     or unsupported hash_alg, wrong types) is `valid: false` with a FAIL layer, never
     an exception (audit V2 #6, 30/09/2026)."""
@@ -233,8 +235,12 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
 
     pack_sha3 = [d.get("pack_sha3", "") for d in record.get("data_objects", [])]
     if pack_paths is not None:
-        add("data-objects-bound", [_pack_sha3_of(p) for p in pack_paths] == pack_sha3,
-            "packs match the record's data objects")
+        try:
+            bound = [_pack_sha3_of(p) for p in pack_paths] == pack_sha3
+            add("data-objects-bound", bound, "packs match the record's data objects" if bound
+                else "packs do NOT match the record's data objects")
+        except (OSError, ValueError, AttributeError, RecursionError) as e:   # a bad PACK is not a malformed record
+            add("data-objects-bound", False, f"a pack could not be read as an evidence pack: {type(e).__name__}: {e}"[:200])
 
     # 2) initial Merkle root
     if ats:

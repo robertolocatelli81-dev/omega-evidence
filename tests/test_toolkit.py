@@ -3072,6 +3072,15 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         self.assertEqual(layer(r)["status"], "SKIP"); self.assertTrue(r["valid"])
         if shutil.which("openssl"):          # "AAAA" is no token: the forwarded note must not claim it was decoded
             self.assertIn("not decoded", layer(r)["detail"]); self.assertNotIn("token decoded", layer(r)["detail"])
+        for absent in (None, "", 5):         # no token at all: the note must not say one was recorded (NEMESIS V2 fine, G1)
+            bad = json.loads(json.dumps(rec)); ts0 = bad["archive_timestamps"][0]["timestamp"]
+            ts0.pop("tsr_b64") if absent is None else ts0.__setitem__("tsr_b64", absent)
+            bad["record_sha3"] = P._digest("sha3_256", canonical.canonical_json({k: v for k, v in bad.items() if k != "record_sha3"}))
+            for which in ("/usr/bin/openssl", None):
+                with unittest.mock.patch("omega_evidence.timestamp.shutil.which", return_value=which):
+                    d0 = layer(P.verify_evidence_record(bad))["detail"]
+                self.assertIn("no token recorded", d0); self.assertNotIn(" token recorded,", d0.replace("no token recorded", ""))
+
         for verdict, status, valid in ((True, "PASS", True), (False, "FAIL", False)):
             with unittest.mock.patch("omega_evidence.timestamp.verify", return_value={"verified": verdict}):
                 r = P.verify_evidence_record(rec, tsa_ca_file="/x.pem")
@@ -3079,6 +3088,23 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         r = P.verify_evidence_record(rec, tsa_ca_file=os.path.join(d, "missing.pem"))
         if shutil.which("openssl"):                                          # real call: ca_file not found -> verified False
             self.assertEqual((layer(r)["status"], r["valid"]), ("FAIL", False))
+
+    def test_a_bad_pack_is_not_a_malformed_record(self):   # NEMESIS V2 fine, G2 (02/10/2026)
+        from omega_evidence import preservation as P
+        d = tempfile.mkdtemp(); pp = os.path.join(d, "r.json")
+        pack.write_pack(pp, pack.build_pack("k", {"a": 1}, "does NOT prove x"))
+        rec = P.build_evidence_record([pp])
+        other = os.path.join(d, "o.json"); pack.write_pack(other, pack.build_pack("k", {"a": 2}, "does NOT prove x"))
+        notpack = os.path.join(d, "n.json"); open(notpack, "w").write('{"x": 1}')
+        broken = os.path.join(d, "b.json"); open(broken, "w").write("{")
+        names = lambda r: {x["layer"]: (x["status"], x["detail"]) for x in r["layers"]}
+        self.assertTrue(P.verify_evidence_record(rec, [pp])["valid"])                    # control
+        r = P.verify_evidence_record(rec, [other])
+        self.assertEqual(names(r)["data-objects-bound"][0], "FAIL"); self.assertIn("do NOT match", names(r)["data-objects-bound"][1])
+        for bad in (notpack, broken, os.path.join(d, "missing.json")):
+            r = P.verify_evidence_record(rec, [bad]); n = names(r)
+            self.assertFalse(r["valid"]); self.assertNotIn("record-malformed", n)
+            self.assertEqual(n["data-objects-bound"][0], "FAIL"); self.assertIn("could not be read as an evidence pack", n["data-objects-bound"][1])
 
     def test_ots_malformed_sidecar_is_a_status(self):  # #7
         from omega_evidence import ots

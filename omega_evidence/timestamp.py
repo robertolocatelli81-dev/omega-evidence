@@ -15,7 +15,7 @@
 omega_evidence.timestamp — RFC 3161 trusted timestamping via openssl.
 
 Graceful degradation: if openssl is absent, verification returns None
-("recorded but not verified") — never a false positive. A qualified TSA (on the
+("not verified") — never a false positive. A qualified TSA (on the
 EU Trusted List) additionally carries legal presumption of time; judging
 qualification is left to the consumer of the evidence.
 """
@@ -182,10 +182,12 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
     `openssl ts -verify -CAfile <ca> -digest <hex> -in <tsr>` and require 'Verification: OK'.
     openssl absent → {verified: None}."""
     exe = shutil.which("openssl")
+    # what the caller holds: a token string, or none at all (absent, empty or not a string) — never claimed otherwise
+    tok = "token recorded" if isinstance(tsr_b64, str) and tsr_b64 else "no token recorded (tsr_b64 missing, empty or not a string)"
     if not exe:
-        return {"verified": None, "note": "openssl absent — token recorded but NOT verified"}
+        return {"verified": None, "note": f"openssl absent — {tok}, NOT verified"}
     if not ca_file:
-        return {"verified": None, "note": "no TSA trust anchor (ca_file) — token recorded, not decoded or "
+        return {"verified": None, "note": f"no TSA trust anchor (ca_file) — {tok}, not decoded or "
                                           "verified; supply the TSA roots to verify"}
     if not os.path.exists(ca_file):
         return {"verified": False, "note": f"ca_file not found: {ca_file}"}
