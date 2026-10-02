@@ -3070,6 +3070,8 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         layer = lambda r: [x for x in r["layers"] if x["layer"].startswith("time[0]")][0]
         r = P.verify_evidence_record(rec)                                    # no trust anchor: recorded, not verified
         self.assertEqual(layer(r)["status"], "SKIP"); self.assertTrue(r["valid"])
+        if shutil.which("openssl"):          # "AAAA" is no token: the forwarded note must not claim it was decoded
+            self.assertIn("not decoded", layer(r)["detail"]); self.assertNotIn("token decoded", layer(r)["detail"])
         for verdict, status, valid in ((True, "PASS", True), (False, "FAIL", False)):
             with unittest.mock.patch("omega_evidence.timestamp.verify", return_value={"verified": verdict}):
                 r = P.verify_evidence_record(rec, tsa_ca_file="/x.pem")

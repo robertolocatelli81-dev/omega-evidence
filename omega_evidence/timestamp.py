@@ -185,8 +185,8 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
     if not exe:
         return {"verified": None, "note": "openssl absent — token recorded but NOT verified"}
     if not ca_file:
-        return {"verified": None, "note": "no TSA trust anchor (ca_file) — token decoded but its "
-                                          "signature/chain is UNVERIFIED; supply the TSA roots to verify"}
+        return {"verified": None, "note": "no TSA trust anchor (ca_file) — token recorded, not decoded or "
+                                          "verified; supply the TSA roots to verify"}
     if not os.path.exists(ca_file):
         return {"verified": False, "note": f"ca_file not found: {ca_file}"}
     d = tempfile.mkdtemp()
