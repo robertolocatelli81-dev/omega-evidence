@@ -195,11 +195,28 @@ def renewal_due(record: Dict[str, Any], weak_algs: List[str]) -> Dict[str, Any]:
 
 
 def verify_evidence_record(record: Dict[str, Any],
-                           pack_paths: Optional[List[str]] = None) -> Dict[str, Any]:
+                           pack_paths: Optional[List[str]] = None,
+                           tsa_ca_file: Optional[str] = None) -> Dict[str, Any]:
     """Verify a long-term evidence record OFFLINE: record integrity, the initial
     Merkle root, and every renewal binding across algorithm changes. Optionally
-    bind to the real packs. RFC 3161 tokens are reported (SKIP without openssl;
-    an `asserted` time is reported as NOT trusted-time)."""
+    bind to the real packs. An RFC 3161 token is verified with openssl against `tsa_ca_file`
+    (the TSA's trusted roots) and is PASS or FAIL; without openssl or without `tsa_ca_file` it is
+    SKIP, recorded but not verified (timestamp.verify returns verified: None, never a green). An
+    `asserted` time is reported as NOT trusted-time. A malformed record (missing
+    or unsupported hash_alg, wrong types) is `valid: false` with a FAIL layer, never
+    an exception (audit V2 #6, 30/09/2026)."""
+    if not isinstance(record, dict):
+        return {"valid": False, "layers": [{"layer": "record-malformed", "status": "FAIL",
+                                             "detail": "record is not a JSON object"}], "verified_utc": _now()}
+    try:
+        return _verify_evidence_record(record, pack_paths, tsa_ca_file)
+    except (KeyError, TypeError, AttributeError, ValueError, IndexError, RecursionError) as e:
+        return {"valid": False, "layers": [{"layer": "record-malformed", "status": "FAIL",
+                                             "detail": f"{type(e).__name__}: {e}"[:200]}], "verified_utc": _now()}
+
+
+def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[str]],
+                            tsa_ca_file: Optional[str] = None) -> Dict[str, Any]:
     layers: List[Dict[str, str]] = []
 
     def add(name, ok, detail="", skip=False):
@@ -251,12 +268,14 @@ def verify_evidence_record(record: Dict[str, Any],
         if ts.get("time_source") == "rfc3161":
             from .timestamp import verify as ts_verify
             covered = a.get("merkle_root") or a.get("prev_binding") or ""
-            r = ts_verify(ts.get("tsr_b64", ""), covered)
-            st = r.get("status", "")
-            if st == "unavailable":
-                add(f"time[{i}]-rfc3161", True, "openssl absent — token present, not verified here", skip=True)
+            r = ts_verify(ts.get("tsr_b64", ""), covered, ca_file=tsa_ca_file)
+            # timestamp.verify's contract: verified None = recorded, NOT verified (no openssl / no trust anchor);
+            # True / False = verified. Until 0.10.0 this read a "status" key that verify() never returns, so every
+            # record with an RFC 3161 token was FAIL (audit V2 final round, 02/10/2026).
+            if r.get("verified") is None:
+                add(f"time[{i}]-rfc3161", True, r.get("note", "token recorded, not verified"), skip=True)
             else:
-                add(f"time[{i}]-rfc3161", st == "valid", ts.get("tsa", ""))
+                add(f"time[{i}]-rfc3161", r.get("verified") is True, ts.get("tsa", "") or r.get("note", ""))
         else:
             add(f"time[{i}]-asserted", True, "asserted time — NOT trusted time", skip=True)
 

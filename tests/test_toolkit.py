@@ -7,7 +7,9 @@ controls for every property; a fabricated pack must not pass."""
 import base64
 import hashlib
 import json
+import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -644,14 +646,17 @@ class TestSDJWT(unittest.TestCase):
         tok = sdjwt.issue({"country": "IT"}, iss)
         self.assertFalse(sdjwt.verify(tok, signing.Identity("x").public_key_b64)["verified"])
 
-    def test_forged_disclosure_not_in_sd_is_ignored(self):
+    def test_forged_disclosure_not_in_sd_rejects_the_sd_jwt(self):
+        # RFC 9901 §7.1 step 5: a Disclosure not referenced by any digest → «the SD-JWT MUST be rejected» (the whole token;
+        # until audit V2 / NEMESIS Q3, 01/10/2026, this test asserted that only the Disclosure was dropped)
         iss = signing.Identity("kyc")
         tok = sdjwt.issue({"country": "IT"}, iss)
         forged = sdjwt._disclosure("s", "admin", True)
         tampered = tok.rstrip("~") + "~" + forged + "~"
+        self.assertTrue(sdjwt.verify(tok, iss.public_key_b64)["verified"])          # control
         v = sdjwt.verify(tampered, iss.public_key_b64)
-        self.assertTrue(v["verified"])                       # JWS still valid
-        self.assertNotIn("admin", v["disclosed_claims"])     # forged claim rejected
+        self.assertFalse(v["verified"])
+        self.assertNotIn("admin", v["disclosed_claims"])
 
 
 class TestCRA(unittest.TestCase):
@@ -2820,6 +2825,399 @@ class TestSigAlg20260929(unittest.TestCase):
             finally:
                 verifier._fold_alg = real
             self.assertFalse(verify_pack(p)["valid"])
+
+
+class TestAuditV2MalformedInput(unittest.TestCase):
+    """audit V2 (30/09/2026), #1-#7 and the review rounds after it: base64 read as the specs state it, a body that does not
+    parse is a reject, and a malformed input is a verdict, never a traceback. On 0.10.0 (@642045c) all 13 tests fail on
+    Python 3.9, 3.11 and 3.13."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.i = signing.Identity("acme", seed=bytes(32))
+        cls.pk = cls.i.public_key_b64
+        # pack payloads with numeric claims held no '+' or '/' (measured: 0/300; '?' or '>' in a claim does produce them). For #2 a
+        # hand-signed envelope with raw UTF-8 in its JSON statement does; its signature needs one too (285/300 do).
+        for n in range(500):
+            body = json.dumps({"_type": "x", "predicate": {"n": n, "t": "\u00ff\u00fe\u00fb" * 8}}, ensure_ascii=False).encode()
+            sig = cls.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))
+            env = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
+                   "signatures": [{"keyid": "k", "publicKeyB64": cls.pk, "sig": sig}]}
+            if any(c in env["payload"] for c in "+/") and any(c in sig for c in "+/"):   # URL-safe really differs
+                cls.env = env
+                break
+        else:
+            raise AssertionError("no envelope whose URL-safe form differs")
+
+    def _env(self):
+        return json.loads(json.dumps(self.env))
+
+    def test_dsse_whitespace_rejected(self):          # #1
+        self.assertTrue(dsse.from_dsse(self._env())["verified"])                      # control
+        e = self._env(); s = e["signatures"][0]; s["sig"] = s["sig"][:8] + " \n " + s["sig"][8:]
+        self.assertFalse(dsse.from_dsse(e)["verified"])
+        e = self._env(); e["payload"] = e["payload"][:8] + " \n " + e["payload"][8:]
+        self.assertFalse(dsse.from_dsse(e)["verified"])
+
+    def test_dsse_url_safe_accepted(self):            # #2 — DSSE v1.0.0: verifiers MUST accept either
+        u = lambda x: x.replace("+", "-").replace("/", "_")
+        e = self._env(); e["payload"] = u(e["payload"])
+        self.assertTrue(dsse.from_dsse(e)["verified"])
+        e = self._env(); e["signatures"][0]["sig"] = u(e["signatures"][0]["sig"])
+        self.assertTrue(dsse.from_dsse(e)["verified"])
+
+    def test_dsse_malformed_is_a_verdict(self):       # #5
+        for fn in (lambda e: e.pop("payload"), lambda e: e.update(payloadType=5),
+                   lambda e: e.update(payload=base64.b64encode(b"ciao").decode()),
+                   lambda e: e.update(payload="A"), lambda e: e.update(signatures=[5]), lambda e: e.update(payload=None)):
+            e = self._env(); fn(e)
+            self.assertFalse(dsse.from_dsse(e)["verified"])
+        self.assertFalse(dsse.from_dsse([])["verified"])
+        e = self._env(); e["payloadType"] = 5                  # M07 / K13: a type that is not a string has its own message
+        self.assertEqual(dsse.from_dsse(e)["error"], "payloadType must be a string and signatures a list")
+        for not_an_object in (5, None, "x", [1]):           # D3 / M06: the envelope must be an object, with its own message
+            self.assertEqual(dsse.from_dsse(not_an_object)["error"], "envelope is not a JSON object")
+        # a correctly SIGNED envelope whose statement is JSON but not an object: a verdict, not a crash (mutant D6)
+        body = b"[1,2]"
+        e = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
+             "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
+        r = dsse.from_dsse(e)
+        self.assertFalse(r["verified"])        # DSSE: «Reject if the parsing fails», even with a right signature (NEMESIS P1)
+        self.assertIsNone(r["pack"])
+        self.assertIn("error", r)
+        for body, why in ((b"ciao", "JSONDecodeError"), (b"\xff\xfe", "UnicodeDecodeError"),
+                          (b"[" * 100000 + b"]" * 100000, "RecursionError")):   # not JSON, not UTF-8, valid JSON nested too deep (M14)
+            e = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
+                 "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
+            r = dsse.from_dsse(e)
+            self.assertFalse(r["verified"]); self.assertEqual(r["error"], "payload could not be parsed as UTF-8 JSON: " + why)
+        e = self._env(); e["signatures"] = None                                        # M08
+        self.assertFalse(dsse.from_dsse(e)["verified"])
+
+    def test_dsse_excess_padding_rejected_on_every_python(self):   # NEMESIS V2 P2
+        e0 = self._env()
+        body = base64.b64decode(e0["payload"])
+        for n in range(3):                       # a payload whose length is a multiple of 3 has no padding of its own
+            if len(body) % 3 == 0:
+                break
+            body += b" "
+        e = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
+             "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
+        self.assertTrue(dsse.from_dsse(e)["verified"])                                 # control
+        for pad in ("=", "==", "==="):
+            e2 = json.loads(json.dumps(e)); e2["payload"] += pad
+            self.assertFalse(dsse.from_dsse(e2)["verified"], pad)
+        # mixed alphabets that decode to the SAME bytes if accepted: a payload holding both '+' and '/', only '+' turned
+        # into '-' (one alphabet per string: DSSE says standard *or* URL-safe; the Go reference rejects mixed alphabets, the
+        # Python reference accepts them; NEMESIS V2 P2 / mutant N03)
+        for n in range(2000):
+            body = json.dumps({"_type": "x", "n": n, "t": "\u00fb\u00ef\u00be\u00ff" * 6}, ensure_ascii=False).encode()
+            b64 = base64.b64encode(body).decode()
+            if "+" in b64 and "/" in b64:
+                break
+        else:
+            self.fail("no payload with both '+' and '/'")
+        e = {"payload": b64, "payloadType": dsse.PAYLOAD_TYPE,
+             "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
+        self.assertTrue(dsse.from_dsse(e)["verified"])                                 # control
+        e["payload"] = b64.replace("+", "-")
+        self.assertFalse(dsse.from_dsse(e)["verified"])
+
+    def test_dsse_excess_padding_in_fours(self):   # NEMESIS V2 giro 2 Q1: '=' in multiples of 4 keep len % 4 == 0
+        for n in range(2000):
+            body = json.dumps({"_type": "x", "n": n, "t": "\u00fb\u00ef\u00be\u00ff" * 6}, ensure_ascii=False).encode()
+            body += b" " * (-len(body) % 3); b64 = base64.b64encode(body).decode()
+            if "+" in b64 and "/" in b64:
+                break
+        sig = self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))
+        u = lambda x: x.replace("+", "-").replace("/", "_")
+        for enc, sg in ((b64, sig), (u(b64), u(sig))):
+            e = {"payload": enc, "payloadType": dsse.PAYLOAD_TYPE, "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": sg}]}
+            self.assertTrue(dsse.from_dsse(e)["verified"])                             # control, std and URL-safe
+            for pad in ("====", "========"):
+                e2 = json.loads(json.dumps(e)); e2["payload"] += pad
+                self.assertFalse(dsse.from_dsse(e2)["verified"], (enc[:6], pad))
+            e2 = json.loads(json.dumps(e)); e2["signatures"][0]["sig"] = sg + "===="
+            self.assertFalse(dsse.from_dsse(e2)["verified"])
+
+    def test_dsse_payload_type_required_and_json_constants(self):   # NEMESIS V2 giro 2 Q5, Q4
+        body = b'{"_type":"x","predicate":{}}'
+        e = {"payload": base64.b64encode(body).decode(), "signatures": [{"keyid": "k", "publicKeyB64": self.pk,
+                                                                          "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
+        self.assertTrue(dsse.from_dsse(dict(e, payloadType=dsse.PAYLOAD_TYPE))["verified"])   # control
+        self.assertEqual(dsse.from_dsse(e)["error"], "payloadType missing")                    # absent (envelope.md)
+        for other in ("", "text/plain"):   # protocol.md: «Reject if PAYLOAD_TYPE is not a supported type» (signed over that type)
+            e2 = dict(e, payloadType=other); e2["signatures"] = [dict(e["signatures"][0], sig=self.i.sign(dsse.pae(other, body)))]
+            r = dsse.from_dsse(e2)
+            self.assertFalse(r["verified"]); self.assertTrue(r["error"].startswith("payloadType not supported"))
+        e3 = dict(e, payloadType=dsse.PAYLOAD_TYPE); e3.pop("signatures")                       # X04: signatures REQUIRED
+        self.assertEqual(dsse.from_dsse(e3)["error"], "signatures missing")
+        for c in (b"NaN", b"Infinity", b"-Infinity"):
+            body = b'{"_type":"x","n":' + c + b'}'
+            e = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
+                 "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
+            self.assertFalse(dsse.from_dsse(e)["verified"], c)
+
+    def test_sdjwt_rfc9901_section_7_1(self):   # NEMESIS V2 giro 2 Q3: every MUST of §7.1 rejects the whole SD-JWT
+        sk = self.i
+        b64u = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+        disc = lambda arr: b64u(json.dumps(arr, ensure_ascii=False).encode())
+
+        def tok(body, discs, header=None):
+            h = b64u(json.dumps(header or {"alg": "EdDSA", "typ": "dc+sd-jwt"}).encode())
+            p = b64u(json.dumps(body).encode())
+            s = b64u(base64.b64decode(sk.sign((h + "." + p).encode())))
+            return f"{h}.{p}.{s}~" + "".join(d + "~" for d in discs)
+        d1 = disc(["s1", "country", "IT"]); d2 = disc(["s2", "age", 30]); el = disc(["s3", "EU"])
+        nested = disc(["s4", "addr", {"_sd": [sdjwt._digest(disc(["s5", "city", "Roma"]))]}]); city = disc(["s5", "city", "Roma"])
+        base = {"iss": "omega", "_sd": [sdjwt._digest(d1), sdjwt._digest(d2), sdjwt._digest(nested)],
+                "zones": [{"...": sdjwt._digest(el)}, "x"], "_sd_alg": "sha-256"}
+        v = sdjwt.verify(tok(base, [d1, d2, el, nested, city]), sk.public_key_b64, now=1000)
+        self.assertTrue(v["verified"], v)                                               # control: recursive + array element
+        self.assertEqual(v["processed_payload"], {"iss": "omega", "country": "IT", "age": 30, "zones": ["EU", "x"],
+                                                  "addr": {"city": "Roma"}})
+        self.assertTrue(sdjwt.verify(tok(base, [d1]), sk.public_key_b64, now=1000)["verified"])   # control: fewer Disclosures
+        bad = {
+            "step 5 unreferenced": (base, [d1, disc(["s9", "admin", True])], None),
+            "step 4 duplicate digest": (dict(base, _sd=base["_sd"] + [sdjwt._digest(d1)]), [d1], None),
+            "3.c.ii.2 name _sd": (dict(base, _sd=[sdjwt._digest(disc(["s", "_sd", 1]))]), [disc(["s", "_sd", 1])], None),
+            "3.c.ii.2 name ...": (dict(base, _sd=[sdjwt._digest(disc(["s", "...", 1]))]), [disc(["s", "...", 1])], None),
+            "3.c.ii.3 name exists": (dict(base, _sd=[sdjwt._digest(disc(["s", "iss", "x"]))]), [disc(["s", "iss", "x"])], None),
+            "3.c.ii.1 two elements in _sd": (dict(base, _sd=[sdjwt._digest(el)]), [el], None),
+            "3.c.iii.1 three elements in array": (dict(base, zones=[{"...": sdjwt._digest(d1)}], _sd=[]), [d1], None),
+            "2.a alg none": (base, [d1], {"alg": "none"}),
+            "2.a alg HS256": (base, [d1], {"alg": "HS256"}),
+            "2.d _sd_alg sha-512": (dict(base, _sd_alg="sha-512"), [d1], None),
+            "2.d _sd_alg md5": (dict(base, _sd_alg="md5"), [d1], None),
+            "step 6 exp passed": (dict(base, exp=1000), [d1], None),
+            "step 6 nbf future": (dict(base, nbf=1001), [d1], None),
+            "exp not a number": (dict(base, exp="2030"), [d1], None),
+            "nbf boolean (not a NumericDate)": (dict(base, nbf=True), [d1], None),
+            "step 4 duplicate decoy digest": (dict(base, _sd=base["_sd"] + ["decoy", "decoy"]), [d1], None),
+            "4.2.1 salt not a string": (dict(base, _sd=[sdjwt._digest(disc([5, "c", 1]))]), [disc([5, "c", 1])], None),
+            "4.2.4.1 _sd not array of strings": (dict(base, _sd=[5]), [], None),
+            "two-key object is not a digest": (dict(base, zones=[{"...": sdjwt._digest(el), "k": 1}]), [el], None),
+        }
+        for name, (body, discs, header) in bad.items():
+            self.assertFalse(sdjwt.verify(tok(body, discs, header), sk.public_key_b64, now=1000)["verified"], name)
+        t = tok(base, [d1])
+        self.assertFalse(sdjwt.verify(t + d1 + "~", sk.public_key_b64, now=1000)["verified"])   # same Disclosure twice
+        self.assertFalse(sdjwt.verify(t[:-1], sk.public_key_b64, now=1000)["verified"])          # no trailing '~' (SD-JWT+KB)
+        self.assertTrue(sdjwt.verify(tok(dict(base, exp=1001, nbf=1000), [d1]), sk.public_key_b64, now=1000)["verified"])
+        # recursion inside an array element: its value carries its own _sd (step 3.c.iii.3)
+        inner = disc(["s7", "lvl", 2]); arr_el = disc(["s6", {"_sd": [sdjwt._digest(inner)]}])
+        v = sdjwt.verify(tok(dict(base, zones=[{"...": sdjwt._digest(arr_el)}]), [d1, arr_el, inner]), sk.public_key_b64, now=1000)
+        self.assertTrue(v["verified"], v)
+        self.assertEqual(v["processed_payload"]["zones"], [{"lvl": 2}])
+        # NaN in a signed SD-JWT payload is not JSON (Q4)
+        h = b64u(json.dumps({"alg": "EdDSA"}).encode()); p = b64u(b'{"iss":"x","exp":NaN}')
+        nan_tok = f"{h}.{p}.{b64u(base64.b64decode(sk.sign((h + '.' + p).encode())))}~"
+        self.assertFalse(sdjwt.verify(nan_tok, sk.public_key_b64, now=1000)["verified"])
+        self.assertFalse(sdjwt.verify(tok(base, [d1]).replace(".", ".", 1)[:-1] + "~~", sk.public_key_b64, now=1000)["verified"])
+
+    def test_dsse_multi_signature_first_undecodable(self):   # M11: a bad first signature must not hide a good second one
+        e = self._env(); good = e["signatures"][0]
+        e["signatures"] = [dict(good, sig="!!!!"), good]
+        self.assertTrue(dsse.from_dsse(e)["verified"])
+        e["signatures"] = [5, good]                           # K09: an entry that is not an object is skipped, not fatal
+        self.assertTrue(dsse.from_dsse(e)["verified"])
+
+    def test_sdjwt_strict_base64url(self):            # #3
+        t = sdjwt.issue({"n": "x"}, self.i); j, r = t.split("~", 1); h, p, s = j.split(".")
+        self.assertTrue(sdjwt.verify(t, self.pk)["verified"])                         # control
+        alph = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        for bad in (s[:20] + "    " + s[20:], s[:20] + "\n\n\n\n" + s[20:], s + "==",
+                    s[:-1] + alph[alph.index(s[-1]) ^ 1]):                                 # last: non-canonical unused bits
+            self.assertFalse(sdjwt.verify(f"{h}.{p}.{bad}~{r}", self.pk)["verified"], repr(bad[-6:]))
+
+    def test_sdjwt_malformed_is_a_verdict(self):      # #4
+        t = sdjwt.issue({"n": "x"}, self.i); j, r = t.split("~", 1); h, p, s = j.split(".")
+        b64u = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+        for tok in (f"{h}.{p}.A~{r}", f"{b64u(b'ciao')}.{p}.{s}~{r}", f"{h}\u00e9.{p}.{s}~{r}",
+                    f"{h}.{b64u(b'[]')}.{s}~{r}", 5):
+            self.assertFalse(sdjwt.verify(tok, self.pk)["verified"])
+
+    def test_preservation_malformed_is_a_verdict(self):   # #6
+        from omega_evidence import preservation as P
+        d = tempfile.mkdtemp(); pp = os.path.join(d, "r.json")
+        pack.write_pack(pp, pack.build_pack("k", {"a": 1}, "does NOT prove x"))
+        rec = P.build_evidence_record([pp])
+
+        def remk(fn):
+            rr = json.loads(json.dumps(rec)); fn(rr)
+            rr["record_sha3"] = P._digest("sha3_256", canonical.canonical_json({k: v for k, v in rr.items() if k != "record_sha3"}))
+            return P.verify_evidence_record(rr)["valid"]
+        self.assertTrue(remk(lambda rr: None))                                         # control
+        for fn in (lambda rr: rr["archive_timestamps"][0].update(hash_alg="md5"),
+                   lambda rr: rr["archive_timestamps"][0].pop("hash_alg"),
+                   lambda rr: rr.update(data_objects=[5]), lambda rr: rr.update(archive_timestamps="x")):
+            self.assertFalse(remk(fn))
+        self.assertFalse(P.verify_evidence_record([])["valid"])
+        nested = {"record_sha3": "x"}
+        cur = nested
+        for _ in range(100000):                  # M34: a deeply nested record is a verdict, not a RecursionError
+            cur["a"] = {}; cur = cur["a"]
+        self.assertFalse(P.verify_evidence_record(nested)["valid"])
+
+    def test_preservation_rfc3161_follows_timestamp_verify(self):   # audit V2 final round P3 (02/10/2026)
+        # until 0.10.0 every record carrying an RFC 3161 token was FAIL: the layer read a "status" key verify() never returns
+        from omega_evidence import preservation as P
+        d = tempfile.mkdtemp(); pp = os.path.join(d, "r.json")
+        pack.write_pack(pp, pack.build_pack("k", {"a": 1}, "does NOT prove x"))
+        rec = P.build_evidence_record([pp])
+        rec["archive_timestamps"][0]["timestamp"] = {"time_source": "rfc3161", "tsr_b64": "AAAA", "tsa": "test-tsa"}
+        rec["record_sha3"] = P._digest("sha3_256", canonical.canonical_json({k: v for k, v in rec.items() if k != "record_sha3"}))
+        layer = lambda r: [x for x in r["layers"] if x["layer"].startswith("time[0]")][0]
+        r = P.verify_evidence_record(rec)                                    # no trust anchor: recorded, not verified
+        self.assertEqual(layer(r)["status"], "SKIP"); self.assertTrue(r["valid"])
+        for verdict, status, valid in ((True, "PASS", True), (False, "FAIL", False)):
+            with unittest.mock.patch("omega_evidence.timestamp.verify", return_value={"verified": verdict}):
+                r = P.verify_evidence_record(rec, tsa_ca_file="/x.pem")
+            self.assertEqual((layer(r)["status"], r["valid"]), (status, valid))
+        r = P.verify_evidence_record(rec, tsa_ca_file=os.path.join(d, "missing.pem"))
+        if shutil.which("openssl"):                                          # real call: ca_file not found -> verified False
+            self.assertEqual((layer(r)["status"], r["valid"]), ("FAIL", False))
+
+    def test_ots_malformed_sidecar_is_a_status(self):  # #7
+        from omega_evidence import ots
+        d = tempfile.mkdtemp()
+        r = ots.verify(os.path.join(d, "none.ots.json"))                 # no sidecar at all
+        self.assertEqual((r["status"], r["confirmed"]), ("absent", False))
+        for body in ("{}", '{"x": 1}'):                                   # K14: no status recorded is not malformed
+            f = os.path.join(d, f"nostatus{len(body)}.ots.json"); open(f, "w").write(body)
+            self.assertEqual((ots.verify(f)["status"], ots.verify(f)["confirmed"]), ("pending-unverified", False))
+        f = os.path.join(d, "deep.ots.json"); open(f, "w").write("[" * 100000 + "]" * 100000)   # X03: nested too deep
+        self.assertEqual((ots.verify(f)["status"], ots.verify(f)["confirmed"]), ("malformed", False))
+        os.mkdir(os.path.join(d, "dir.ots.json"))                       # NEMESIS V2 giro 2 Q2: unreadable sidecar
+        r = ots.verify(os.path.join(d, "dir.ots.json"))
+        self.assertEqual((r["status"], r["confirmed"]), ("malformed", False))
+        for body in ("[]", "{", '{"status": null}', '{"status": 5}', '{"status": []}'):   # last three: NEMESIS P3
+            f = os.path.join(d, f"x{len(body)}.ots.json"); open(f, "w").write(body)
+            r = ots.verify(f)
+            self.assertEqual((r["status"], r["confirmed"]), ("malformed", False))
+
+
+class TestSDJWTSection71Held(unittest.TestCase):
+    """NEMESIS V2 review round 3 (01/10/2026): the §7.1 rejections, the legitimate shapes and the processed payload are each held
+    by a test (13 mutants of the new verify() survived the suite before these)."""
+    def setUp(self):
+        self.i = signing.Identity("nemesis-g3", seed=bytes(range(32))); self.pk = self.i.public_key_b64
+
+    def _b64u(self, b):
+        return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+    def _disc(self, arr):
+        return self._b64u(json.dumps(arr).encode())
+
+    def _tok(self, body, discs, header=b'{"alg":"EdDSA"}'):
+        h = self._b64u(header)
+        p = self._b64u(body if isinstance(body, bytes) else json.dumps(body).encode())
+        s = self._b64u(base64.b64decode(self.i.sign((h + "." + p).encode())))
+        return f"{h}.{p}.{s}~" + "".join(d + "~" for d in discs)
+
+    def _v(self, tok, now=1000):
+        return sdjwt.verify(tok, self.pk, now=now)
+
+    def test_must_reject_held(self):
+        D = sdjwt._digest
+        dA, dB = self._disc(["a", "k", 1]), self._disc(["b", "k", 2])
+        exp_old = self._disc(["e", "exp", 999]); nan_exp = self._b64u(b'["s","exp",NaN]'); num_name = self._disc(["s", 5, 1])
+        self.assertTrue(self._v(self._tok({"_sd": [D(dA)]}, [dA]))["verified"])                       # control
+        bad = {
+            "3.c.ii.3 two Disclosures, same name": self._tok({"_sd": [D(dA), D(dB)]}, [dA, dB]),          # N307
+            "step 6 exp in a Disclosure, passed": self._tok({"_sd": [D(exp_old)]}, [exp_old]),           # N304
+            "exp null": self._tok({"exp": None}, []), "exp false": self._tok({"exp": False}, []),        # N305
+            "exp 0": self._tok({"exp": 0}, []),
+            "2.d _sd_alg null": self._tok({"_sd_alg": None}, []),                                        # N306
+            "NaN in the header": self._tok({}, [], header=b'{"alg":"EdDSA","x":NaN}'),                   # N311
+            "NaN exp inside a Disclosure": self._tok({"_sd": [D(nan_exp)]}, [nan_exp]),                  # N312
+            "NaN in another disclosed claim": self._tok({"_sd": [D(self._b64u(b'["s","n",NaN]'))]}, [self._b64u(b'["s","n",NaN]')]),
+            "claim name not a string": self._tok({"_sd": [D(num_name)]}, [num_name]),                    # N313
+            "2.a alg absent": self._tok({}, [], header=b'{"typ":"dc+sd-jwt"}'),                          # N320
+        }
+        for name, t in bad.items():
+            self.assertFalse(self._v(t)["verified"], name)
+        self.assertFalse(self._v(self._tok({"nbf": 1}, []), now=0)["verified"])                         # N310: now=0 is a time
+        self.assertTrue(self._v(self._tok({"exp": 1}, []), now=0)["verified"])
+
+    def test_claim_name_messages(self):                                                                    # NEMESIS V2 round 6
+        for name, msg in ((5, "claim name is not a string"), (None, "claim name is not a string"), (["x"], "claim name is not a string"),
+                          ("_sd", "claim name is _sd or ..."), ("...", "claim name is _sd or ...")):
+            d = self._disc(["s", name, 1])
+            r = self._v(self._tok({"_sd": [sdjwt._digest(d)]}, [d]))
+            self.assertFalse(r["verified"]); self.assertIn(msg, r["error"])
+
+    def test_legitimate_shapes_and_processed_payload(self):
+        D = sdjwt._digest
+        c = self._disc(["s1", "country", "IT"]); e = self._disc(["e1", "DE"])
+        body = {"a": [{"...": D(e)}, "US", {"...": "decoy"}], "o": {"...": {"_sd": [D(c)]}},
+                "l": [{"...": [1]}, {"...": 5}, {"...": {"_sd": []}}]}
+        v = self._v(self._tok(body, [e, c]))
+        self.assertTrue(v["verified"], v)                                                                 # N303, N324
+        self.assertEqual(v["processed_payload"], {"a": ["DE", "US"], "o": {"...": {"country": "IT"}},
+                                                  "l": [{"...": [1]}, {"...": 5}, {"...": {}}]})
+        self.assertEqual(self._v(self._tok(body, [c]))["processed_payload"]["a"], ["US"])                # N309: 3.d
+
+    def test_deep_nesting_is_a_verdict(self):                                                             # N314
+        deep = b'{"a":' + b"[" * 100000 + b"]" * 100000 + b"}"
+        for t in (self._tok(deep, []), self._tok({}, [], header=b'{"alg":"EdDSA","x":' + b"[" * 100000 + b"]" * 100000 + b"}")):
+            r = self._v(t)
+            self.assertFalse(r["verified"])
+
+
+    def test_issue_refuses_what_verify_must_reject(self):   # NEMESIS V2 round 3, N6 (§4.2.1)
+        for claims, plain in (({"_sd": 1}, None), ({"...": 1}, None), ({"iss": "x"}, {"iss": "y"}), ({"n": float("nan")}, None),
+                              ({5: 1}, None)):   # a claim name is a string (§4.2.1)
+            with self.assertRaises(ValueError):
+                sdjwt.issue(claims, self.i, plain_claims=plain)
+        self.assertTrue(sdjwt.verify(sdjwt.issue({"n": 1}, self.i, plain_claims={"iss": "y"}), self.pk, now=1000)["verified"])
+
+
+class TestSDJWTIssueRefuses(unittest.TestCase):
+    """NEMESIS V2 review rounds 4-6 (01/10/2026): every refusal issue() declares is held by a test, for a key in any position
+    and inside a tuple too. Of claim values, issue() refuses NaN / Infinity (I06) but does not check what a value means: an
+    exp / nbf that is not a number is signed, and verify() rejects the token when that claim is in the processed payload
+    (in clear: held below)."""
+    def setUp(self):
+        self.i = signing.Identity("nemesis-g4", seed=bytes(range(32))); self.pk = self.i.public_key_b64
+
+    def test_issue_refuses(self):
+        for claims, plain in (({"_sd_alg": 1}, None),                                                      # I04
+                              ({"n": 1}, {"exp": float("nan")}), ({"n": 1}, {"x": {"y": [-math.inf]}}), ({"n": math.inf}, None),   # I06
+                              ({"1": "a"}, {1: "b"}), ({"true": "a"}, {True: "b"}), ({"n": 1}, {1: "a", "1": "b"}),   # JSON keys
+                              ({"n": 1}, {"_sd": ["x"]}), ({"n": 1}, {"_sd_alg": "md5"}), ({"n": 1}, {"...": 0}),     # §4.1 item 7
+                              ({"n": 1}, {"o": {"_sd": 5}}), ({"n": 1}, {"a": [{"...": "zz"}]}),
+                              ({"o": {"_sd": 5}}, None), ({"o": {"_sd_alg": "x"}}, None), ({"o": {1: "x", "1": "y"}}, None),
+                              ({"n": 1}, {"iss": "y", "_sd_alg": "md5"}), ({"o": {"a": 1, "...": 2}}, None),           # not the first key
+                              ({"a": ({"_sd": 1},)}, None), ({"n": 1}, {"a": (1, {"...": "z"})})):                     # inside a tuple
+            with self.assertRaises(ValueError, msg=(claims, plain)):
+                sdjwt.issue(claims, self.i, plain_claims=plain)
+        t = sdjwt.issue({"n": 1, "o": {"a": [1, "x", {"b": None}]}, "nome": "Zoë"}, self.i, plain_claims={"iss": "y", "iat": 5})   # control
+        v = sdjwt.verify(t, self.pk, now=1000)
+        self.assertTrue(v["verified"]); self.assertEqual(v["disclosed_claims"]["o"], {"a": [1, "x", {"b": None}]})
+        for plain in ({"exp": "x"}, {"nbf": True}):                                                         # what a value means: not checked by issue()
+            r = sdjwt.verify(sdjwt.issue({"n": 1}, self.i, plain_claims=plain), self.pk, now=1000)
+            self.assertFalse(r["verified"]); self.assertIn("is not a finite number", r["error"])
+        # P4: a non-numeric exp in a Disclosure that is NOT presented is not in the processed payload: the token verifies
+        t = sdjwt.issue({"n": 1, "exp": "x"}, self.i)
+        self.assertTrue(sdjwt.verify(sdjwt.present(t, ["n"]), self.pk, now=1000)["verified"])
+        self.assertFalse(sdjwt.verify(t, self.pk, now=1000)["verified"])                  # presented: rejected
+        for big in (b"1e400", b"-1e400"):                                                # parses to +-inf: never a valid time
+            b = lambda x: base64.urlsafe_b64encode(x).rstrip(b"=").decode()
+            h, p = b(b'{"alg":"EdDSA"}'), b(b'{"iss":"y","exp":' + big + b'}')
+            tok = f"{h}.{p}.{b(base64.b64decode(self.i.sign((h + '.' + p).encode())))}~"
+            r = sdjwt.verify(tok, self.pk, now=1000)
+            self.assertFalse(r["verified"]); self.assertIn("exp is not a finite number", r["error"])
+        with self.assertRaises(ValueError) as cm:                                       # P5: the rule for _sd_alg is §4.1.1
+            sdjwt.issue({"_sd_alg": 1}, self.i)
+        self.assertIn("§4.1.1", str(cm.exception))
+
+    def test_salt_message(self):                                                                           # I11, N4
+        b = lambda x: base64.urlsafe_b64encode(x).rstrip(b"=").decode()
+        d = b(json.dumps([5, "n", 1]).encode()); h = b(b'{"alg":"EdDSA"}'); p = b(json.dumps({"_sd": [sdjwt._digest(d)]}).encode())
+        s = b(base64.b64decode(self.i.sign((h + "." + p).encode())))
+        r = sdjwt.verify(f"{h}.{p}.{s}~{d}~", self.pk, now=1000)
+        self.assertFalse(r["verified"]); self.assertIn("salt is not a string", r["error"])
 
 
 if __name__ == "__main__":

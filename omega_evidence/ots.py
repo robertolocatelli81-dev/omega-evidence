@@ -104,14 +104,21 @@ def stamp_pack(pack_path: str, calendars: Optional[List[str]] = None,
 
 
 def verify(sidecar_or_pack_path: str) -> Dict[str, Any]:
-    """Report the anchoring status. Uses the `opentimestamps` package for real
-    Bitcoin verification when installed; otherwise returns the recorded pending
-    status (never fabricates a confirmation)."""
+    """Report the anchoring status recorded in the sidecar. `confirmed` is always False
+    here: nothing is verified against Bitcoin in this function. No sidecar is "absent". Without the
+    `opentimestamps` package the status is "pending-unverified"; with it, "library-present"
+    (confirming is left to that package's verifier). A sidecar that cannot be read or
+    parsed is "malformed". Never fabricates a confirmation."""
     p = str(sidecar_or_pack_path)
     side_path = Path(p) if p.endswith(".ots.json") else _ots_sidecar(p)
     if not side_path.exists():
         return {"status": "absent", "confirmed": False, "detail": "no .ots.json sidecar"}
-    side = json.loads(side_path.read_text(encoding="utf-8"))
+    try:
+        side = json.loads(side_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as e:   # audit V2 #7 (30/09/2026): a status, never a traceback
+        return {"status": "malformed", "confirmed": False, "detail": f"sidecar could not be read or parsed as JSON: {type(e).__name__}"}
+    if not isinstance(side, dict) or not isinstance(side.get("status", "?"), str):   # NEMESIS V2 P3: status must be text
+        return {"status": "malformed", "confirmed": False, "detail": "sidecar is not a JSON object with a string status"}
     try:
         import opentimestamps  # type: ignore  # noqa: F401
         have_lib = True

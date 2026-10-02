@@ -36,6 +36,8 @@ the predicateType is OMEGA's own. Signature is Ed25519 (EdDSA) via signing.py.
 from __future__ import annotations
 
 import base64
+import binascii
+import re
 import json
 from typing import Any, Dict, Optional
 
@@ -52,7 +54,21 @@ def _b64(data: bytes) -> str:
 
 
 def _unb64(s: str) -> bytes:
-    return base64.standard_b64decode(s.encode("ascii"))
+    """DSSE v1.0.0: «Either standard or URL-safe base64 encodings are allowed. Signers may use either, and verifiers
+    MUST accept either.» One alphabet per string, padding only at the end, length a multiple of 4; no whitespace or
+    stray characters (audit V2 #1/#2). Checked here, not left to base64.b64decode(validate=True), which tolerates
+    excess padding on Python 3.9/3.11 but not on 3.13 (NEMESIS V2 P2, 01/10/2026). Raises ValueError otherwise."""
+    if not isinstance(s, str) or len(s) % 4 or not (_STD.fullmatch(s) or _URL.fullmatch(s)):
+        raise ValueError("not base64 (one alphabet, padding only at the end, length a multiple of 4)")
+    return base64.b64decode(s.encode("ascii"), altchars=b"-_" if ("-" in s or "_" in s) else None, validate=True)
+
+
+def _no_constant(c):
+    raise ValueError(f"non-standard JSON constant {c}")
+
+
+_STD = re.compile(r"[A-Za-z0-9+/]*={0,2}")
+_URL = re.compile(r"[A-Za-z0-9_-]*={0,2}")
 
 
 def pae(payload_type: str, payload: bytes) -> bytes:
@@ -99,17 +115,46 @@ def from_dsse(envelope: Dict[str, Any],
     Ed25519 signature over PAE. If public_key_b64 is given it is required to match;
     otherwise the envelope's embedded publicKeyB64 is used (verifies integrity, not
     identity — trust the key via the OMEGA trust registry separately)."""
-    payload_type = envelope.get("payloadType", "")
-    payload = _unb64(envelope["payload"])
+    def _fail(why):   # a malformed envelope is a verdict, never a traceback (audit V2 #5, 30/09/2026)
+        return {"verified": False, "error": why, "payload_type": None, "statement": None, "pack": None}
+    if not isinstance(envelope, dict):
+        return _fail("envelope is not a JSON object")
+    if "payloadType" not in envelope:   # envelope.md: payload and payloadType «are REQUIRED and MUST be set, even if empty» (NEMESIS V2 Q5)
+        return _fail("payloadType missing")
+    payload_type = envelope["payloadType"]
+    if "signatures" not in envelope:    # envelope.md: «signatures» is REQUIRED too
+        return _fail("signatures missing")
+    sigs = envelope["signatures"]
+    if not isinstance(payload_type, str) or not isinstance(sigs, list):
+        return _fail("payloadType must be a string and signatures a list")
+    if payload_type != PAYLOAD_TYPE:    # protocol.md: «Reject if PAYLOAD_TYPE is not a supported type»; only in-toto is read here
+        return _fail(f"payloadType not supported (only {PAYLOAD_TYPE})")
+    try:
+        payload = _unb64(envelope["payload"])
+    except (KeyError, ValueError, binascii.Error) as e:
+        return _fail(f"payload missing or not base64: {type(e).__name__}")
     signed = pae(payload_type, payload)
     verified = False
-    for s in envelope.get("signatures", []):
+    for s in sigs:
+        if not isinstance(s, dict):
+            continue
         pk = public_key_b64 or s.get("publicKeyB64", "")
         if public_key_b64 and s.get("publicKeyB64") and s["publicKeyB64"] != public_key_b64:
             continue
-        if pk and verify_signature(pk, s.get("sig", ""), signed):
+        try:
+            raw_sig = _unb64(s.get("sig", ""))
+        except (ValueError, binascii.Error):
+            continue
+        if pk and isinstance(pk, str) and verify_signature(pk, _b64(raw_sig), signed):
             verified = True
             break
-    statement = json.loads(payload.decode("utf-8"))
+    try:
+        statement = json.loads(payload.decode("utf-8"), parse_constant=_no_constant)   # NaN/Infinity are not JSON (NEMESIS V2 Q4)
+    except (ValueError, RecursionError) as e:
+        # DSSE protocol.md: «Parse SERIALIZED_BODY according to PAYLOAD_TYPE. Reject if the parsing fails.» — a right
+        # signature over an unparsable body is still a reject (NEMESIS V2 P1, 01/10/2026)
+        return dict(_fail(f"payload could not be parsed as UTF-8 JSON: {type(e).__name__}"), payload_type=payload_type)
+    if not isinstance(statement, dict):
+        return dict(_fail("statement is not a JSON object"), payload_type=payload_type)
     return {"verified": verified, "payload_type": payload_type,
             "statement": statement, "pack": statement.get("predicate")}
