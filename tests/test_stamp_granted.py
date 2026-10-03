@@ -107,6 +107,13 @@ class TestStampOnlyGrantedTokenForThisDigest(unittest.TestCase):
             return cls._reply(cls._query(hashlib.sha256(b"other").hexdigest()))
         if cls.mode == "rejection":                          # policy the TSA does not serve -> status rejection
             return cls._reply(cls._query(hashlib.sha256(b"x").hexdigest(), "-tspolicy", "1.9.9.9"))
+        if cls.mode == "rejection-carrying-a-token":        # hostile: status rejection, a valid token for THIS digest inside
+            r = cls._reply(q)
+            i = r.find(b"\x02\x01\x00")                      # the first INTEGER 0 is the PKIStatus (granted)
+            return r[:i] + b"\x02\x01\x02" + r[i + 3:]
+        if cls.mode == "tampered-signature":                # the genuine token for this digest, last signature byte flipped
+            r = cls._reply(q)
+            return r[:-1] + bytes([r[-1] ^ 0x01])
         return b"<html><body>503 Service Unavailable</body></html>"
 
     def _stamp(self, mode):
@@ -122,7 +129,9 @@ class TestStampOnlyGrantedTokenForThisDigest(unittest.TestCase):
         self.assertIs(other["verified"], False, other)     # the same genuine token, presented for another digest
 
     def test_anything_else_is_not_anchored(self):
-        for mode in ("other-digest", "rejection", "html"):
+        # a token with a broken CMS signature is NOT refused here: proving the signature needs the TSA's trust anchor,
+        # which is the verifier's job (stated limit, 2026-10-03)
+        for mode in ("other-digest", "rejection", "html", "rejection-carrying-a-token"):
             with self.subTest(mode=mode):
                 r = self._stamp(mode)
                 self.assertIs(r["anchored"], False, r)
