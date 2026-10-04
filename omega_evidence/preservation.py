@@ -201,8 +201,10 @@ def verify_evidence_record(record: Dict[str, Any],
     Merkle root, and every renewal binding across algorithm changes. Optionally
     bind to the real packs. An RFC 3161 token is verified with openssl against `tsa_ca_file`
     (the TSA's trusted roots) and is PASS or FAIL; without openssl or without `tsa_ca_file` it is
-    SKIP, not verified (timestamp.verify returns verified: None, never a green; the layer's note says whether
-    a token is there at all). A pack of `pack_paths` that cannot be read as an evidence pack is a FAIL of
+    SKIP, not verified (timestamp.verify returns verified: None, never a green). An entry that declares
+    `time_source: rfc3161` without a token (`tsr_b64` missing, empty or not a string) is a FAIL, with or
+    without `tsa_ca_file`: the claim of trusted time has no proof to verify, now or later (RFC 4998 §4.1).
+    A pack of `pack_paths` that cannot be read as an evidence pack is a FAIL of
     `data-objects-bound`, not of the record. An
     `asserted` time is reported as NOT trusted-time. A malformed record (missing
     or unsupported hash_alg, wrong types) is `valid: false` with a FAIL layer, never
@@ -272,9 +274,18 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
     for i, a in enumerate(ats):
         ts = a.get("timestamp", {})
         if ts.get("time_source") == "rfc3161":
+            tok = ts.get("tsr_b64")
+            if not isinstance(tok, str) or not tok:
+                # a declared RFC 3161 time without its token is a malformed entry, not an unverified one: the claim can
+                # never be verified, with or without a trust anchor (RFC 4998 §4.1: timeStamp is the one field of
+                # ArchiveTimeStamp that is not OPTIONAL; the producer writes it only from a granted reply). Until 0.10.0
+                # it was SKIP with valid: true without tsa_ca_file and FAIL with it (audit V2 decision, 04/10/2026).
+                add(f"time[{i}]-rfc3161", False,
+                    "time_source rfc3161 declared but no token recorded (tsr_b64 missing, empty or not a string)")
+                continue
             from .timestamp import verify as ts_verify
             covered = a.get("merkle_root") or a.get("prev_binding") or ""
-            r = ts_verify(ts.get("tsr_b64", ""), covered, ca_file=tsa_ca_file)
+            r = ts_verify(tok, covered, ca_file=tsa_ca_file)
             # timestamp.verify's contract: verified None = recorded, NOT verified (no openssl / no trust anchor);
             # True / False = verified. Until 0.10.0 this read a "status" key that verify() never returns, so every
             # record with an RFC 3161 token was FAIL (audit V2 final round, 02/10/2026).

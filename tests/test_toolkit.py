@@ -3089,6 +3089,39 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         if shutil.which("openssl"):                                          # real call: ca_file not found -> verified False
             self.assertEqual((layer(r)["status"], r["valid"]), ("FAIL", False))
 
+    def test_rfc3161_declared_without_token_is_a_fail(self):   # audit V2 decision (04/10/2026)
+        # time_source "rfc3161" is a claim of trusted time; its proof is the token (RFC 4998 §4.1: timeStamp is the one
+        # field of ArchiveTimeStamp that is not OPTIONAL). An entry that declares it without a token is malformed, FAIL
+        # whether or not a trust anchor is held and whether or not openssl is there — until 0.10.0 it was SKIP with
+        # valid: true without a trust anchor and FAIL with one: the same record, two verdicts.
+        from omega_evidence import preservation as P
+        d = tempfile.mkdtemp(); pp = os.path.join(d, "r.json")
+        pack.write_pack(pp, pack.build_pack("k", {"a": 1}, "does NOT prove x"))
+        rec = P.build_evidence_record([pp])
+        ca = os.path.join(d, "ca.pem"); Path(ca).write_text("-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n")
+
+        def with_token(tok):
+            r = json.loads(json.dumps(rec)); ts = {"time_source": "rfc3161", "tsa": "test-tsa", "tsr_b64": tok}
+            if tok is None:
+                ts.pop("tsr_b64")
+            r["archive_timestamps"][0]["timestamp"] = ts
+            r["record_sha3"] = P._digest("sha3_256", canonical.canonical_json({k: v for k, v in r.items() if k != "record_sha3"}))
+            return r
+        time_layers = lambda r: [x for x in r["layers"] if x["layer"].startswith("time[0]")]
+        control = P.verify_evidence_record(with_token("AAAA"))                 # control: a token, no trust anchor -> SKIP, valid
+        self.assertEqual((time_layers(control)[0]["status"], control["valid"]), ("SKIP", True))
+        for tok in (None, "", 5, [], {}):
+            for cafile in (None, ca):
+                for which in ("/usr/bin/openssl", None):
+                    with unittest.mock.patch("omega_evidence.timestamp.shutil.which", return_value=which):
+                        r = P.verify_evidence_record(with_token(tok), tsa_ca_file=cafile)
+                    tl = time_layers(r)
+                    self.assertEqual(len(tl), 1, (tok, cafile, which))                 # one verdict for the entry, not two
+                    self.assertEqual((tl[0]["status"], r["valid"]), ("FAIL", False), (tok, cafile, which))
+                    self.assertIn("no token recorded", tl[0]["detail"]); self.assertIn("rfc3161", tl[0]["detail"])
+        others = [x for x in P.verify_evidence_record(with_token(None))["layers"] if not x["layer"].startswith("time[")]
+        self.assertTrue(others and all(x["status"] == "PASS" for x in others))   # only the time layer fails: the record is otherwise intact
+
     def test_a_bad_pack_is_not_a_malformed_record(self):   # NEMESIS V2 fine, G2 (02/10/2026)
         from omega_evidence import preservation as P
         d = tempfile.mkdtemp(); pp = os.path.join(d, "r.json")
