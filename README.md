@@ -236,7 +236,7 @@ A check that could not run is not a finding about the pack. The **CLI** reports 
 |---|---|---|
 | `PASS` | 0 | every layer that ran passed |
 | `FAIL` | 1 | at least one layer was checked and is adverse |
-| `NOT_ASSESSED` | 77 | nothing adverse was found, and a required check could not run on this host — or the verifier itself failed (layer `internal`, see *Unreleased* below) |
+| `NOT_ASSESSED` | 77 | nothing adverse was found, and a required check could not run on this host — or the verifier itself failed (layer `internal`, see *0.9.1* below) |
 
 This holds whether the check was **required or optional**. Measured 24/09/2026: with the PQ layer optional and a
 co-signature present but unverifiable here, a runtime without the backend used to answer `PASS` / exit 0 on the very
@@ -344,6 +344,53 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 `drop_pq=True`. Without `cryptography` ≥ 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0; the backend is
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
+
+### 0.11.0 — malformed inputs rejected as the specs say, and an RFC 3161 mark only for a token for this digest (4 October 2026)
+
+An audit of the verifiers (30 September 2026) and its review rounds. Each change of behaviour in the Python package has a
+test that fails on the code before it; the new note of the Go, Java and Node verifiers was measured on a bench, not by a test.
+**What changes for a user of 0.10.0** is listed at the end of the entry.
+
+- **DSSE (`interop/dsse.py`)**: base64 as DSSE v1.0.0 asks verifiers to accept it — standard or URL-safe, one alphabet per
+  string, padding only at the end, length a multiple of 4, no whitespace — with the same verdict on Python 3.9, 3.11 and
+  3.13. `payload`, `payloadType` and `signatures` are required; a `payloadType` other than `application/vnd.in-toto+json`
+  is rejected; a body that cannot be parsed as UTF-8 JSON is rejected even under a valid signature; NaN and Infinity are
+  not JSON. A malformed envelope is `verified: false`, never a traceback.
+- **SD-JWT (`interop/sdjwt.py`)**: `verify()` applies RFC 9901 §7.1 and rejects the whole token when a step fails (an alg
+  other than EdDSA, an `_sd_alg` other than `sha-256`, a Disclosure of the wrong shape or not referenced, a repeated
+  digest, a claim name that is not a string, is `_sd` or `...`, or is already present, an `exp` or `nbf` that is not a
+  finite number or not satisfied), and the format rules of §4.2.1 and §4.2.4.1; BASE64URL is read strictly (RFC 7515).
+  `issue()` refuses what `verify()` would reject: keys that are not strings or are `_sd`, `...` or `_sd_alg` anywhere, a
+  disclosed name already in clear, NaN or Infinity.
+- **Preservation records (`preservation.py`)**: an RFC 3161 token is checked as `timestamp.verify` reports it — PASS or
+  FAIL against `tsa_ca_file` (new, optional), SKIP when it is recorded but not verified. Up to 0.10.0 the layer read a
+  key that `verify()` never returns, so a record with an RFC 3161 token was always FAIL. **Verdict change:** an archive
+  timestamp that declares `time_source: rfc3161` with `tsr_b64` missing, empty or not a string is a FAIL, not a SKIP: the
+  token is what makes the claim of trusted time verifiable (RFC 4998 §4.1 makes `timeStamp` the one field of an
+  ArchiveTimeStamp that is not OPTIONAL). A malformed record is `valid: false`, never an exception.
+- **`timestamp.stamp` records `anchored: true` only for a reply carrying a token whose imprint is the requested digest.**
+  Any HTTP body — an error page, a rejection, a genuine token for another digest — was recorded as anchored with its bytes
+  as `tsr_b64`. The reply is read with `openssl ts -reply -text` (one parser, shared with `verify`). A token whose CMS
+  signature is broken is still anchored at stamp time and refused by `verify` with the TSA roots: proving the signature
+  needs the trust anchor, which is the verifier's job. `tests/test_stamp_granted.py` (a local TSA built with openssl behind
+  a local HTTP server) now runs in CI.
+- **`timestamp.verify` notes say what happened**: «no token recorded» when `tsr_b64` is missing, empty or not a string;
+  «token recorded, not decoded or verified» without a trust anchor (it said «token decoded» before any decoding). The Go,
+  Java and Node verifiers said «RFC 3161 token present and bound to the pack» for a sidecar with no token; they now say
+  «no RFC 3161 token recorded», as Python does (status SKIP in the four, unchanged).
+- **`ots.py`**: a sidecar that cannot be read or parsed is status `malformed`; the docstring no longer says the
+  opentimestamps package verifies on Bitcoin when installed, which the code does not do.
+- `timestamp`, `chip_registry` and `interop.aat` close every file and HTTP response they open.
+
+**What changes for a user of 0.10.0.** An archive timestamp declaring `rfc3161` without a token now fails
+`verify_evidence_record`; a preservation record with a genuine token is no longer always FAIL; DSSE envelopes and SD-JWTs
+that 0.10.0 accepted against the specifications are rejected; a digest spelled with colons (`aa:bb:…`) is no longer
+anchored by `stamp()` (`verify` already treated it as another digest).
+
+Measured before the tag: `tests/test_toolkit.py` 159 tests and `tests/test_stamp_granted.py` 6 on Python 3.9.25, 3.11.2
+and 3.13.15, each with and without `cryptography`; `tests/fuzz_toolkit.py` 3000 iterations, 0 violations;
+`verifiers/differential_oracle.py` 0 disagreements of 193 here (Node 22, Go 1.24, Java 17: 9 cases not assessable on
+this host); the CI run on the tagged commit measures Node 24, Go 1.27 and Java 27.
 
 ### 0.10.0 — two limits that were not declared, and a silent downgrade (28–29 September 2026)
 
@@ -595,7 +642,7 @@ surrogate / float refusal — `verifiers/lax_python_ablation.sh`, re-measured 21
 Declared, not aligned: Go's `flag` stops at the first positional, so `oeverify pack.json -ledger L` is a usage error
 in Go and a verdict in Python, Java and Node (put flags first); in 0.8.3–0.9.0 Node and Java refused an input over 256 MiB, Go
 bounded only a ledger line (64 MiB; its pack and sidecar reads were unbounded) and Python had no bound — a valid file beyond
-those sizes verified in some of the four only (one bound in the four since the *Unreleased* change below). Not measured:
+those sizes verified in some of the four only (one bound in the four since 0.9.1, below). Not measured:
 Ed25519 decoding of non-canonical or small-order points in a sidecar (the four backends — pure Python, OpenSSL, Go's
 `edwards25519`, SunEC — have their own rules; no such vectors are in the oracle yet). Go's `(?i)` in the scope regexes is Unicode simple folding (the other three fold
 ASCII only): harmless while no keyword contains `k` or `s` (KELVIN SIGN, LONG S fold to them) — a caveat for whoever adds a word.
