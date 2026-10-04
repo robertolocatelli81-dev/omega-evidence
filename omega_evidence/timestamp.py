@@ -32,6 +32,30 @@ from urllib.parse import urlparse
 from typing import Dict, Optional
 
 
+def _reply_facts(exe: str, tsr_path: str, timeout: int):
+    """(granted, imprint_hex) read from an RFC 3161 reply with `openssl ts -reply -text`: what the reply CLAIMS, not
+    proof that a real TSA issued it (that needs `ts -verify` with a trust anchor)."""
+    r = subprocess.run(  # nosec B603 - decode only, fixed args, no shell
+        [exe, "ts", "-reply", "-in", tsr_path, "-text"], capture_output=True, text=True, timeout=timeout)
+    text = r.stdout or ""
+    granted = "Status: Granted" in text or "Granted." in text
+    grab, hexbytes = False, []
+    for ln in text.splitlines():
+        if "Message data:" in ln:
+            grab = True
+            continue
+        if grab:
+            if ln.strip() and ln[0] not in " \t":
+                break
+            if " - " not in ln:
+                continue
+            hexpart = ln.split(" - ", 1)[1].split("   ")[0]
+            for tok in hexpart.replace("-", " ").split():
+                if len(tok) == 2 and all(c in "0123456789abcdefABCDEF" for c in tok):
+                    hexbytes.append(tok.lower())
+    return granted, "".join(hexbytes)
+
+
 def stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
     """Request an RFC 3161 token for digest_hex from a TSA. Returns
     {anchored, tsa, tsr_b64} or {anchored: False, note}."""
@@ -52,6 +76,15 @@ def stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
         http = urllib.request.Request(tsa_url, data=req, method="POST",
                                       headers={"Content-Type": "application/timestamp-query"})
         resp = urllib.request.urlopen(http, timeout=timeout).read()  # nosec B310 - scheme checked
+        tsr = os.path.join(d, "t.tsr")
+        with open(tsr, "wb") as f:
+            f.write(resp)
+        # anchored only on a reply carrying a token whose imprint is THIS digest (2026-10-03: any HTTP body — an error
+        # page, a rejection, a token for another digest — was recorded as anchored: True). A token is present only on a
+        # granted status: openssl refuses to parse a non-granted reply that carries one ("token present").
+        _, imprint_hex = _reply_facts(exe, tsr, timeout)
+        if imprint_hex != digest_hex.lower():
+            return {"anchored": False, "tsa": tsa_url, "note": "TSA reply carries no token for this digest"}
         return {"anchored": True, "tsa": tsa_url, "tsr_b64": base64.b64encode(resp).decode()}
     except Exception as e:  # noqa: BLE001
         return {"anchored": False, "note": f"{type(e).__name__}: {str(e)[:80]}"}
@@ -201,25 +234,8 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
              "-CAfile", ca_file], capture_output=True, text=True, timeout=timeout)
         vtext = (vr.stdout or "") + (vr.stderr or "")
         crypto_ok = vr.returncode == 0 and "Verification: OK" in vtext
-        r = subprocess.run(  # nosec B603 - decode only, for reporting the imprint
-            [exe, "ts", "-reply", "-in", tsr, "-text"], capture_output=True, text=True, timeout=timeout)
-        text = r.stdout or ""
-        granted = "Status: Granted" in text or "Granted." in text
-        grab, hexbytes = False, []
-        for ln in text.splitlines():
-            if "Message data:" in ln:
-                grab = True
-                continue
-            if grab:
-                if ln.strip() and ln[0] not in " \t":
-                    break
-                if " - " not in ln:
-                    continue
-                hexpart = ln.split(" - ", 1)[1].split("   ")[0]
-                for tok in hexpart.replace("-", " ").split():
-                    if len(tok) == 2 and all(c in "0123456789abcdefABCDEF" for c in tok):
-                        hexbytes.append(tok.lower())
-        imprint_ok = "".join(hexbytes) == expected_digest_hex.lower()
+        granted, imprint_hex = _reply_facts(exe, tsr, timeout)
+        imprint_ok = imprint_hex == expected_digest_hex.lower()
         return {"verified": bool(crypto_ok and granted and imprint_ok),
                 "crypto_verified": crypto_ok, "granted": granted, "imprint_ok": imprint_ok}
     except Exception as e:  # noqa: BLE001
