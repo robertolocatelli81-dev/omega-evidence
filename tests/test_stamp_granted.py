@@ -49,7 +49,7 @@ def _run(*a):
     subprocess.run(list(a), check=True, capture_output=True)
 
 
-@unittest.skipUnless(EXE, "openssl absent: stamp() returns anchored False by contract (tested elsewhere)")
+@unittest.skipUnless(EXE, "openssl absent: the local TSA cannot be built, so stamp() is not measured")
 class TestStampOnlyGrantedTokenForThisDigest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
