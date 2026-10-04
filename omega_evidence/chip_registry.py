@@ -124,7 +124,8 @@ class ChipRegistry:
         if not v["valid"] or "trusted-signed" not in auth.get("detail", ""):
             return {"applied": False, "reason": "update is not trusted-signed",
                     "authenticity": auth.get("detail", ""), "added": [], "rejected": []}
-        pack = json.loads(open(pack_path, encoding="utf-8").read())
+        with open(pack_path, encoding="utf-8") as fp:
+            pack = json.loads(fp.read())
         if pack.get("kind") != UPDATE_KIND:
             return {"applied": False, "reason": f"wrong kind: {pack.get('kind')}",
                     "added": [], "rejected": []}
@@ -151,7 +152,8 @@ class ChipRegistry:
     def _signer_of(pack_path: str) -> str:
         side = pack_path[:-5] + ".sig.json" if pack_path.endswith(".json") else pack_path + ".sig.json"
         try:
-            return json.loads(open(side, encoding="utf-8").read()).get("signer_id", "")
+            with open(side, encoding="utf-8") as fs:
+                return json.loads(fs.read()).get("signer_id", "")
         except (OSError, ValueError):
             return ""
 

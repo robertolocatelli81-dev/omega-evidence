@@ -72,10 +72,12 @@ def stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
             capture_output=True, timeout=timeout)
         if r.returncode != 0 or not os.path.exists(tsq):
             return {"anchored": False, "note": "openssl ts-query failed"}
-        req = open(tsq, "rb").read()
+        with open(tsq, "rb") as fq:
+            req = fq.read()
         http = urllib.request.Request(tsa_url, data=req, method="POST",
                                       headers={"Content-Type": "application/timestamp-query"})
-        resp = urllib.request.urlopen(http, timeout=timeout).read()  # nosec B310 - scheme checked
+        with urllib.request.urlopen(http, timeout=timeout) as rh:  # nosec B310 - scheme checked
+            resp = rh.read()
         tsr = os.path.join(d, "t.tsr")
         with open(tsr, "wb") as f:
             f.write(resp)
@@ -108,7 +110,8 @@ def extract_validation_material(tsr_b64: str, fetch_crl: bool = False,
     d = tempfile.mkdtemp()
     try:
         tsr = os.path.join(d, "t.tsr")
-        open(tsr, "wb").write(base64.b64decode(tsr_b64))
+        with open(tsr, "wb") as fw:
+            fw.write(base64.b64decode(tsr_b64))
         tok = os.path.join(d, "tok.der")
         r = subprocess.run(  # nosec B603 - extract token (NOT -token_in: input is a response)
             [exe, "ts", "-reply", "-in", tsr, "-token_out", "-out", tok],
@@ -154,7 +157,8 @@ def _split_pem_certs(pem_text: str):
 
 def _pem_cert_to_der_b64(exe: str, pem: str, d: str) -> Optional[str]:
     f = os.path.join(d, "c.pem")
-    open(f, "w").write(pem)
+    with open(f, "w") as fw:
+        fw.write(pem)
     r = subprocess.run(  # nosec B603
         [exe, "x509", "-in", f, "-outform", "DER"], capture_output=True, timeout=15)
     return base64.b64encode(r.stdout).decode() if r.returncode == 0 and r.stdout else None
@@ -162,7 +166,8 @@ def _pem_cert_to_der_b64(exe: str, pem: str, d: str) -> Optional[str]:
 
 def _cert_field(exe: str, pem: str, d: str, flag: str) -> str:
     f = os.path.join(d, "c.pem")
-    open(f, "w").write(pem)
+    with open(f, "w") as fw:
+        fw.write(pem)
     r = subprocess.run(  # nosec B603
         [exe, "x509", "-in", f, "-noout", flag], capture_output=True, text=True, timeout=15)
     return (r.stdout or "").strip()
@@ -171,7 +176,8 @@ def _cert_field(exe: str, pem: str, d: str, flag: str) -> str:
 def _cert_crl_dps(exe: str, pem: str, d: str):
     """URIs listed under 'CRL Distribution Points' only (not the AIA/OCSP URIs)."""
     f = os.path.join(d, "c.pem")
-    open(f, "w").write(pem)
+    with open(f, "w") as fw:
+        fw.write(pem)
     txt = subprocess.run(  # nosec B603
         [exe, "x509", "-in", f, "-noout", "-text"], capture_output=True, text=True, timeout=15).stdout or ""
     dps, grab = [], False
@@ -197,7 +203,8 @@ def _fetch_crls(urls, timeout: int):
         if urlparse(u).scheme not in ("http", "https"):
             continue
         try:
-            data = urllib.request.urlopen(u, timeout=timeout).read()  # nosec B310 - scheme checked
+            with urllib.request.urlopen(u, timeout=timeout) as rh:  # nosec B310 - scheme checked
+                data = rh.read()
             out.append({"url": u, "crl_b64": base64.b64encode(data).decode(), "bytes": len(data)})
         except Exception as e:  # noqa: BLE001 - best-effort per CDP
             out.append({"url": u, "error": f"{type(e).__name__}: {str(e)[:60]}"})

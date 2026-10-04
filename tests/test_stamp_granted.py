@@ -40,6 +40,11 @@ basicConstraints = CA:FALSE
 """
 
 
+def _read(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
 def _run(*a):
     subprocess.run(list(a), check=True, capture_output=True)
 
@@ -61,7 +66,7 @@ class TestStampOnlyGrantedTokenForThisDigest(unittest.TestCase):
         _run(EXE, "x509", "-req", "-in", j("tsa.csr"), "-CA", j("ca.crt"), "-CAkey", j("ca.key"), "-CAcreateserial",
              "-out", j("tsa.crt"), "-days", "2", "-extfile", j("tsa.cnf"), "-extensions", "v3_tsa")
         with open(j("chain.pem"), "w") as f:
-            f.write(open(j("ca.crt")).read() + open(j("tsa.crt")).read())
+            f.write((_read(j("ca.crt")) + _read(j("tsa.crt"))).decode("ascii"))
         cls.mode = "honest"
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -92,13 +97,13 @@ class TestStampOnlyGrantedTokenForThisDigest(unittest.TestCase):
         with open(q, "wb") as f:
             f.write(query_bytes)
         _run(EXE, "ts", "-reply", "-queryfile", q, "-config", os.path.join(cls.d, "tsa.cnf"), "-section", "t1", "-out", r)
-        return open(r, "rb").read()
+        return _read(r)
 
     @classmethod
     def _query(cls, digest_hex, *extra):
         q = os.path.join(cls.d, "other.tsq")
         _run(EXE, "ts", "-query", "-digest", digest_hex, "-sha256", "-cert", *extra, "-out", q)
-        return open(q, "rb").read()
+        return _read(q)
 
     @classmethod
     def _answer(cls, q):

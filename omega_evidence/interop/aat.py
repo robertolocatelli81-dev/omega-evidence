@@ -1676,7 +1676,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(to_csv(records), end=""); return 0
     try:
         keys = dict(_load_key_arg(k) for k in a.key)
-        pub = open(a.pubkey, "rb").read() if a.pubkey else None
+        pub = None
+        if a.pubkey:
+            with open(a.pubkey, "rb") as fk:
+                pub = fk.read()
     except (OSError, ValueError) as ex:
         print(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"})); return 2
     try:
