@@ -24,7 +24,7 @@ jobs:
           python -m pip install --no-deps .
           if [ "${{ matrix.cryptography }}" = "yes" ]; then python -m pip install cryptography; fi
       - name: Run tests
-        run: python tests/test_toolkit.py
+        run: python tests/test_toolkit.py && python tests/test_stamp_granted.py
 
   fuzz-smoke:
     # Short, deterministic (fixed seed): the same 3 000 mutations on every push, plus the six positive controls

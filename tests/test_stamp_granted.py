@@ -3,6 +3,7 @@
 """timestamp.stamp() records anchored: True ONLY for a granted RFC 3161 token whose imprint is the requested digest
 (2026-10-03: any HTTP body — an error page, a rejection, a token for another digest — was recorded as anchored: True).
 A local TSA built with openssl answers over a local HTTP server; nothing leaves the machine."""
+import base64
 import hashlib
 import http.server
 import os
@@ -111,14 +112,34 @@ class TestStampOnlyGrantedTokenForThisDigest(unittest.TestCase):
             r = cls._reply(q)
             i = r.find(b"\x02\x01\x00")                      # the first INTEGER 0 is the PKIStatus (granted)
             return r[:i] + b"\x02\x01\x02" + r[i + 3:]
+        if cls.mode == "granted-with-mods":                 # status 1: a token is legitimately present (RFC 3161 §2.4.2)
+            r = cls._reply(q)
+            i = r.find(b"\x02\x01\x00")
+            return r[:i] + b"\x02\x01\x01" + r[i + 3:]
         if cls.mode == "tampered-signature":                # the genuine token for this digest, last signature byte flipped
             r = cls._reply(q)
             return r[:-1] + bytes([r[-1] ^ 0x01])
         return b"<html><body>503 Service Unavailable</body></html>"
 
-    def _stamp(self, mode):
+    def _stamp(self, mode, digest_hex=None):
         type(self).mode = mode
-        return T.stamp(hashlib.sha256(b"x").hexdigest(), self.url, timeout=10)
+        return T.stamp(digest_hex or hashlib.sha256(b"x").hexdigest(), self.url, timeout=10)
+
+    def test_granted_with_modifications_is_anchored_and_verifies(self):      # status 1 carries a token too
+        r = self._stamp("granted-with-mods")
+        self.assertIs(r["anchored"], True, r)
+        v = T.verify(r["tsr_b64"], hashlib.sha256(b"x").hexdigest(), ca_file=os.path.join(self.d, "chain.pem"))
+        self.assertIs(v["verified"], True, v)
+
+    def test_digest_spelling_and_hexdump_ascii_column(self):
+        # an uppercase digest is the same digest; a digest whose bytes print as ' ab ' in the ASCII column of
+        # `openssl ts -reply -text` must not have that column read as hex (the imprint is read from the hex column only)
+        for dig in (hashlib.sha256(b"x").hexdigest().upper(), "20616220" * 8):
+            with self.subTest(digest=dig):
+                r = self._stamp("honest", dig)
+                self.assertIs(r["anchored"], True, r)
+                v = T.verify(r["tsr_b64"], dig, ca_file=os.path.join(self.d, "chain.pem"))
+                self.assertIs(v["verified"], True, v)
 
     def test_granted_token_for_this_digest_is_anchored_and_verifies(self):   # positive control
         r = self._stamp("honest")
@@ -128,9 +149,26 @@ class TestStampOnlyGrantedTokenForThisDigest(unittest.TestCase):
         other = T.verify(r["tsr_b64"], hashlib.sha256(b"other").hexdigest(), ca_file=os.path.join(self.d, "chain.pem"))
         self.assertIs(other["verified"], False, other)     # the same genuine token, presented for another digest
 
-    def test_anything_else_is_not_anchored(self):
+    def test_broken_signature_is_anchored_at_stamp_and_refused_by_verify(self):   # the stated limit, measured
         # a token with a broken CMS signature is NOT refused here: proving the signature needs the TSA's trust anchor,
         # which is the verifier's job (stated limit, 2026-10-03)
+        r = self._stamp("tampered-signature")
+        self.assertIs(r["anchored"], True, r)
+        v = T.verify(r["tsr_b64"], hashlib.sha256(b"x").hexdigest(), ca_file=os.path.join(self.d, "chain.pem"))
+        self.assertIs(v["verified"], False, v)
+        self.assertIs(v["crypto_verified"], False, v)
+
+    def test_verify_reports_the_reply_facts(self):
+        # the fields beside the verdict say WHY: a rejection is not granted, a token for another digest has imprint_ok False
+        ca = os.path.join(self.d, "chain.pem")
+        rej = base64.b64encode(self._reply(self._query(hashlib.sha256(b"x").hexdigest(), "-tspolicy", "1.9.9.9"))).decode()
+        v = T.verify(rej, hashlib.sha256(b"x").hexdigest(), ca_file=ca)
+        self.assertEqual((v["verified"], v["granted"], v["imprint_ok"]), (False, False, False), v)
+        other = base64.b64encode(self._reply(self._query(hashlib.sha256(b"other").hexdigest()))).decode()
+        v = T.verify(other, hashlib.sha256(b"x").hexdigest(), ca_file=ca)
+        self.assertEqual((v["verified"], v["granted"], v["imprint_ok"]), (False, True, False), v)
+
+    def test_anything_else_is_not_anchored(self):
         for mode in ("other-digest", "rejection", "html", "rejection-carrying-a-token"):
             with self.subTest(mode=mode):
                 r = self._stamp(mode)
