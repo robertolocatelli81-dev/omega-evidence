@@ -74,6 +74,7 @@ import io
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ..ledger import loads_bounded
 from ..canonical import _SAFE_INT          # ±(2^53-1): ONE integer bound for the whole package (0.10.0, PREREG 2)
 
 
@@ -1574,7 +1575,7 @@ def from_jsonl(text: str) -> List[Dict[str, Any]]:
         if line == "":
             continue
         try:
-            obj = json.loads(line, parse_constant=_no_constant, parse_float=_finite_float, object_pairs_hook=_no_dup_keys)
+            obj = loads_bounded(line, parse_constant=_no_constant, parse_float=_finite_float, object_pairs_hook=_no_dup_keys)
         except json.JSONDecodeError as ex:
             raise ValueError(f"JSONL line {n + 1}: {ex.msg}") from None
         except ValueError as ex:
@@ -1690,7 +1691,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.epochs:
         try:
             with open(a.epochs, encoding="utf-8") as f:
-                anchors = json.load(f, parse_constant=_no_constant)
+                anchors = loads_bounded(f.read(), parse_constant=_no_constant)
             if not isinstance(anchors, list):
                 raise ValueError("epochs file must be a JSON array")
         except (OSError, ValueError, RecursionError) as ex:

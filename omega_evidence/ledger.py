@@ -169,6 +169,18 @@ def _has_lone_surrogate(text: str) -> bool:
     return False
 
 
+def loads_bounded(text, **kw):
+    """json.loads with the nesting bound of loads_strict checked FIRST, by a linear pre-scan: refusing deep input must not
+    depend on RecursionError, whose depth varies with the Python version and, since 3.14, with the C stack of the host
+    (a 100000-deep SD-JWT payload raised on Python 3.13 and on 3.14 here, and parsed on the 3.14 of a CI runner).
+    Raises ValueError("json_too_deep: ...") beyond 512 levels; otherwise json.loads(text, **kw)."""
+    if isinstance(text, (bytes, bytearray)):
+        text = text.decode("utf-8")
+    if _nesting_depth(text) > _MAX_DEPTH:
+        raise ValueError(f"json_too_deep: nesting exceeds {_MAX_DEPTH}")
+    return json.loads(text, **kw)
+
+
 def loads_strict(text: str):
     """The family's acceptance profile (cryptovalid CONFORMANCE): no duplicate keys, no floats, integers within
     ±(2^53-1), nesting <= 512 by linear pre-scan, no NaN/Infinity, no lone UTF-16 surrogate escape. Same rule as the

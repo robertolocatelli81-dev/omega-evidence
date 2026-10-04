@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.11", "3.13"]
+        python-version: ["3.9", "3.11", "3.13", "3.14"]   # 3.14: the release build runs "3.x"; a verdict once depended on it (0.11.1)
         cryptography: ["yes", "no"]   # the toolkit runs without cryptography (pure-Python Ed25519); ML-DSA needs >= 50
     steps:
       - uses: actions/checkout@v4

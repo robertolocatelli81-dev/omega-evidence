@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .canonical import sha256_bytes
+from .ledger import loads_bounded
 
 DEFAULT_CALENDARS = [
     "https://a.pool.opentimestamps.org",
@@ -114,7 +115,7 @@ def verify(sidecar_or_pack_path: str) -> Dict[str, Any]:
     if not side_path.exists():
         return {"status": "absent", "confirmed": False, "detail": "no .ots.json sidecar"}
     try:
-        side = json.loads(side_path.read_text(encoding="utf-8"))
+        side = loads_bounded(side_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError) as e:   # audit V2 #7 (30/09/2026): a status, never a traceback
         return {"status": "malformed", "confirmed": False, "detail": f"sidecar could not be read or parsed as JSON: {type(e).__name__}"}
     if not isinstance(side, dict) or not isinstance(side.get("status", "?"), str):   # NEMESIS V2 P3: status must be text

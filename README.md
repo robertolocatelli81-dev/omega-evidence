@@ -345,6 +345,30 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
+### 0.11.1 — deep JSON is refused by a bound, not by the interpreter (4 October 2026)
+
+The release build of 0.11.0 ran its tests on the newest Python (3.14) and two failed. **An SD-JWT whose payload is valid
+JSON nested 100000 levels deep, correctly signed, verified as `verified: true` there**, while Python 3.9, 3.11 and 3.13
+refused it: the refusal rested on `RecursionError`, whose depth varies with the Python version and, since 3.14, with the C
+stack of the host (on this author's machine Python 3.14.8 still raised; on the CI runner it parsed). The DSSE reader was
+affected the same way (its verdict stayed a reject, its reason changed).
+
+- **One explicit bound, the one `loads_strict` already applied to packs: 512 levels, checked by a linear pre-scan before
+  parsing** (`ledger.loads_bounded`). It is now used wherever untrusted JSON decides a verdict: DSSE envelopes, SD-JWT
+  payloads, headers and Disclosures, OpenTimestamps sidecars, AAT JSONL and epoch files, `chip_registry` updates and
+  online discovery, and the packs bound by a preservation record.
+- Tests: 600 levels — which every Python parses — are refused in DSSE and SD-JWT; 500 levels still verify (control). On
+  0.11.0 the 600-level cases fail on all four Pythons (3.9, 3.11, 3.13, 3.14).
+- The bound is measured at its edge: 512 levels verify and 513 are refused, for arrays and for objects; brackets inside
+  strings and behind escapes are not nesting; 600 sibling arrays or objects are not depth.
+- SD-JWT: the walk that applies the Disclosures used a dict comprehension, which on Python 3.9 and 3.11 is a call of its
+  own (two frames per level): a payload of 498 to 512 nested objects, inside the bound, was refused there with
+  `RecursionError` and verified on 3.13 and 3.14. It is a loop now; 512 nested objects verify on all four.
+- CI runs the test matrix on Python 3.14 as well.
+
+Measured before the tag: `tests/test_toolkit.py` 161 tests and `tests/test_stamp_granted.py` 6 on Python 3.9.25, 3.11.2,
+3.13.15 and 3.14.8, each with and without `cryptography`.
+
 ### 0.11.0 — malformed inputs rejected as the specs say, and an RFC 3161 mark only for a token for this digest (4 October 2026)
 
 An audit of the verifiers (30 September 2026) and its review rounds. Each change of behaviour in the Python package has a

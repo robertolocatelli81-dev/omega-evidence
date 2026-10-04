@@ -54,6 +54,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .ledger import loads_bounded
 from .pack import build_pack, sign_pack, write_pack
 from .signing import Identity
 from .verifier import verify_pack
@@ -125,7 +126,7 @@ class ChipRegistry:
             return {"applied": False, "reason": "update is not trusted-signed",
                     "authenticity": auth.get("detail", ""), "added": [], "rejected": []}
         with open(pack_path, encoding="utf-8") as fp:
-            pack = json.loads(fp.read())
+            pack = loads_bounded(fp.read())
         if pack.get("kind") != UPDATE_KIND:
             return {"applied": False, "reason": f"wrong kind: {pack.get('kind')}",
                     "added": [], "rejected": []}
@@ -153,7 +154,7 @@ class ChipRegistry:
         side = pack_path[:-5] + ".sig.json" if pack_path.endswith(".json") else pack_path + ".sig.json"
         try:
             with open(side, encoding="utf-8") as fs:
-                return json.loads(fs.read()).get("signer_id", "")
+                return loads_bounded(fs.read()).get("signer_id", "")
         except (OSError, ValueError):
             return ""
 
@@ -182,7 +183,7 @@ class ChipRegistry:
         it is a lead a human reviews and, if real, issues a trusted-signed update
         for. Fail-closed on network error."""
         try:
-            data = json.loads(_http_get(url, timeout).decode("utf-8"))
+            data = loads_bounded(_http_get(url, timeout).decode("utf-8"))
         except Exception as e:   # noqa: BLE001 - fail-closed
             return {"discovered": [], "reason": f"fetch failed: {e}"}
         return self.ingest_candidates(data.get("candidates", []), source=url)

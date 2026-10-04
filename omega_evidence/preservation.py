@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .canonical import canonical_json
+from .ledger import loads_bounded
 
 _SUPPORTED_HASH = ("sha256", "sha512", "sha3_256", "sha3_512")
 RECORD_KIND = "omega_evidence_record"
@@ -92,7 +93,7 @@ def _merkle_root(leaf_hexes: List[str], alg: str) -> str:
 
 def _pack_sha3_of(pack_path: str) -> str:
     import json
-    d = json.loads(Path(pack_path).read_text(encoding="utf-8"))
+    d = loads_bounded(Path(pack_path).read_text(encoding="utf-8"))
     v = d.get("pack_sha3", "")
     if not v:
         raise ValueError(f"{pack_path}: not an evidence pack (no pack_sha3)")

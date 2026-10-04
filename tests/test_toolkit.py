@@ -2886,7 +2886,8 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         self.assertIsNone(r["pack"])
         self.assertIn("error", r)
         for body, why in ((b"ciao", "JSONDecodeError"), (b"\xff\xfe", "UnicodeDecodeError"),
-                          (b"[" * 100000 + b"]" * 100000, "RecursionError")):   # not JSON, not UTF-8, valid JSON nested too deep (M14)
+                          (b"[" * 100000 + b"]" * 100000, "nesting exceeds 512"),   # not JSON, not UTF-8, valid JSON nested too deep (M14)
+                          (b"[" * 600 + b"]" * 600, "nesting exceeds 512")):   # 600 levels parse on every Python: only the bound refuses
             e = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
                  "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
             r = dsse.from_dsse(e)
@@ -3237,10 +3238,34 @@ class TestSDJWTSection71Held(unittest.TestCase):
         self.assertEqual(self._v(self._tok(body, [c]))["processed_payload"]["a"], ["US"])                # N309: 3.d
 
     def test_deep_nesting_is_a_verdict(self):                                                             # N314
-        deep = b'{"a":' + b"[" * 100000 + b"]" * 100000 + b"}"
-        for t in (self._tok(deep, []), self._tok({}, [], header=b'{"alg":"EdDSA","x":' + b"[" * 100000 + b"]" * 100000 + b"}")):
-            r = self._v(t)
-            self.assertFalse(r["verified"])
+        # 04/10/2026: the refusal must not rest on RecursionError — a 100000-deep payload raised on Python 3.13 and parsed
+        # (verified: True) on the Python 3.14 of a CI runner. 600 levels parse on every Python: only the 512 bound refuses.
+        for n in (100000, 600):
+            deep = b'{"a":' + b"[" * n + b"]" * n + b"}"
+            for t in (self._tok(deep, []), self._tok({}, [], header=b'{"alg":"EdDSA","x":' + b"[" * n + b"]" * n + b"}")):
+                r = self._v(t)
+                self.assertFalse(r["verified"], n)
+        ok = b'{"a":' + b"[" * 500 + b"]" * 500 + b"}"                                                 # control: under the bound
+        self.assertTrue(self._v(self._tok(ok, []))["verified"])
+
+    def test_bound_is_512_levels_counted_outside_strings(self):
+        # The bound is "nesting <= 512": 512 levels verify, 513 are refused, for arrays AND objects (the pre-scan counts
+        # both brackets); brackets inside strings and behind escapes are not nesting (a legitimate payload with 2000 of
+        # them verifies); 600 sibling arrays are not depth either.
+        from omega_evidence.ledger import loads_bounded
+        for body, ok in ((b'{"a":' + b"[" * 511 + b"]" * 511 + b"}", True),            # 512 levels with the outer object
+                         (b'{"a":' + b"[" * 512 + b"]" * 512 + b"}", False),           # 513
+                         (b'{"a":' * 512 + b"1" + b"}" * 512, True),                   # 512 objects
+                         (b'{"a":' * 513 + b"1" + b"}" * 513, False),                  # 513 objects
+                         (json.dumps({"s": "[" * 2000 + "{" * 2000, "t\"[": "a\\"}).encode(), True),
+                         (json.dumps({"s": '\\"' + "[" * 600}).encode(), True),             # \\ then \" : still inside the string
+                         (b'{"a":[' + b",".join([b"[]"] * 600) + b"]}", True),
+                         (b'{"a":[' + b",".join([b'{"k":1}'] * 600) + b"]}", True)):           # 600 sibling objects
+            self.assertEqual(self._v(self._tok(body, []))["verified"], ok, body[:40])
+        with self.assertRaises(ValueError) as cm:
+            loads_bounded("[" * 513 + "]" * 513)
+        self.assertIn("nesting exceeds 512", str(cm.exception))
+        self.assertEqual(loads_bounded("[" * 512 + "]" * 512), json.loads("[" * 512 + "]" * 512))
 
 
     def test_issue_refuses_what_verify_must_reject(self):   # NEMESIS V2 round 3, N6 (§4.2.1)

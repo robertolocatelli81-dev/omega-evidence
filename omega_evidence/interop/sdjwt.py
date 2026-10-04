@@ -47,6 +47,7 @@ import secrets
 import time
 from typing import Any, Dict, List, Optional
 
+from ..ledger import loads_bounded
 from ..signing import Identity, verify_signature
 
 JWS_TYP = "dc+sd-jwt"
@@ -139,7 +140,7 @@ def present(sdjwt: str, disclose: List[str]) -> str:
     jws, disclosures = _split(sdjwt)
     keep = []
     for d in disclosures:
-        name = json.loads(_b64u_dec(d).decode("utf-8"))[1]
+        name = loads_bounded(_b64u_dec(d).decode("utf-8"))[1]
         if name in disclose:
             keep.append(d)
     return jws + "~" + "".join(d + "~" for d in keep)
@@ -173,7 +174,7 @@ class _Reject(Exception):
 def _loads(raw: bytes) -> Any:
     def _no_constant(c):   # NaN / Infinity are not JSON (RFC 8259); a signed `exp: NaN` would never expire (NEMESIS V2 Q4)
         raise ValueError(f"non-standard JSON constant {c}")
-    return json.loads(raw.decode("utf-8"), parse_constant=_no_constant)
+    return loads_bounded(raw.decode("utf-8"), parse_constant=_no_constant)
 
 
 def _verify(sdjwt: str, issuer_public_key_b64: str, now: Optional[float]) -> Dict[str, Any]:
@@ -228,7 +229,10 @@ def _verify(sdjwt: str, issuer_public_key_b64: str, now: Optional[float]) -> Dic
         if isinstance(node, dict):
             if "_sd" in node and not (isinstance(node["_sd"], list) and all(isinstance(x, str) for x in node["_sd"])):
                 raise _Reject("_sd is not an array of strings")
-            out = {k: _process(v) for k, v in node.items() if k != "_sd"}
+            out = {}
+            for k, v in node.items():      # a loop, not a comprehension: on Python < 3.12 a comprehension is a call of its
+                if k != "_sd":             # own, two frames per level, and 498 object levels (inside the 512 bound) raised
+                    out[k] = _process(v)   # RecursionError on 3.9/3.11 while 3.13/3.14 verified them (0.11.1 review)
             for dg in node.get("_sd", []):
                 c = _take(dg, 3)
                 if not c:

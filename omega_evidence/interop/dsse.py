@@ -42,6 +42,7 @@ import json
 from typing import Any, Dict, Optional
 
 from ..canonical import canonical_json, sha256_bytes, sha3
+from ..ledger import loads_bounded
 from ..signing import Identity, verify_signature
 
 PAYLOAD_TYPE = "application/vnd.in-toto+json"
@@ -149,11 +150,12 @@ def from_dsse(envelope: Dict[str, Any],
             verified = True
             break
     try:
-        statement = json.loads(payload.decode("utf-8"), parse_constant=_no_constant)   # NaN/Infinity are not JSON (NEMESIS V2 Q4)
+        statement = loads_bounded(payload.decode("utf-8"), parse_constant=_no_constant)   # NaN/Infinity are not JSON (NEMESIS V2 Q4)
     except (ValueError, RecursionError) as e:
         # DSSE protocol.md: «Parse SERIALIZED_BODY according to PAYLOAD_TYPE. Reject if the parsing fails.» — a right
         # signature over an unparsable body is still a reject (NEMESIS V2 P1, 01/10/2026)
-        return dict(_fail(f"payload could not be parsed as UTF-8 JSON: {type(e).__name__}"), payload_type=payload_type)
+        why = "nesting exceeds 512" if str(e).startswith("json_too_deep") else type(e).__name__
+        return dict(_fail(f"payload could not be parsed as UTF-8 JSON: {why}"), payload_type=payload_type)
     if not isinstance(statement, dict):
         return dict(_fail("statement is not a JSON object"), payload_type=payload_type)
     return {"verified": verified, "payload_type": payload_type,
