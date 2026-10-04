@@ -451,6 +451,7 @@ public class OeVerify {
             Obj ts = null; try { ts = readObject(sidecar(packPath, ".tsr.json")); } catch (Exception e) { ts = null; }
             if (ts == null) add.accept(new String[]{"timestamp", "FAIL"}, "malformed sidecar");
             else if (!sha("SHA-256", packBytes).equals(str(ts, "digest_sha256"))) add.accept(new String[]{"timestamp", "FAIL"}, "pack changed after stamping");
+            else if (str(ts, "tsr_b64") == null || str(ts, "tsr_b64").isEmpty()) add.accept(new String[]{"timestamp", "SKIP"}, "no RFC 3161 token recorded (tsr_b64 missing, empty or not a string): nothing to verify");
             else add.accept(new String[]{"timestamp", "SKIP"}, "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
         }
         else add.accept(new String[]{"timestamp", "SKIP"}, "no timestamp sidecar");

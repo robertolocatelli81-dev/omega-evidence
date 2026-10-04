@@ -425,6 +425,8 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 			add("timestamp", "FAIL", "malformed sidecar")
 		} else if dg, _ := str(ts, "digest_sha256"); dg != sha256Hex(packBytes) {
 			add("timestamp", "FAIL", "pack changed after stamping")
+		} else if tok, isStr := str(ts, "tsr_b64"); !isStr || tok == "" {
+			add("timestamp", "SKIP", "no RFC 3161 token recorded (tsr_b64 missing, empty or not a string): nothing to verify")
 		} else {
 			add("timestamp", "SKIP", "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator")
 		}

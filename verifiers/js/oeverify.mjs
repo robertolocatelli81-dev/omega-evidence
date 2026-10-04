@@ -301,6 +301,7 @@ function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ
     let ts = null; try { ts = readObject(sidecar(packPath, ".tsr.json")); } catch { ts = null; }
     if (!ts) add("timestamp", "FAIL", "malformed sidecar");
     else if (ts.digest_sha256 !== sha256Hex(packBytes)) add("timestamp", "FAIL", "pack changed after stamping");
+    else if (typeof ts.tsr_b64 !== "string" || ts.tsr_b64 === "") add("timestamp", "SKIP", "no RFC 3161 token recorded (tsr_b64 missing, empty or not a string): nothing to verify");
     else add("timestamp", "SKIP", "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
   } else add("timestamp", "SKIP", "no timestamp sidecar");
   // why: "" ordinarily; "unverified" = a signature is PRESENT with an algorithm unknown here (SKIP, said in the authenticity
