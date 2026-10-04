@@ -3059,6 +3059,23 @@ class TestAuditV2MalformedInput(unittest.TestCase):
             cur["a"] = {}; cur = cur["a"]
         self.assertFalse(P.verify_evidence_record(nested)["valid"])
 
+    def test_timestamp_verify_note_says_no_token_recorded(self):   # review 04/10/2026: the branch of 9394a7f lost its test after afe894f
+        # preservation answers an absent token with its own FAIL before calling timestamp.verify (afe894f), so the note that
+        # timestamp.verify writes for tsr_b64 missing / "" / not a string — forwarded by the pack verifier's rfc3161 layer for a
+        # sidecar without a token — is measured here directly, with and without openssl.
+        from omega_evidence import timestamp as ts
+        for which in ("/usr/bin/openssl", None):
+            with unittest.mock.patch("omega_evidence.timestamp.shutil.which", return_value=which):
+                for absent in (None, "", 5, [], {}):
+                    r = ts.verify(absent, "ab" * 32)
+                    self.assertIsNone(r["verified"], (absent, which))
+                    self.assertIn("no token recorded", r["note"], (absent, which))
+                    self.assertNotIn(" token recorded,", r["note"].replace("no token recorded", ""), (absent, which))
+                r = ts.verify("AAAA", "ab" * 32)                                   # control: a string is "token recorded"
+                self.assertIsNone(r["verified"]); self.assertIn("token recorded", r["note"]); self.assertNotIn("no token recorded", r["note"])
+                if which:
+                    self.assertIn("not decoded", r["note"]); self.assertNotIn("token decoded", r["note"])   # fe87e30
+
     def test_preservation_rfc3161_follows_timestamp_verify(self):   # audit V2 final round P3 (02/10/2026)
         # until 0.10.0 every record carrying an RFC 3161 token was FAIL: the layer read a "status" key verify() never returns
         from omega_evidence import preservation as P

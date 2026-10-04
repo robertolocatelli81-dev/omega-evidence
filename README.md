@@ -387,7 +387,7 @@ test that fails on the code before it; the new note of the Go, Java and Node ver
 that 0.10.0 accepted against the specifications are rejected; a digest spelled with colons (`aa:bb:…`) is no longer
 anchored by `stamp()` (`verify` already treated it as another digest).
 
-Measured before the tag: `tests/test_toolkit.py` 159 tests and `tests/test_stamp_granted.py` 6 on Python 3.9.25, 3.11.2
+Measured before the tag: `tests/test_toolkit.py` 160 tests and `tests/test_stamp_granted.py` 6 on Python 3.9.25, 3.11.2
 and 3.13.15, each with and without `cryptography`; `tests/fuzz_toolkit.py` 3000 iterations, 0 violations;
 `verifiers/differential_oracle.py` 0 disagreements of 193 here (Node 22, Go 1.24, Java 17: 9 cases not assessable on
 this host); the CI run on the tagged commit measures Node 24, Go 1.27 and Java 27.
