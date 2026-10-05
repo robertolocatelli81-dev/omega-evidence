@@ -433,7 +433,7 @@ def m_json_dup_key(r, b, _):
     v = o[k] if r.random() < 0.5 else r.choice(VALUES)
     text = json.dumps(o, ensure_ascii=True)
     assert text[0] == "{"
-    return ("{" + json.dumps(k) + ":" + json.dumps(v, ensure_ascii=True, allow_nan=False) + "," + text[1:]).encode("utf-8")
+    return ("{" + json.dumps(k) + ":" + json.dumps(v, ensure_ascii=True) + "," + text[1:]).encode("utf-8")
 
 
 def m_json_float(r, b, _):
