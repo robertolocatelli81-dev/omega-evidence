@@ -98,3 +98,37 @@ jobs:
         run: javac -d "$RUNNER_TEMP/oej" verifiers/java/OeVerify.java
       - name: "Differential oracle: Python vs Go vs Java vs Node must agree on every pack case"
         run: OEVERIFY_GO="$RUNNER_TEMP/oeverify" OEVERIFY_JAVA="java -cp $RUNNER_TEMP/oej OeVerify" python verifiers/differential_oracle.py
+
+  cryptovalid-interop:
+    # The ledger profile is cryptovalid's: a ledger written here must verify with the NEWEST cryptovalid-opencore
+    # reference verifier from the index, and one changed byte must be refused. Measured on every change, not once.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install . cryptography
+          pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ cryptovalid-opencore
+          python -c "import importlib.metadata as m; print('cryptovalid-opencore', m.version('cryptovalid-opencore'))"
+      - name: "A ledger written here passes cryptovalid's verifier (exit 0); with one byte changed it is refused (exit 1)"
+        run: |
+          set -e
+          python - <<'PY'
+          from omega_evidence.ledger import Ledger
+          L = Ledger("oe.jsonl")
+          for i in range(5):
+              L.append({"event": "cycle", "i": i})
+          L.close()
+          with open("oe.jsonl") as fh:
+              t = fh.read()
+          i = t.find('"i":1')
+          assert i > 0
+          with open("oe_tampered.jsonl", "w") as fh:
+              fh.write(t[:i + 4] + "7" + t[i + 5:])
+          PY
+          cryptovalid-verify ledger oe.jsonl > /dev/null
+          if cryptovalid-verify ledger oe_tampered.jsonl > /dev/null; then
+            echo "::error::cryptovalid accepted a tampered omega-evidence ledger"; exit 1; fi
+          echo "omega-evidence ledger: accepted intact, refused tampered, by cryptovalid-opencore $(python -c 'import importlib.metadata as m; print(m.version("cryptovalid-opencore"))')"

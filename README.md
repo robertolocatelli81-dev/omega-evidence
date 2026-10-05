@@ -21,7 +21,7 @@ but do not derive from, this toolkit.
 pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
 
 # or straight from the tagged source
-pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.8.3
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.11.1
 ```
 
 Release artifacts (`.whl` / `.tar.gz`) are attached to each
