@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}   # 3.9 has no build for ubuntu-26.04 (ubuntu-latest from 2026-10-19)
     strategy:
       matrix:
         python-version: ["3.9", "3.11", "3.13", "3.14"]   # 3.14: the release build runs "3.x"; a verdict once depended on it (0.11.1)
