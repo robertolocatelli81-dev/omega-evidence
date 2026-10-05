@@ -26,8 +26,8 @@ jobs:
         python-version: ["3.9", "3.11", "3.13"]
         cryptography: ["yes", "no"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package
@@ -50,7 +50,7 @@ jobs:
         run: |
           SEED="${{ github.event.inputs.seed }}"; SEED="${SEED:-${{ github.run_number }}}"
           python tests/fuzz_toolkit.py --seed "$SEED" --iterations 5000 --ablate signature --findings-dir "ablation-${{ matrix.python-version }}-${{ matrix.cryptography }}" | tail -1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: "fuzz-${{ matrix.python-version }}-cryptography-${{ matrix.cryptography }}"
