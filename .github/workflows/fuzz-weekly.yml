@@ -19,7 +19,7 @@ on:
 
 jobs:
   fuzz:
-    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}   # 3.9 has no build for ubuntu-26.04 (ubuntu-latest from 2026-10-19)
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-26.04' }}   # 3.9 has no build for ubuntu-26.04 (ubuntu-latest from 2026-10-19)
     strategy:
       fail-fast: false
       matrix:

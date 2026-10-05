@@ -8,8 +8,9 @@ on:
 
 jobs:
   test:
-    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}   # 3.9 has no build for ubuntu-26.04 (ubuntu-latest from 2026-10-19)
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-26.04' }}   # 3.9 has no build for ubuntu-26.04 (ubuntu-latest from 2026-10-19)
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.9", "3.11", "3.13", "3.14"]   # 3.14: the release build runs "3.x"; a verdict once depended on it (0.11.1)
         cryptography: ["yes", "no"]   # the toolkit runs without cryptography (pure-Python Ed25519); ML-DSA needs >= 50
@@ -29,7 +30,7 @@ jobs:
   fuzz-smoke:
     # Short, deterministic (fixed seed): the same 3 000 mutations on every push, plus the six positive controls
     # (a verifier with one check disabled must make the fuzzer report violations). The weekly job explores further.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -57,7 +58,7 @@ jobs:
 
   bench-smoke:
     # Only that the bench RUNS end to end on a small scale. No time threshold: a shared runner measures nothing.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -73,7 +74,7 @@ jobs:
           path: bench-smoke.json
 
   independent-verifiers:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -102,7 +103,7 @@ jobs:
   cryptovalid-interop:
     # The ledger profile is cryptovalid's: a ledger written here must verify with the NEWEST cryptovalid-opencore
     # reference verifier from the index, and one changed byte must be refused. Measured on every change, not once.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

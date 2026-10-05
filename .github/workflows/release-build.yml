@@ -14,7 +14,7 @@ permissions:
 jobs:
   build:
     name: Build distributions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
