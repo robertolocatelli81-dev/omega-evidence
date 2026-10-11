@@ -85,6 +85,60 @@ func foldAlg(s string) string {
 // tier the pack falls to, never a silent downgrade (0.10.0).
 const unverifiedNote = " — a signature is present but its algorithm is unsupported and was not verified"
 
+// Closed schemas (2026-10-10, README «closed sidecars and ledger entries»): the two sidecars and the ledger entry are exactly
+// what pack.py / ledger.py write — the same lists as omega_evidence/verifier.py SIG_SIDECAR_KEYS, TSR_SIDECAR_KEYS,
+// LEDGER_ENTRY_KEYS, PACK_FORMAT_KEYS. A field nobody defined is a NAMED FAIL of the layer that reads the object, never a
+// silent pass (measured 2026-10-11 on this verifier: a .sig.json with an extra key verified valid+authenticated with no
+// trace; a ledger entry written with an extra top-level key, hash recomputed over it, verified too). The pack's own top
+// level is kind-defined: its keys outside the format's four are REPORTED in the pack-fields layer, not refused.
+var sigSidecarKeys = map[string]bool{"signer_id": true, "sig_alg": true, "public_key_b64": true, "fingerprint": true, "signed_pack_sha3": true,
+	"signature_b64": true, "signed_utc": true, "pq_sig_alg": true, "pq_public_key_b64": true, "pq_signature_b64": true}
+var tsrSidecarKeys = map[string]bool{"digest_sha256": true, "tsa": true, "tsr_b64": true, "stamped_utc": true, "validation_material": true}
+var ledgerEntryKeys = map[string]bool{"idx": true, "ts": true, "data": true, "prev_hash": true, "self_hash": true, "anchored_pack_sha3": true, "anchored_utc": true}
+var packFormatKeys = map[string]bool{"kind": true, "generated_utc": true, "honest_scope": true, "pack_sha3": true}
+
+// unknownKeys: the object's keys outside `allowed`, sorted by code point (UTF-8 byte order = Python sorted()).
+func unknownKeys(o *Object, allowed map[string]bool) []string {
+	var out []string
+	for _, k := range o.Keys {
+		if !allowed[k] {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// cutRunes: at most n code points, as the reference's `[:n]` on a Python str.
+func cutRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
+
+const closedSidecarMsg = "malformed sidecar: field(s) outside the closed schema: "
+
+// ledgerUnknown: the closed entry schema over the parsed entries — the count of offending entries and, for the first one,
+// its idx (as written) and its foreign keys; the reference's detail text is built from these three.
+func ledgerUnknown(entries []*Object) (int, string, []string) {
+	n, first, keys := 0, "", []string(nil)
+	for _, e := range entries {
+		if unk := unknownKeys(e, ledgerEntryKeys); len(unk) != 0 {
+			if n == 0 {
+				if idx, ok := e.Vals["idx"].(json.Number); ok {
+					first = idx.String()
+				} else {
+					first = "None" // the reference prints e.get("idx") → None when absent (unreachable on a valid chain)
+				}
+				keys = unk
+			}
+			n++
+		}
+	}
+	return n, first, keys
+}
+
 func readInput(path string) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -371,6 +425,12 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 	} else {
 		add("honest-scope", "FAIL", "no explicit honest_scope (or overclaim without a real NOT-limit)")
 	}
+	// pack-fields (2026-10-10): the body keys beside the format's four, reported (kind-defined, not judged) — same text as the reference
+	if bk := unknownKeys(pack, packFormatKeys); len(bk) != 0 {
+		add("pack-fields", "SKIP", cutRunes("body keys (kind-defined, not judged): "+strings.Join(bk, ", "), 200))
+	} else {
+		add("pack-fields", "SKIP", "no body keys beside the format's four")
+	}
 	declared, _ := str(pack, "pack_sha3")
 	canon, cerr := Canonical(without(pack, "pack_sha3"))
 	computed := ""
@@ -402,6 +462,8 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 		add("ledger-chain", "FAIL", lp+": broken chain")
 	} else if len(entries) == 0 {
 		add("ledger-chain", "FAIL", lp+": ledger empty — nothing anchored")
+	} else if n, first, keys := ledgerUnknown(entries); n != 0 { // closed entry schema (2026-10-10): named, never silent
+		add("ledger-chain", "FAIL", cutRunes(fmt.Sprintf("%s: %d entry(ies) with a top-level field outside the closed schema, first at idx %s: %s", lp, n, first, strings.Join(keys, ", ")), 200))
 	} else {
 		anch := false
 		for _, e := range entries {
@@ -423,6 +485,8 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 		ts, e := readObject(tp)
 		if e != nil {
 			add("timestamp", "FAIL", "malformed sidecar")
+		} else if unk := unknownKeys(ts, tsrSidecarKeys); len(unk) != 0 { // closed sidecar schema (2026-10-10)
+			add("timestamp", "FAIL", closedSidecarMsg+cutRunes(strings.Join(unk, ", "), 120))
 		} else if dg, _ := str(ts, "digest_sha256"); dg != sha256Hex(packBytes) {
 			add("timestamp", "FAIL", "pack changed after stamping")
 		} else if tok, isStr := str(ts, "tsr_b64"); !isStr || tok == "" {
@@ -447,6 +511,9 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 		}
 	} else if side, err = readObject(sp); err != nil {
 		add("producer-signature", "FAIL", "malformed sidecar: "+err.Error())
+		sigStatus = "FAIL"
+	} else if unk := unknownKeys(side, sigSidecarKeys); len(unk) != 0 { // closed sidecar schema (2026-10-10): before any field is read
+		add("producer-signature", "FAIL", closedSidecarMsg+cutRunes(strings.Join(unk, ", "), 120))
 		sigStatus = "FAIL"
 	} else {
 		alg, hasAlg := str(side, "sig_alg")

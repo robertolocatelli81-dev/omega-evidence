@@ -42,8 +42,9 @@ PY_CWD = None   # set from OEVERIFY_PYTHONPATH (ablation)
 EXPECT = {}     # name -> the verdict EVERY verifier must give (a wrong outcome shared by the four is still a disagreement)
 CASE_ENV = {}   # name -> extra environment (the internal-error injection hook)
 HAZARD = set()  # names whose input used to block or exhaust memory: run with a memory cap (prlimit) and a short timeout
-DETAILS = {}    # name -> {verifier command: {layer: (status, detail)}} for the producer-signature / authenticity layers (29/09/2026)
-DETAIL_LAYERS = ("producer-signature", "authenticity")
+DETAILS = {}    # name -> {verifier command: {layer: (status, detail)}} — every layer, the RFC 3161 one under its Go/Java/Node name `timestamp`
+DETAIL_LAYERS = ("producer-signature", "authenticity")   # compared on the sig-alg- cases (29/09/2026)
+COMPARE_LAYERS = {}   # name -> layers whose (status, detail) must be one in the four (11/10/2026: the closed-schema cases)
 
 
 def build_cases(d):
@@ -275,6 +276,7 @@ def build_cases(d):
         print("  hybrid (ML-DSA-65) cases NOT measured: cryptography >= 48 absent")
     _nemesis_cases(d, cases, mk, idt, store)
     _sigalg_cases(d, cases, mk, idt, store)
+    _closed_schema_cases(d, cases, mk, idt)
     # 25/09 (4-mind round 2, A1): small-order Ed25519 keys — with the identity key R=identity, S=0 verifies on every message under OpenSSL (with any small-order key a signature on any message can be built by choosing R, measured 26/09/2026);
     # every port must refuse them, with and without the key pinned in a trust store
     for nm, keyhex in (("weak-key-identity", "01" + "00" * 31), ("weak-key-order8", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
@@ -427,6 +429,67 @@ def _sigalg_cases(d, cases, mk, idt, store):
     cases["sig-alg-unknown-70kib-required-signed"] = (big, ["--require-signed"], None); EXPECT["sig-alg-unknown-70kib-required-signed"] = "FAIL"
 
 
+def _closed_schema_cases(d, cases, mk, idt):
+    """11/10/2026 — the closed schemas of 2026-10-10 (README «closed sidecars and ledger entries»): a field nobody defined in the
+    .sig.json sidecar, in the .tsr.json sidecar or at a ledger entry's top level is a NAMED FAIL of the layer that reads it; the
+    pack's body keys are REPORTED (pack-fields, SKIP). Every case has an EXPECTED verdict and the (status, detail) of the layer
+    that carries the rule is compared across the four — the reason must be one reason, not only the verdict. Positive controls:
+    the same objects without the foreign key keep their verdict. Measured before the alignment of Go/Java/Node (189d71d):
+    Python FAIL, the three PASS on every negative case (the sidecars sit outside every digest; the entry's hash was recomputed)."""
+    import hashlib as _hc
+    from omega_evidence.ledger import _hash_entry as _hce
+    KEY = "x_unknown_2026"
+    def signed_anchored(name):
+        p = mk(name); P.anchor_pack(p, p[:-5] + ".ledger.jsonl"); P.sign_pack(p, idt); return p
+    def edit_json(path, fn):
+        with open(path, encoding="utf-8") as f:
+            o = json.load(f)
+        fn(o)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(o, f, ensure_ascii=False)
+    # 1. signature sidecar: a key nobody defined (plain, empty name, non-ASCII) → FAIL, named in producer-signature
+    for nm, key in (("closed-sig-unknown-key", KEY), ("closed-sig-unknown-key-empty-name", ""), ("closed-sig-unknown-key-unicode", "clé")):
+        p = signed_anchored(nm); edit_json(p[:-5] + ".sig.json", lambda sd, key=key: sd.__setitem__(key, "x"))
+        cases[nm] = (p, [], None); EXPECT[nm] = "FAIL"; COMPARE_LAYERS[nm] = ("producer-signature", "authenticity")
+    cases["closed-sig-as-produced"] = (signed_anchored("closed-sig-as-produced"), [], None); EXPECT["closed-sig-as-produced"] = "PASS"
+    COMPARE_LAYERS["closed-sig-as-produced"] = ("producer-signature", "authenticity", "pack-fields")
+    # 2. RFC 3161 sidecar bound to the pack bytes, with a key nobody defined → FAIL in the timestamp layer (rfc3161 in Python)
+    def tsr(path, extra):
+        dg = _hc.sha256(open(path, "rb").read()).hexdigest()
+        side = {"digest_sha256": dg, "tsa": "x", "tsr_b64": "AA==", "stamped_utc": "2026-10-11T00:00:00+00:00"}; side.update(extra)
+        with open(path[:-5] + ".tsr.json", "w", encoding="utf-8") as f:
+            json.dump(side, f)
+    p = signed_anchored("closed-tsr-unknown-key"); tsr(p, {KEY: "x"}); cases["closed-tsr-unknown-key"] = (p, [], None); EXPECT["closed-tsr-unknown-key"] = "FAIL"
+    COMPARE_LAYERS["closed-tsr-unknown-key"] = ("timestamp",)
+    p = signed_anchored("closed-tsr-known-keys"); tsr(p, {"validation_material": {"available": False}}); cases["closed-tsr-known-keys"] = (p, [], None)
+    EXPECT["closed-tsr-known-keys"] = "PASS"   # positive control: every key of the closed list, the verdict of the signed, anchored pack
+    # 3. ledger entry: a key nobody defined at the top level, self_hash recomputed over it → ledger-chain FAIL naming idx and key;
+    #    the same key INSIDE data → PASS; the two anchor fields at the top level → PASS (they are in the closed list)
+    def rechain(lp, fn):
+        with open(lp, encoding="utf-8") as f:
+            es = [json.loads(ln) for ln in f if ln.strip()]
+        fn(es)
+        prev = None
+        for e in es:
+            e.pop("self_hash", None)
+            if prev is not None:
+                e["prev_hash"] = prev
+            e["self_hash"] = _hce(e); prev = e["self_hash"]
+        with open(lp, "w", encoding="utf-8") as f:
+            f.write("".join(json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n" for e in es))
+    p = signed_anchored("closed-ledger-unknown-key"); rechain(p[:-5] + ".ledger.jsonl", lambda es: es[0].__setitem__(KEY, True))
+    cases["closed-ledger-unknown-key"] = (p, [], None); EXPECT["closed-ledger-unknown-key"] = "FAIL"; COMPARE_LAYERS["closed-ledger-unknown-key"] = ("ledger-chain", "authenticity")
+    p = signed_anchored("closed-ledger-unknown-key-in-data"); rechain(p[:-5] + ".ledger.jsonl", lambda es: es[0]["data"].__setitem__(KEY, True))
+    cases["closed-ledger-unknown-key-in-data"] = (p, [], None); EXPECT["closed-ledger-unknown-key-in-data"] = "PASS"; COMPARE_LAYERS["closed-ledger-unknown-key-in-data"] = ("ledger-chain",)
+    p = mk("closed-ledger-anchor-fields-top-level"); H = json.load(open(p))["pack_sha3"]
+    e0 = {"idx": 0, "ts": "2026-10-11T00:00:00+00:00", "data": {}, "prev_hash": "0" * 64, "anchored_pack_sha3": H, "anchored_utc": "2026-10-11T00:00:00+00:00"}; e0["self_hash"] = _hce(e0)
+    open(p[:-5] + ".ledger.jsonl", "w").write(json.dumps(e0, separators=(",", ":")) + "\n")
+    cases["closed-ledger-anchor-fields-top-level"] = (p, [], None); EXPECT["closed-ledger-anchor-fields-top-level"] = "PASS"; COMPARE_LAYERS["closed-ledger-anchor-fields-top-level"] = ("ledger-chain",)
+    # 4. the pack's own body: a producer-written key beside the format's four is REPORTED in pack-fields (SKIP), never refused
+    pb = os.path.join(d, "closed-pack-body-key.json"); P.write_pack(pb, P.build_pack("demo", {"claim": "x", KEY: 1}, SCOPE)); P.anchor_pack(pb, pb[:-5] + ".ledger.jsonl")
+    cases["closed-pack-body-key-reported"] = (pb, [], None); EXPECT["closed-pack-body-key-reported"] = "PASS"; COMPARE_LAYERS["closed-pack-body-key-reported"] = ("pack-fields",)
+
+
 EXIT_OF = {"PASS": 0, "FAIL": 1, "NOT_ASSESSED": 77}
 MEM_WRAP = None   # memory-cap prefix for the HAZARD cases (a verifier that reads /dev/zero must not take the host down)
 
@@ -470,7 +533,8 @@ def run(cmd, path, flags, go_style, name=""):
     try:
         r = json.loads(out.stdout)
         v = (r["verdict"], r.get("pq_protected"), r.get("authenticated"))
-        DETAILS.setdefault(name, {})[tuple(cmd)] = {ly.get("layer"): (ly.get("status"), ly.get("detail")) for ly in r.get("layers", []) if ly.get("layer") in DETAIL_LAYERS}
+        # every layer, keyed by its name in the three ports (Python alone calls the RFC 3161 layer `rfc3161`: a declared naming difference)
+        DETAILS.setdefault(name, {})[tuple(cmd)] = {("timestamp" if ly.get("layer") == "rfc3161" else ly.get("layer")): (ly.get("status"), ly.get("detail")) for ly in r.get("layers", [])}
     except Exception:  # noqa: BLE001
         return (f"NONJSON/CRASH(exit {out.returncode})", None, None)
     if EXIT_OF.get(v[0]) != out.returncode:   # 25/09/2026: the exit code is part of the verdict (Java printed FAIL on a fault)
@@ -541,11 +605,14 @@ def main():
         # 29/09/2026: on the sig_alg cases the REASON must be one reason in the four — the (status, detail) of the
         # producer-signature and authenticity layers are compared too, not only the verdict tuple
         layer_bad = {}
-        if name.startswith("sig-alg-"):
-            det = {k: DETAILS.get(name, {}).get(tuple(cmd)) for k, cmd in avail.items()}
+        want_layers = DETAIL_LAYERS if name.startswith("sig-alg-") else COMPARE_LAYERS.get(name)
+        if want_layers:
+            def _sub(all_layers):
+                return None if all_layers is None else {l: v for l, v in all_layers.items() if l in want_layers}
+            det = {k: _sub(DETAILS.get(name, {}).get(tuple(cmd))) for k, cmd in avail.items()}
             layer_bad = {k: v for k, v in det.items() if v != det.get("python")}
             if layer_bad:
-                print(f"  [DIFF] {name:34} producer-signature / authenticity layers differ from python's {det.get('python')}: {layer_bad}")
+                print(f"  [DIFF] {name:34} layers {want_layers} differ from python's {det.get('python')}: {layer_bad}")
         if name in EXPECT:
             # a case with an expected verdict: every verifier must give it (so a wrong outcome shared by all is visible),
             # and the tuples must agree; NOT_ASSESSED is judged like any verdict here (the injected fault expects it)

@@ -429,6 +429,9 @@ public class OeVerify {
         add.accept(new String[]{"pack-json", "PASS"}, "");
         String scope = str(pack, "honest_scope");
         if (honestScope(scope)) add.accept(new String[]{"honest-scope", "PASS"}, "limit declared"); else add.accept(new String[]{"honest-scope", "FAIL"}, "no explicit honest_scope (or overclaim without a real NOT-limit)");
+        // pack-fields (2026-10-10): the body keys beside the format's four, reported (kind-defined, not judged) — the reference's text
+        List<String> bodyKeys = unknownKeys(pack, PACK_FORMAT_KEYS);
+        add.accept(new String[]{"pack-fields", "SKIP"}, bodyKeys.isEmpty() ? "no body keys beside the format's four" : cut("body keys (kind-defined, not judged): " + String.join(", ", bodyKeys), 200));
         String declared = str(pack, "pack_sha3"); if (declared == null) declared = "";
         String computed = canonHash("SHA3-256", without(pack, "pack_sha3"));
         add.accept(new String[]{"pack-sha3", !declared.isEmpty() && declared.equals(computed) ? "PASS" : "FAIL"}, "");
@@ -443,6 +446,7 @@ public class OeVerify {
             try { entries = ledgerEntries(lp, ok); } catch (Exception e) { entries = new ArrayList<>(); ok[0] = false; }
             if (!ok[0]) add.accept(new String[]{"ledger-chain", "FAIL"}, lp + ": broken chain");
             else if (entries.isEmpty()) add.accept(new String[]{"ledger-chain", "FAIL"}, lp + ": ledger empty — nothing anchored");
+            else if (ledgerUnknown(lp, entries) != null) add.accept(new String[]{"ledger-chain", "FAIL"}, ledgerUnknown(lp, entries));   // closed entry schema (2026-10-10): named, never silent
             else { boolean anch = false; for (Obj e : entries) if (!declared.isEmpty() && anchors(e, declared)) { anch = true; break; }
                 if (anch) { add.accept(new String[]{"ledger-chain", "PASS"}, lp + ": pack_sha3 recorded"); ledgerOK = true; }
                 else add.accept(new String[]{"ledger-chain", "FAIL"}, "valid chain but this pack is not anchored (no anchored_pack_sha3 entry)"); }
@@ -450,6 +454,7 @@ public class OeVerify {
         if (Files.exists(Path.of(sidecar(packPath, ".tsr.json")))) {   // shape + content-binding checked like the reference; the token itself is not
             Obj ts = null; try { ts = readObject(sidecar(packPath, ".tsr.json")); } catch (Exception e) { ts = null; }
             if (ts == null) add.accept(new String[]{"timestamp", "FAIL"}, "malformed sidecar");
+            else if (!unknownKeys(ts, TSR_SIDECAR_KEYS).isEmpty()) add.accept(new String[]{"timestamp", "FAIL"}, CLOSED_SIDECAR_MSG + cut(String.join(", ", unknownKeys(ts, TSR_SIDECAR_KEYS)), 120));   // closed sidecar schema (2026-10-10)
             else if (!sha("SHA-256", packBytes).equals(str(ts, "digest_sha256"))) add.accept(new String[]{"timestamp", "FAIL"}, "pack changed after stamping");
             else if (str(ts, "tsr_b64") == null || str(ts, "tsr_b64").isEmpty()) add.accept(new String[]{"timestamp", "SKIP"}, "no RFC 3161 token recorded (tsr_b64 missing, empty or not a string): nothing to verify");
             else add.accept(new String[]{"timestamp", "SKIP"}, "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
@@ -466,7 +471,10 @@ public class OeVerify {
         else {
             Obj side = null;
             try { side = readObject(sp); } catch (Exception e) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar: " + e.getMessage()); sigStatus = "FAIL"; }
-            if (side != null) {
+            if (side != null && !unknownKeys(side, SIG_SIDECAR_KEYS).isEmpty()) {   // closed sidecar schema (2026-10-10): before any field is read
+                add.accept(new String[]{"producer-signature", "FAIL"}, CLOSED_SIDECAR_MSG + cut(String.join(", ", unknownKeys(side, SIG_SIDECAR_KEYS)), 120)); sigStatus = "FAIL";
+            }
+            else if (side != null) {
                 boolean algPresent = side.vals.containsKey("sig_alg");
                 String alg = algPresent ? str(side, "sig_alg") : "ed25519";
                 String signedDigest = str(side, "signed_pack_sha3"), pkB64 = str(side, "public_key_b64"), sigB64 = str(side, "signature_b64");
@@ -543,6 +551,26 @@ public class OeVerify {
     static final java.util.Set<String> SUPPORTED_SIG_ALGS = java.util.Set.of("ed25519");
     // The same words in the four verifiers: a present, unverified signature is NAMED in the tier the pack falls to (0.10.0).
     static final String UNVERIFIED_NOTE = " — a signature is present but its algorithm is unsupported and was not verified";
+    // Closed schemas (2026-10-10, README «closed sidecars and ledger entries»): the same lists as omega_evidence/verifier.py. A field
+    // nobody defined in a sidecar or at a ledger entry's top level is a NAMED FAIL of the layer that reads it, never a silent pass
+    // (measured 2026-10-11 on this verifier: an extra .sig.json key verified valid+authenticated with no trace). The pack's own top
+    // level is kind-defined: its keys outside the format's four are REPORTED in the pack-fields layer, not refused.
+    static final Set<String> SIG_SIDECAR_KEYS = Set.of("signer_id", "sig_alg", "public_key_b64", "fingerprint", "signed_pack_sha3", "signature_b64", "signed_utc", "pq_sig_alg", "pq_public_key_b64", "pq_signature_b64");
+    static final Set<String> TSR_SIDECAR_KEYS = Set.of("digest_sha256", "tsa", "tsr_b64", "stamped_utc", "validation_material");
+    static final Set<String> LEDGER_ENTRY_KEYS = Set.of("idx", "ts", "data", "prev_hash", "self_hash", "anchored_pack_sha3", "anchored_utc");
+    static final Set<String> PACK_FORMAT_KEYS = Set.of("kind", "generated_utc", "honest_scope", "pack_sha3");
+    static final String CLOSED_SIDECAR_MSG = "malformed sidecar: field(s) outside the closed schema: ";
+    /** the object's keys outside `allowed`, sorted by code point (Python sorted()) */
+    static List<String> unknownKeys(Obj o, Set<String> allowed) { List<String> u = new ArrayList<>(); for (String k : o.keys) if (!allowed.contains(k)) u.add(k); u.sort(BY_CODEPOINT); return u; }
+    /** at most n code points, as the reference's `[:n]` on a Python str */
+    static String cut(String s, int n) { return s.codePointCount(0, s.length()) > n ? s.substring(0, s.offsetByCodePoints(0, n)) : s; }
+    /** the reference's ledger-chain detail for entries outside the closed schema, or null when every entry is in it */
+    static String ledgerUnknown(String lp, List<Obj> entries) {
+        int n = 0; String first = null; List<String> keys = null;
+        for (Obj e : entries) { List<String> u = unknownKeys(e, LEDGER_ENTRY_KEYS); if (u.isEmpty()) continue;
+            if (n == 0) { Object idx = e.vals.get("idx"); first = idx instanceof Num ? ((Num) idx).lexeme : "None"; keys = u; } n++; }
+        return n == 0 ? null : cut(lp + ": " + n + " entry(ies) with a top-level field outside the closed schema, first at idx " + first + ": " + String.join(", ", keys), 200);
+    }
     // foldAlg: the shape under which a VARIANT of a supported algorithm name is recognised (0.10.0) — ASCII letters lowercased,
     // every character that is not an ASCII letter or digit dropped (spaces, hyphens, underscores, non-ASCII). "eD25519",
     // "ED25519", "ed2 5519", "ed-25519" fold to "ed25519" and are refused as non-canonical spellings; until 0.9.1 each was an

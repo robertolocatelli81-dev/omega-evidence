@@ -162,6 +162,24 @@ const sidecar = (p, suf) => (p.endsWith(".json") ? p.slice(0, -5) + suf : p + su
 const SUPPORTED_SIG_ALGS = new Set(["ed25519"]);
 // The same words in the four verifiers: a present, unverified signature is NAMED in the tier the pack falls to (0.10.0).
 const UNVERIFIED_NOTE = " — a signature is present but its algorithm is unsupported and was not verified";
+// Closed schemas (2026-10-10, README «closed sidecars and ledger entries»): the same lists as omega_evidence/verifier.py. A field
+// nobody defined in a sidecar or at a ledger entry's top level is a NAMED FAIL of the layer that reads it, never a silent pass
+// (measured 2026-10-11 on this verifier: an extra .sig.json key verified valid+authenticated with no trace). The pack's own top
+// level is kind-defined: its keys outside the format's four are REPORTED in the pack-fields layer, not refused.
+export const SIG_SIDECAR_KEYS = new Set(["signer_id", "sig_alg", "public_key_b64", "fingerprint", "signed_pack_sha3", "signature_b64", "signed_utc", "pq_sig_alg", "pq_public_key_b64", "pq_signature_b64"]);
+export const TSR_SIDECAR_KEYS = new Set(["digest_sha256", "tsa", "tsr_b64", "stamped_utc", "validation_material"]);
+export const LEDGER_ENTRY_KEYS = new Set(["idx", "ts", "data", "prev_hash", "self_hash", "anchored_pack_sha3", "anchored_utc"]);
+export const PACK_FORMAT_KEYS = new Set(["kind", "generated_utc", "honest_scope", "pack_sha3"]);
+const CLOSED_SIDECAR_MSG = "malformed sidecar: field(s) outside the closed schema: ";
+// the object's keys outside `allowed`, sorted by code point (Python sorted()); a LIST, so the empty key "" counts as unknown too
+export const unknownKeys = (o, allowed) => Object.keys(o).filter((k) => !allowed.has(k)).sort(cmp);
+const cut = (s, n) => [...s].slice(0, n).join("");   // at most n code points, as the reference's `[:n]` on a Python str
+// the reference's ledger-chain detail for entries outside the closed schema, or null when every entry is in it
+function ledgerUnknown(lp, entries) {
+  let n = 0, first = null, keys = null;
+  for (const e of entries) { const u = unknownKeys(e, LEDGER_ENTRY_KEYS); if (!u.length) continue; if (n === 0) { first = "idx" in e ? String(e.idx) : "None"; keys = u; } n++; }
+  return n === 0 ? null : cut(`${lp}: ${n} entry(ies) with a top-level field outside the closed schema, first at idx ${first}: ${keys.join(", ")}`, 200);
+}
 // foldAlg: the shape under which a VARIANT of a supported algorithm name is recognised (0.10.0) — ASCII letters lowercased,
 // every UTF-16 unit that is not an ASCII letter or digit dropped (spaces, hyphens, underscores, non-ASCII). "eD25519",
 // "ED25519", "ed2 5519", "ed-25519" fold to "ed25519" and are refused as non-canonical spellings; until 0.9.1 each was an
@@ -285,6 +303,9 @@ function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ
   try { packBytes = readInput(packPath); pack = objectOf(UTF8.decode(packBytes)); } catch (e) { add("pack-json", "FAIL", e.message); return finish(layers, false, false, required); }
   add("pack-json", "PASS");
   add("honest-scope", honestScope(pack.honest_scope) ? "PASS" : "FAIL", honestScope(pack.honest_scope) ? "limit declared" : "no explicit honest_scope (or overclaim without a real NOT-limit)");
+  // pack-fields (2026-10-10): the body keys beside the format's four, reported (kind-defined, not judged) — the reference's text
+  const bodyKeys = unknownKeys(pack, PACK_FORMAT_KEYS);
+  add("pack-fields", "SKIP", bodyKeys.length ? cut("body keys (kind-defined, not judged): " + bodyKeys.join(", "), 200) : "no body keys beside the format's four");
   const declared = typeof pack.pack_sha3 === "string" ? pack.pack_sha3 : "";
   let computed = ""; try { computed = canonHash("sha3-256", withoutKey(pack, "pack_sha3")); } catch { computed = null; }
   add("pack-sha3", computed !== null && declared && declared === computed ? "PASS" : "FAIL");
@@ -295,11 +316,13 @@ function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ
   else { const { ok, entries } = ledgerEntries(lp);
     if (!ok) add("ledger-chain", "FAIL", lp + ": broken chain");
     else if (!entries.length) add("ledger-chain", "FAIL", lp + ": ledger empty — nothing anchored");
+    else if (ledgerUnknown(lp, entries) !== null) add("ledger-chain", "FAIL", ledgerUnknown(lp, entries));   // closed entry schema (2026-10-10): named, never silent
     else if (declared && entries.some((e) => anchors(e, declared))) { add("ledger-chain", "PASS", lp + ": pack_sha3 recorded"); ledgerOK = true; }
     else add("ledger-chain", "FAIL", "valid chain but this pack is not anchored (no anchored_pack_sha3 entry)"); }
   if (existsSync(sidecar(packPath, ".tsr.json"))) {   // shape + content-binding checked like the reference; the token itself is not
     let ts = null; try { ts = readObject(sidecar(packPath, ".tsr.json")); } catch { ts = null; }
     if (!ts) add("timestamp", "FAIL", "malformed sidecar");
+    else if (unknownKeys(ts, TSR_SIDECAR_KEYS).length) add("timestamp", "FAIL", CLOSED_SIDECAR_MSG + cut(unknownKeys(ts, TSR_SIDECAR_KEYS).join(", "), 120));   // closed sidecar schema (2026-10-10)
     else if (ts.digest_sha256 !== sha256Hex(packBytes)) add("timestamp", "FAIL", "pack changed after stamping");
     else if (typeof ts.tsr_b64 !== "string" || ts.tsr_b64 === "") add("timestamp", "SKIP", "no RFC 3161 token recorded (tsr_b64 missing, empty or not a string): nothing to verify");
     else add("timestamp", "SKIP", "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
@@ -314,7 +337,10 @@ function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ
   }
   else {
     let side = null; try { side = readObject(sp); } catch (e) { add("producer-signature", "FAIL", "malformed sidecar: " + e.message); sigStatus = "FAIL"; }
-    if (side) {
+    if (side && unknownKeys(side, SIG_SIDECAR_KEYS).length) {   // closed sidecar schema (2026-10-10): before any field is read
+      add("producer-signature", "FAIL", CLOSED_SIDECAR_MSG + cut(unknownKeys(side, SIG_SIDECAR_KEYS).join(", "), 120)); sigStatus = "FAIL";
+    }
+    else if (side) {
       const alg = "sig_alg" in side ? side.sig_alg : "ed25519";
       if ("sig_alg" in side && (typeof alg !== "string" || alg === "")) { add("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a non-empty string"); sigStatus = "FAIL"; }  // council 16/09 r1; "" is present and malformed (25/09/2026)
       else if (!SUPPORTED_SIG_ALGS.has(alg)) {
