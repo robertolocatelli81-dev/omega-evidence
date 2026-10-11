@@ -494,7 +494,7 @@ def _closed_schema_cases(d, cases, mk, idt):
     COMPARE_LAYERS["closed-tsr-long-keys-cut"] = ("timestamp",)
     # 3b. the same foreign key under a directory whose path alone is longer than 200 code points: the detail must still name
     #     the key in the four (11/10/2026: the whole detail was cut at 200, path included, and the key fell off the end)
-    deep = os.path.join(d, *(["customer_evidence_archive_2026"] * 5)); os.makedirs(deep, exist_ok=True)
+    deep = os.path.join(d, *(["customer_evidence_archive_2026"] * 8)); os.makedirs(deep, exist_ok=True)
     pd = os.path.join(deep, "closed-ledger-unknown-key-long-path.json"); P.write_pack(pd, P.build_pack("demo", {"claim": "x"}, SCOPE))
     P.anchor_pack(pd, pd[:-5] + ".ledger.jsonl"); rechain(pd[:-5] + ".ledger.jsonl", lambda es: es[0].__setitem__(KEY, True))
     cases["closed-ledger-unknown-key-long-path"] = (pd, [], None); EXPECT["closed-ledger-unknown-key-long-path"] = "FAIL"

@@ -75,7 +75,7 @@ class TestClosedSchema(unittest.TestCase):
     def test_unknown_ledger_entry_field_is_named_under_a_long_path(self):
         # 11/10/2026 (review): the detail used to be cut at 200 code points INCLUDING the ledger path, so under a long
         # directory the foreign key fell off the end in all four verifiers; now only the keys are cut (120)
-        deep = os.path.join(self.d, *(["customer_evidence_archive_2026"] * 5)); os.makedirs(deep)
+        deep = os.path.join(self.d, *(["customer_evidence_archive_2026"] * 8)); os.makedirs(deep)
         path = os.path.join(deep, "pack.json"); led = os.path.join(deep, "ledger.jsonl")
         P.write_pack(path, P.build_pack("probe-kind", {"subject": "probe"}, SCOPE)); P.anchor_pack(path, led)
         with open(led, encoding="utf-8") as f:
