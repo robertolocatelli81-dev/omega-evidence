@@ -368,13 +368,13 @@ temporary directory removed at the end; the intact pack is the positive control.
 `<ledger>: N entry(ies) with a top-level field outside the closed schema, first at idx I: <keys>`, keys in code-point order, cut
 as the reference cuts them — the keys at 120 code points, the ledger path never: until the review of 11 October 2026 the whole
 detail was cut at 200, and under a ledger path of about 150 characters the key fell out of it in the four) and the same `pack-fields` SKIP layer; the RFC 3161 closure sits in their `timestamp` layer, the
-reference's `rfc3161` (a naming difference older than this change, declared). `verifiers/differential_oracle.py` carries eleven
-`closed-*` cases (one under a path longer than 200 characters), each with its expected verdict and with the (status, detail) of the layer that carries the rule compared across
+reference's `rfc3161` (a naming difference older than this change, declared). `verifiers/differential_oracle.py` carries thirteen
+`closed-*` cases (one under a path longer than 200 characters, two with keys past the 120-code-point cut, one outside the BMP), each with its expected verdict and with the (status, detail) of the layer that carries the rule compared across
 the four; `verifiers/closed_schema_mutants.py` is a generative, differential bench over the same rule (random keys at every
 closed level, wrong types, duplicates, the controls that must stay PASS; the expected class comes from this section, never from a
 verifier; the foreign key must be NAMED), run by `tests/test_closed_schema_mutants.py`, which also proves the bench can go
 red; the CI workflow runs the oracle with its `closed-*` cases, not this test. Measured on this line on 11 October 2026: the
-oracle 0/204 on Python, Node, Go and Java 27 (8/204 against the Go/Java/Node of 0.11.1, the positive control); the bench 100
+oracle 0/206 on Python, Node, Go and Java 27 (10/206 against the Go/Java/Node of 0.11.1, the positive control); the bench 100
 mutations GREEN on the four; the three silent cases of 0.11.1 are three named FAILs.
 ### 0.11.1 — deep JSON is refused by a bound, not by the interpreter (4 October 2026)
 
