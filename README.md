@@ -21,7 +21,7 @@ but do not derive from, this toolkit.
 pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
 
 # or straight from the tagged source
-pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.11.1
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.11.2
 ```
 
 Release artifacts (`.whl` / `.tar.gz`) are attached to each
@@ -345,7 +345,7 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
-### 0.11.2 — proposed, not tagged — closed sidecars and ledger entries: a field nobody defined is never silent (10–11 October 2026)
+### 0.11.2 — closed sidecars and ledger entries: a field nobody defined is never silent (11 October 2026)
 
 Measured on 0.10.0 on 2026-10-10 and again on 0.11.1 on 2026-10-11 (the same three cases, the same silence) with a signed, anchored pack built by this toolkit: a `.sig.json` sidecar carrying a key
 nobody defined (`x_unknown_2026`) verified `valid: true, authenticated: true` with no trace in the receipt (the sidecar
