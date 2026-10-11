@@ -359,21 +359,23 @@ a closed object (`SIG_SIDECAR_KEYS`: `signer_id`, `sig_alg`, `public_key_b64`, `
 self_hash` plus the two anchor fields the r4 rule reads there (`anchored_pack_sha3`, `anchored_utc`) (`LEDGER_ENTRY_KEYS`)
 — a foreign field is a `ledger-chain` FAIL naming the entry and the field; the pack's
 own top level keeps its kind-defined body and the receipt now carries a `pack-fields` layer (SKIP) that LISTS the body
-keys beside the format's four, so an auditor sees what the format did not judge. Tests: `tests/test_closed_schema_20261010.py` (4), each case built in a
+keys beside the format's four, so an auditor sees what the format did not judge. Tests: `tests/test_closed_schema_20261010.py` (5), each case built in a
 temporary directory removed at the end; the intact pack is the positive control.
 
 **Go, Java and Node aligned (11 October 2026).** `verifiers/go/pack.go`, `verifiers/java/OeVerify.java` and
 `verifiers/js/oeverify.mjs` apply the same three closures with the same lists (`SIG_SIDECAR_KEYS`, `TSR_SIDECAR_KEYS`,
 `LEDGER_ENTRY_KEYS`, `PACK_FORMAT_KEYS`), the same detail text (`malformed sidecar: field(s) outside the closed schema: <keys>`,
 `<ledger>: N entry(ies) with a top-level field outside the closed schema, first at idx I: <keys>`, keys in code-point order, cut
-as the reference cuts them) and the same `pack-fields` SKIP layer; the RFC 3161 closure sits in their `timestamp` layer, the
-reference's `rfc3161` (a naming difference older than this change, declared). `verifiers/differential_oracle.py` carries ten
-`closed-*` cases, each with its expected verdict and with the (status, detail) of the layer that carries the rule compared across
+as the reference cuts them — the keys at 120 code points, the ledger path never: until the review of 11 October 2026 the whole
+detail was cut at 200, and under a ledger path of about 150 characters the key fell out of it in the four) and the same `pack-fields` SKIP layer; the RFC 3161 closure sits in their `timestamp` layer, the
+reference's `rfc3161` (a naming difference older than this change, declared). `verifiers/differential_oracle.py` carries eleven
+`closed-*` cases (one under a path longer than 200 characters), each with its expected verdict and with the (status, detail) of the layer that carries the rule compared across
 the four; `verifiers/closed_schema_mutants.py` is a generative, differential bench over the same rule (random keys at every
 closed level, wrong types, duplicates, the controls that must stay PASS; the expected class comes from this section, never from a
-verifier; the foreign key must be NAMED), run in CI by `tests/test_closed_schema_mutants.py`, which also proves the bench can go
-red. The numbers measured on the 0.10.x line on 11 October 2026 are in that line's README entry; this entry is the same change
-carried onto 0.11.1, to be re-measured here before any tag.
+verifier; the foreign key must be NAMED), run by `tests/test_closed_schema_mutants.py`, which also proves the bench can go
+red; the CI workflow runs the oracle with its `closed-*` cases, not this test. Measured on this line on 11 October 2026: the
+oracle 0/204 on Python, Node, Go and Java 27 (8/204 against the Go/Java/Node of 0.11.1, the positive control); the bench 100
+mutations GREEN on the four; the three silent cases of 0.11.1 are three named FAILs.
 ### 0.11.1 — deep JSON is refused by a bound, not by the interpreter (4 October 2026)
 
 The release build of 0.11.0 ran its tests on the newest Python (3.14) and two failed. **An SD-JWT whose payload is valid
