@@ -345,6 +345,35 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
+### 0.11.2 — proposed, not tagged — closed sidecars and ledger entries: a field nobody defined is never silent (10–11 October 2026)
+
+Measured on 0.10.0 on 2026-10-10 and again on 0.11.1 on 2026-10-11 (the same three cases, the same silence) with a signed, anchored pack built by this toolkit: a `.sig.json` sidecar carrying a key
+nobody defined (`x_unknown_2026`) verified `valid: true, authenticated: true` with no trace in the receipt (the sidecar
+lies outside every digest, so nothing ever read that key); a ledger entry written with an extra top-level key — hash
+recomputed over it — verified too; a pack WRITTEN with an extra top-level key, re-signed and re-anchored, verified
+(its body is kind-defined, so the verifier cannot know the key is foreign). Now (`verifier.py`): the signature sidecar is
+a closed object (`SIG_SIDECAR_KEYS`: `signer_id`, `sig_alg`, `public_key_b64`, `fingerprint`, `signed_pack_sha3`,
+`signature_b64`, `signed_utc`, `pq_sig_alg`, `pq_public_key_b64`, `pq_signature_b64`) and so is the RFC 3161 sidecar
+(`TSR_SIDECAR_KEYS`: `digest_sha256`, `tsa`, `tsr_b64`, `stamped_utc`, `validation_material`) — any other field is a
+`producer-signature` / `rfc3161` FAIL that names it; every ledger entry's top level is exactly `idx, ts, data, prev_hash,
+self_hash` plus the two anchor fields the r4 rule reads there (`anchored_pack_sha3`, `anchored_utc`) (`LEDGER_ENTRY_KEYS`)
+— a foreign field is a `ledger-chain` FAIL naming the entry and the field; the pack's
+own top level keeps its kind-defined body and the receipt now carries a `pack-fields` layer (SKIP) that LISTS the body
+keys beside the format's four, so an auditor sees what the format did not judge. Tests: `tests/test_closed_schema_20261010.py` (4), each case built in a
+temporary directory removed at the end; the intact pack is the positive control.
+
+**Go, Java and Node aligned (11 October 2026).** `verifiers/go/pack.go`, `verifiers/java/OeVerify.java` and
+`verifiers/js/oeverify.mjs` apply the same three closures with the same lists (`SIG_SIDECAR_KEYS`, `TSR_SIDECAR_KEYS`,
+`LEDGER_ENTRY_KEYS`, `PACK_FORMAT_KEYS`), the same detail text (`malformed sidecar: field(s) outside the closed schema: <keys>`,
+`<ledger>: N entry(ies) with a top-level field outside the closed schema, first at idx I: <keys>`, keys in code-point order, cut
+as the reference cuts them) and the same `pack-fields` SKIP layer; the RFC 3161 closure sits in their `timestamp` layer, the
+reference's `rfc3161` (a naming difference older than this change, declared). `verifiers/differential_oracle.py` carries ten
+`closed-*` cases, each with its expected verdict and with the (status, detail) of the layer that carries the rule compared across
+the four; `verifiers/closed_schema_mutants.py` is a generative, differential bench over the same rule (random keys at every
+closed level, wrong types, duplicates, the controls that must stay PASS; the expected class comes from this section, never from a
+verifier; the foreign key must be NAMED), run in CI by `tests/test_closed_schema_mutants.py`, which also proves the bench can go
+red. The numbers measured on the 0.10.x line on 11 October 2026 are in that line's README entry; this entry is the same change
+carried onto 0.11.1, to be re-measured here before any tag.
 ### 0.11.1 — deep JSON is refused by a bound, not by the interpreter (4 October 2026)
 
 The release build of 0.11.0 ran its tests on the newest Python (3.14) and two failed. **An SD-JWT whose payload is valid

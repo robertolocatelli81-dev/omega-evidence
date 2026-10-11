@@ -103,6 +103,21 @@ def _rollup(layers: List[Dict[str, str]]) -> Dict[str, Any]:
             "verified_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
+# Closed schemas (2026-10-10): the two sidecars and the ledger entry are exactly what pack.py / ledger.py write. Measured on 0.10.0:
+# a `.sig.json` with a key nobody defined verified valid+authenticated with no trace in the receipt (the sidecar lies outside every
+# digest); a ledger entry written with an extra top-level key (hash recomputed over it) verified too. The pack's own top level is
+# kind-defined (build_pack merges the body): its keys outside the format's four are REPORTED, not refused (layer `pack-fields`).
+SIG_SIDECAR_KEYS = frozenset({"signer_id", "sig_alg", "public_key_b64", "fingerprint", "signed_pack_sha3", "signature_b64", "signed_utc",
+                              "pq_sig_alg", "pq_public_key_b64", "pq_signature_b64"})
+TSR_SIDECAR_KEYS = frozenset({"digest_sha256", "tsa", "tsr_b64", "stamped_utc", "validation_material"})
+LEDGER_ENTRY_KEYS = frozenset({"idx", "ts", "data", "prev_hash", "self_hash", "anchored_pack_sha3", "anchored_utc"})   # + the anchor fields r4 reads at the top level, like Go/Java/Node
+PACK_FORMAT_KEYS = frozenset({"kind", "generated_utc", "honest_scope", "pack_sha3"})
+
+
+def _unknown(obj, allowed) -> List[str]:
+    return sorted(k for k in obj if k not in allowed) if isinstance(obj, dict) else []
+
+
 def _ledger_sidecar(path: str) -> Optional[str]:
     cand = path[:-5] + ".ledger.jsonl" if path.endswith(".json") else path + ".ledger.jsonl"
     return cand if os.path.exists(cand) else None
@@ -160,6 +175,10 @@ def _check_ledger(path: str, ledger_path: Optional[str], layers: List, pack: Opt
     if not entries:
         layers.append(_layer("ledger-chain", "FAIL", f"{lp}: ledger empty — nothing anchored"))
         return False
+    bad = [(e.get("idx") if isinstance(e, dict) else None, _unknown(e, LEDGER_ENTRY_KEYS)) for e in entries if _unknown(e, LEDGER_ENTRY_KEYS)]
+    if bad:   # closed entry schema (2026-10-10)
+        layers.append(_layer("ledger-chain", "FAIL", f"{lp}: {len(bad)} entry(ies) with a top-level field outside the closed schema, first at idx {bad[0][0]}: {', '.join(bad[0][1])}"[:200]))
+        return False
     if not pack_sha3 or not any(_anchors_pack(e, pack_sha3) for e in entries):
         layers.append(_layer("ledger-chain", "FAIL",
                              "valid chain but this pack is not anchored (no anchored_pack_sha3 entry)"))
@@ -183,6 +202,9 @@ def _check_timestamp(path: str, layers: List, pack_bytes: Optional[bytes] = None
         layers.append(_layer("rfc3161", "FAIL", f"malformed sidecar: {e}"))
         return "FAIL"
     current = sha256_bytes(pack_bytes)   # the bytes verify_pack read: the digest is bound to what was verified
+    if _unknown(side, TSR_SIDECAR_KEYS):   # closed sidecar schema (2026-10-10)
+        layers.append(_layer("rfc3161", "FAIL", "malformed sidecar: field(s) outside the closed schema: " + ", ".join(_unknown(side, TSR_SIDECAR_KEYS))[:120]))
+        return "FAIL"
     if current != side.get("digest_sha256"):
         layers.append(_layer("rfc3161", "FAIL", "pack changed after stamping"))
         return "FAIL"
@@ -317,6 +339,9 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
     # The classical layer is Ed25519 ONLY — the same rule as the Go/Java/JS verifiers (council 16/09 r1: a
     # registered PQ backend must never be accepted here as the producer signature; a sig_alg that is not a
     # string is a malformed sidecar, never a crash)
+    if _unknown(side, SIG_SIDECAR_KEYS):   # closed sidecar schema (2026-10-10)
+        layers.append(_layer("producer-signature", "FAIL", "malformed sidecar: field(s) outside the closed schema: " + ", ".join(_unknown(side, SIG_SIDECAR_KEYS))[:120]))
+        return "FAIL", False, True, "sidecar field outside the closed schema"
     alg = side.get("sig_alg", "ed25519")
     if not isinstance(alg, str) or not alg:   # 25/09/2026: "" is a present, malformed field (it was an "unsupported" SKIP)
         layers.append(_layer("producer-signature", "FAIL", "malformed sidecar fields: sig_alg is not a non-empty string"))
@@ -470,6 +495,8 @@ def _verify_pack(layers, path, ledger_path, trust_store, expected_pq_public_key_
                          "limit declared" if _hs_ok else
                          "no explicit honest_scope (or overclaim without a real NOT-limit)"))
 
+    body_keys = _unknown(pack, PACK_FORMAT_KEYS)   # reported, not judged: the body is kind-defined (build_pack merges it into the top level)
+    layers.append(_layer("pack-fields", "SKIP", ("body keys (kind-defined, not judged): " + ", ".join(body_keys))[:200] if body_keys else "no body keys beside the format's four"))
     declared = pack.get("pack_sha3", "")
     try:
         computed = sha3({k: v for k, v in pack.items() if k != "pack_sha3"}, from_text=True)   # r5: the text as read, like the three
