@@ -485,6 +485,13 @@ def _closed_schema_cases(d, cases, mk, idt):
     e0 = {"idx": 0, "ts": "2026-10-11T00:00:00+00:00", "data": {}, "prev_hash": "0" * 64, "anchored_pack_sha3": H, "anchored_utc": "2026-10-11T00:00:00+00:00"}; e0["self_hash"] = _hce(e0)
     open(p[:-5] + ".ledger.jsonl", "w").write(json.dumps(e0, separators=(",", ":")) + "\n")
     cases["closed-ledger-anchor-fields-top-level"] = (p, [], None); EXPECT["closed-ledger-anchor-fields-top-level"] = "PASS"; COMPARE_LAYERS["closed-ledger-anchor-fields-top-level"] = ("ledger-chain",)
+    # 3b. the same foreign key under a directory whose path alone is longer than 200 code points: the detail must still name
+    #     the key in the four (11/10/2026: the whole detail was cut at 200, path included, and the key fell off the end)
+    deep = os.path.join(d, *(["customer_evidence_archive_2026"] * 5)); os.makedirs(deep, exist_ok=True)
+    pd = os.path.join(deep, "closed-ledger-unknown-key-long-path.json"); P.write_pack(pd, P.build_pack("demo", {"claim": "x"}, SCOPE))
+    P.anchor_pack(pd, pd[:-5] + ".ledger.jsonl"); rechain(pd[:-5] + ".ledger.jsonl", lambda es: es[0].__setitem__(KEY, True))
+    cases["closed-ledger-unknown-key-long-path"] = (pd, [], None); EXPECT["closed-ledger-unknown-key-long-path"] = "FAIL"
+    COMPARE_LAYERS["closed-ledger-unknown-key-long-path"] = ("ledger-chain",)
     # 4. the pack's own body: a producer-written key beside the format's four is REPORTED in pack-fields (SKIP), never refused
     pb = os.path.join(d, "closed-pack-body-key.json"); P.write_pack(pb, P.build_pack("demo", {"claim": "x", KEY: 1}, SCOPE)); P.anchor_pack(pb, pb[:-5] + ".ledger.jsonl")
     cases["closed-pack-body-key-reported"] = (pb, [], None); EXPECT["closed-pack-body-key-reported"] = "PASS"; COMPARE_LAYERS["closed-pack-body-key-reported"] = ("pack-fields",)

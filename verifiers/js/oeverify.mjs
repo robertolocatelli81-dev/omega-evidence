@@ -178,7 +178,7 @@ const cut = (s, n) => [...s].slice(0, n).join("");   // at most n code points, a
 function ledgerUnknown(lp, entries) {
   let n = 0, first = null, keys = null;
   for (const e of entries) { const u = unknownKeys(e, LEDGER_ENTRY_KEYS); if (!u.length) continue; if (n === 0) { first = "idx" in e ? String(e.idx) : "None"; keys = u; } n++; }
-  return n === 0 ? null : cut(`${lp}: ${n} entry(ies) with a top-level field outside the closed schema, first at idx ${first}: ${keys.join(", ")}`, 200);
+  return n === 0 ? null : `${lp}: ${n} entry(ies) with a top-level field outside the closed schema, first at idx ${first}: ${cut(keys.join(", "), 120)}`;   // the keys are cut, never the path
 }
 // foldAlg: the shape under which a VARIANT of a supported algorithm name is recognised (0.10.0) — ASCII letters lowercased,
 // every UTF-16 unit that is not an ASCII letter or digit dropped (spaces, hyphens, underscores, non-ASCII). "eD25519",

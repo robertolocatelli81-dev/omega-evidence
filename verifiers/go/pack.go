@@ -463,7 +463,7 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 	} else if len(entries) == 0 {
 		add("ledger-chain", "FAIL", lp+": ledger empty — nothing anchored")
 	} else if n, first, keys := ledgerUnknown(entries); n != 0 { // closed entry schema (2026-10-10): named, never silent
-		add("ledger-chain", "FAIL", cutRunes(fmt.Sprintf("%s: %d entry(ies) with a top-level field outside the closed schema, first at idx %s: %s", lp, n, first, strings.Join(keys, ", ")), 200))
+		add("ledger-chain", "FAIL", fmt.Sprintf("%s: %d entry(ies) with a top-level field outside the closed schema, first at idx %s: %s", lp, n, first, cutRunes(strings.Join(keys, ", "), 120)))   // the keys are cut, never the path
 	} else {
 		anch := false
 		for _, e := range entries {

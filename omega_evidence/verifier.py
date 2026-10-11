@@ -177,7 +177,7 @@ def _check_ledger(path: str, ledger_path: Optional[str], layers: List, pack: Opt
         return False
     bad = [(e.get("idx") if isinstance(e, dict) else None, _unknown(e, LEDGER_ENTRY_KEYS)) for e in entries if _unknown(e, LEDGER_ENTRY_KEYS)]
     if bad:   # closed entry schema (2026-10-10)
-        layers.append(_layer("ledger-chain", "FAIL", f"{lp}: {len(bad)} entry(ies) with a top-level field outside the closed schema, first at idx {bad[0][0]}: {', '.join(bad[0][1])}"[:200]))
+        layers.append(_layer("ledger-chain", "FAIL", f"{lp}: {len(bad)} entry(ies) with a top-level field outside the closed schema, first at idx {bad[0][0]}: " + ', '.join(bad[0][1])[:120]))   # the KEYS are cut, never the path (a long path cut them out, 11/10/2026)
         return False
     if not pack_sha3 or not any(_anchors_pack(e, pack_sha3) for e in entries):
         layers.append(_layer("ledger-chain", "FAIL",
