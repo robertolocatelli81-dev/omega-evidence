@@ -240,11 +240,16 @@ A check that could not run is not a finding about the pack. The **CLI** reports 
 | any of the three, not delivered | 74 | a verdict was computed but its receipt could not be written whole — stdout full (ENOSPC), its reader gone (EPIPE), stdout closed, a file that took only part of it (a short write, then EFBIG or ENOSPC) — whatever the verdict was; one line `receipt not written: <reason>` on stderr (0.11.3) |
 
 Exit 74 (sysexits `EX_IOERR`, since 0.11.3) is the same in the four pack CLIs and in `python -m omega_evidence.interop.aat
-verify|csv`, so an exit of 0 also means the receipt reached stdout whole. A limit of two runtimes, not of the code: with
+verify|csv`, so an exit of 0 also means the receipt reached stdout whole — with `python -u` / `PYTHONUNBUFFERED` too, and on
+a stdout that is non-blocking: a full one is waited for, as a blocking write waits (a slow reader does not lose the receipt;
+one that goes away does, and that is 74). A limit of two runtimes, not of the code: with
 stdout closed at start (`>&-`), Node and Go reopen fd 1 on `/dev/null` before the program runs, so for them `>&-` is
 `>/dev/null` — the program cannot see it and the exit stays the verdict's. Python sees the closed descriptor and exits 74;
 the JVM opens one of its own files read-only on the free fd 1 (measured: `lib/modules` on JDK 27), so Java's write fails
-(EBADF) and the exit is 74 too.
+(EBADF) and the exit is 74 too. A usage error is exit 2 with its message on stderr, also when stderr is full, closed or its
+reader gone (nothing goes to stdout); the AAT CLI's `-h` prints the help as its output, so a help not written whole is 74.
+Measured on Linux only. Not measured on Windows or macOS; on Windows Python's `select` waits on sockets only, so there a full
+non-blocking pipe would be reported as 74 (declared, not measured).
 
 This holds whether the check was **required or optional**. Measured 24/09/2026: with the PQ layer optional and a
 co-signature present but unverifiable here, a runtime without the backend used to answer `PASS` / exit 0 on the very
@@ -353,7 +358,7 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
-### 0.11.3 — a receipt that was not written is exit 74, never the verdict's code (12 October 2026)
+### 0.11.3 — a receipt that was not written is exit 74, never the verdict's code (12–13 October 2026)
 
 Measured on 0.11.2 (`864bef4`) on 12 October 2026 with real processes, on a valid and on a tampered signed pack, with stdout
 on `/dev/full`, on a pipe whose reader had gone (`| head -c 0`) and closed (`>&-`) — the receipt never arrives in these
@@ -363,38 +368,72 @@ stderr (the Node write callback received the error and ignored it); Go did the s
 with "Exception ignored … OSError" from the interpreter's last flush on a full stdout or a gone reader (1 with a traceback
 when the receipt was over 64 KiB), and with stdout closed the outcome's own code (0 / 1, 2 for an AAT input error) in silence.
 
+Measured again on 13 October 2026 on the first version of this fix (`5520cd8`, not released), with Python 3.9.25, 3.11.2 and
+3.13.15: under `python -u` / `PYTHONUNBUFFERED` stdout is a raw file whose short write Python's text layer drops in silence —
+appended to a file of 1 000 bytes under `ulimit -f 1`, both Python CLIs exited with the verdict's code (0, 1 or 2) and 24
+bytes of the receipt, and a 71 162-byte receipt through `| head -c 100` exited 0; on a non-blocking stdout read 1 s late,
+Python and Java exited 74 with 65 536 bytes of the receipt (71 162 and 70 996) in the pipe, where a blocking write would have
+delivered it whole, and Python unbuffered exited 0 with them; a usage error with stderr full or its reader gone exited 120,
+and with stderr closed the usage went to stdout (exit 1 on 3.9 and 3.11, 2 on 3.13); the AAT `-h` on a full stdout exited 0.
+
 Now, the same rule in the four pack CLIs and the AAT CLI: the receipt is written and flushed before the exit code is
 decided; if the write fails, one line `receipt not written: <reason>` goes to stderr (if stderr fails too, nothing is
-raised) and the exit is **74** (sysexits `EX_IOERR`), whatever the verdict. Python flushes `sys.stdout` inside the check and,
-after a failure, points fd 1 (and fd 2, when stderr failed too) at the null device, so the interpreter's last flush can no
-longer turn the code into 120; Node
+raised) and the exit is **74** (sysexits `EX_IOERR`), whatever the verdict. Python encodes the receipt as its stdout text
+layer would (encoding, error handler, a byte order mark only where that layer writes one) and writes the bytes to
+`sys.stdout.buffer` in a loop that sees the count — a short count continues, a full non-blocking stdout is waited for in
+`select`, nothing taken without waiting is an error — flushes before the exit code is decided and, after a failure, points
+the descriptor behind the failed stream (from `stream.fileno()`, never the number 1 or 2) at the null device, so the
+interpreter's last flush can no longer turn the code into 120; argparse's usage and errors go through a stderr write that
+never raises (exit 2, nothing on stdout) and the AAT help through the receipt's writer (74 when lost); in process, a
+`sys.stdout` with no bytes below it (`StringIO`) or no descriptor (a `TextIOWrapper` over `io.BytesIO`) gets the receipt; Node
 exits from the write callback, with 74 when the callback carries an error, and on a regular file writes the receipt itself
 in a loop until it is whole (Node's stdout on a file makes one `writeSync` and dropped what a short write left: 4 096 bytes
 of a receipt over 64 KiB in a file limited to 4 096 bytes, exit 0, measured on 0.11.2 and on Node 22.23.2 and 24.19.0); Go checks the error of its write and receives
-SIGPIPE on a channel, so a gone reader is an EPIPE error, not a signal; Java writes to fd 1 through a `FileOutputStream`
-(`System.out` swallows write errors) — the receipt is ASCII, so in any ASCII-compatible stdout encoding (the default,
+SIGPIPE on a channel, so a gone reader is an EPIPE error, not a signal; Java writes to fd 1 through the `FileChannel` of a
+`FileOutputStream` (`System.out` swallows write errors) in a loop that sees the count, and waits out a full non-blocking
+stdout (0 bytes taken) in sleeps of 1 to 50 ms, since the JDK's public API cannot poll fd 1 — the receipt is ASCII, so in any ASCII-compatible stdout encoding (the default,
 Windows code pages included) the bytes are the ones `println` wrote; with a non-ASCII-compatible `-Dstdout.encoding`
 (UTF-16) `println` wrote two bytes per character, and the receipt is now ASCII there too (measured on one receipt: 1 548 →
 773 bytes). The exit codes 0, 1, 2
 and 77 keep their meaning. Declared limit: with `>&-`, Node and Go reopen fd 1 on `/dev/null` before the program runs; there
 the exit stays the verdict's (the table above).
 
-Tests: `tests/test_receipt_exit74.py` runs the four pack CLIs and the AAT CLI as real processes on a valid and an invalid
-input, with stdout to a file (the control: the verdict's code and the whole receipt), on `/dev/full`, on a pipe closed before
-the start, through `| head -c 0` (the producer started 0.2 s after `head`: started together, a fast producer can write into
-the pipe buffer before `head` exits — the kernel accepted the bytes, the write succeeded, and no program can know they were
-never read; measured on Go, 1 run of 50), on `/dev/full` with stderr there too, and closed where the runtime sees it, plus a 71 KB receipt on a pipe read 0.5 s late
-(whole, the same bytes as in a file apart from the `verified_utc` second) and in a file limited to 4 096 bytes (`ulimit -f
-4`: a short write, then EFBIG — 74); for the AAT CLI also the `--key`, `--pubkey` and `--epochs` error objects and a CSV that
-an ASCII stdout cannot encode (74). Measured on this line on 12 October 2026 with
-Python 3.11.2, Node 22.23.2 and 24.19.0, Go 1.27.1 and JDK 27: 20 tests green; the same test file on the 0.11.2 code: 20
-red (the positive control); 27 mutants — flush removed, error check removed, exit with the verdict, no stderr line, the null
-device not used for stdout or for stderr, SIGPIPE not handled, `println` / `console.log` / `print` back, ValueError not
-caught, Node's file write not looped — 27 killed. Not reached by any input here, so not covered: the two `verifier error`
-objects of the AAT CLI and the last-resort handlers of Go (`recover`) and Java (`catch (Throwable)`). Before and after on one set of inputs, 102 runs per tree:
-the 34 runs that deliver a receipt (to a file or through the slow pipe) give the same exit code and the same bytes on both
-(Python apart from the `verified_utc` second); of the 68 runs that lose it, 62 now exit 74 and 6 are the declared `>&-`
-limit of Node and Go (on 0.11.2: 0 ×24, 1 ×15, 120 ×21, 141 or SIGPIPE ×6, 2 ×2).
+Tests: `tests/test_receipt_exit74.py` (39 tests) runs the four pack CLIs and the AAT CLI as real processes on a valid and an
+invalid input, with stdout to a file (the control: the verdict's code and the whole receipt), on `/dev/full`, on a pipe closed
+before the start, through `| head -c 0` (the producer started 0.2 s after `head`: started together, a fast producer can write
+into the pipe buffer before `head` exits — the kernel accepted the bytes, the write succeeded, and no program can know they
+were never read; measured on Go, 1 run of 50), on `/dev/full` with stderr there too, and closed where the runtime sees it,
+plus a 71 KB receipt on a pipe read 0.5 s late (whole, the same bytes as in a file apart from the `verified_utc` second) and in
+a file limited to 4 096 bytes (`ulimit -f 4`: a short write, then EFBIG — 74); a short write of 24 bytes (a file of 1 000 bytes
+under `ulimit -f 1`) in the four runtimes and, for Python, unbuffered too; a stdout that is non-blocking and already full when
+the process starts, small receipts and the 71 KB one, buffered and unbuffered, in the four runtimes — the process must wait
+asleep (in some 1-second window under 0.2 s of CPU; a loop retrying EAGAIN uses about 1 s) and, once the pipe is read, deliver
+the whole receipt with the verdict's code; a usage error with stderr full, closed and on a pipe whose reader has gone (exit 2,
+nothing on stdout) in the four runtimes and the AAT CLI; the AAT `-h` lost (74); the receipt's bytes in five stdout encodings
+and one error handler, to a new file, appended to one and to a pipe, buffered and unbuffered, against a second process that
+writes the same text through Python's own text layer; `main()` in process with `sys.stdout` a `StringIO`, a `TextIOWrapper`
+over `io.BytesIO` (with and without `write_through`) and after text the caller wrote first; for the AAT CLI also the `--key`,
+`--pubkey` and `--epochs` error objects and a CSV that an ASCII stdout cannot encode (74). Measured on this line on 13 October
+2026 with Python 3.9.25, 3.11.2 and 3.13.15, Node 22.23.2 and 24.19.0, Go 1.27.1 and JDK 27: 39 tests green; the same file on
+the 0.11.2 code: 34 fail (the positive control); on `5520cd8`: 8 fail. 53 mutants of the lines that write — among them the
+text layer back in place of the byte loop, the count ignored, EAGAIN not waited for or retried in a spin (in the write, in the
+flush, `select` with a zero timeout, Java's sleep replaced by a spin, Java's `FileOutputStream.write` back), the descriptor asked
+for before writing, no fallback for a `StringIO`, a fixed encoding or error handler, the byte order mark always or never
+dropped, argparse's own usage, help and exit back — 51 killed; the two alive are a guard no input reaches here (a write that
+takes 0 bytes without EAGAIN) and the explicit flush of the stderr line, equivalent because Python's stderr is line-buffered
+(3.9 on) or write-through and every line ends in `\n`. Not reached by any input here, so not covered: the two `verifier error`
+objects of the AAT CLI and the last-resort handlers of Go (`recover`) and Java (`catch (Throwable)`). A generative bench (not in
+this repository) ran every CLI on four inputs (valid, tampered, a receipt over 64 KiB, a directory; for the AAT CLI an
+unreadable chain and the CSV) × 13 stdout modes × stderr ok, full and closed × Python buffered and unbuffered — 588 runs per
+tree with Python 3.11, Node 24, Go and Java, 336 with Python 3.9 and 3.13 alone, 84 with Node 22 — and counted the runs where
+a receipt was lost without 74, a deliverable one did not arrive whole, a whole one carried another code, a 74 came without its
+stderr line, or a traceback appeared: on 0.11.2 351 of 588 (Python 107 of 168 buffered and 107 of 168 unbuffered, Node 41 of
+84, Go 41 of 84, Java 55 of 84), 214 of 336 on 3.9 and on 3.13, 41 of 84 on Node 22; on `5520cd8` 13 of 588 (Python unbuffered
+11, Python and Java on the non-blocking pipe read late 1 each), 12 of 336 on 3.9 and 3.13, 0 of 84 on Node 22; on this line 0
+in every one of them. Receipts to a regular file, the 188 cases of the differential oracle in the four runtimes and once
+more in Python unbuffered (against 0.11.2 buffered), 940 runs: the same exit code and the same bytes on 0.11.2 and on this line
+apart from the `verified_utc` second (0 differences; the same comparison with one space added before the receipt's newline
+finds 188 of 188).
 
 ### 0.11.2 — closed sidecars and ledger entries: a field nobody defined is never silent (11 October 2026)
 
@@ -584,9 +623,12 @@ release. The fixes are in this release; the description of what was wrong is thi
   seen); the lock is released before the first entry is yielded, so appending while iterating cannot deadlock, and the
   text is held in memory while iterating. (9) The Node verifier writes its receipt and exits only once the write is
   drained: with a receipt longer than a pipe buffer (64 KiB, e.g. a layer detail quoting a 70 000-byte `sig_alg`) a piped
-  reader got 65 536 bytes of unparsable JSON in 0.9.1; the oracle now carries that case (the four write it whole). A write
-  that FAILED was not covered: the callback received the error and ignored it, so with stdout full or its reader gone the
-  exit was still 0 or 1 and the receipt lost, until 0.11.3 (now 74, see *0.11.3*).
+  reader got 65 536 bytes of unparsable JSON in 0.9.1; the oracle now carries that case (the four write it whole to a
+  blocking pipe; to a non-blocking one read late, Node and Go did too, while Python and Java left 65 536 bytes of a 71 KB
+  receipt in the pipe — on 0.11.2 with exit 120 for Python, 0 for Python unbuffered and for Java, measured 13/10/2026 — until
+  0.11.3, see *0.11.3*). A write that FAILED was not covered: the
+  callback received the error and ignored it, so with stdout full or its reader gone the exit was still 0 or 1 and the
+  receipt lost, until 0.11.3 (now 74, see *0.11.3*).
 
 ### Corrections (2026-09-26)
 
