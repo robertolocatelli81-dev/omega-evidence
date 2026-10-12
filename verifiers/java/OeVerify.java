@@ -381,11 +381,22 @@ public class OeVerify {
     // stdout closed (12/10/2026). The receipt is ASCII (writeString escapes everything outside 0x20..0x7e), so these are the
     // bytes System.out wrote in any ASCII-compatible stdout encoding (with -Dstdout.encoding=UTF-16 it wrote two bytes per
     // character; the receipt is ASCII now); the line separator is println's.
+    // The write goes through the FileChannel of that stream, in a loop that sees the count: on a stdout that is non-blocking
+    // and full (a reader that reads late) FileOutputStream.write threw EAGAIN and the exit was 74 with 65 536 of a 70 996-byte
+    // receipt in the pipe (13/10/2026), where a blocking write would have delivered it whole; the channel returns 0 instead.
+    // The JDK's public API cannot poll fd 1, so a 0 is waited out in sleeps of 1 to 50 ms (no spin) and retried; a reader
+    // that goes away makes the next write EPIPE: 74.
     static void emit(String receipt, int code) {
         try {
-            FileOutputStream fd1 = new FileOutputStream(FileDescriptor.out);
-            fd1.write((receipt + System.lineSeparator()).getBytes(StandardCharsets.US_ASCII));   // unbuffered: no flush to forget
-        } catch (IOException e) {
+            java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap((receipt + System.lineSeparator()).getBytes(StandardCharsets.US_ASCII));
+            java.nio.channels.FileChannel fd1 = new FileOutputStream(FileDescriptor.out).getChannel();   // unbuffered: no flush to forget
+            long nap = 1;
+            while (b.hasRemaining()) {
+                if (fd1.write(b) > 0) { nap = 1; continue; }
+                Thread.sleep(nap);
+                nap = Math.min(nap * 2, 50);
+            }
+        } catch (IOException | InterruptedException e) {
             System.err.println("receipt not written: " + Objects.toString(e.getMessage(), e.getClass().getSimpleName()));
             System.err.flush();
             System.exit(EX_IOERR);
