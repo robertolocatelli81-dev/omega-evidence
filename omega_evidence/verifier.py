@@ -42,6 +42,7 @@ A bare fabricated pack (no ledger, no signature) cannot pass. A SELF-MADE ledger
 
 from __future__ import annotations
 
+import argparse
 import base64
 import json
 import sys
@@ -548,40 +549,139 @@ def _point_at_devnull(stream) -> None:
         pass
 
 
+def _say(text: str) -> bool:
+    """Write `text` to stderr without ever raising; True when it was written. If stderr is full or closed, its descriptor is
+    pointed at the null device (so the interpreter's last flush cannot fail again and turn the exit code into 120) and the
+    caller's exit code stands."""
+    err = sys.stderr
+    if err is None:   # the process started with fd 2 closed
+        return False
+    try:
+        err.write(text)
+        err.flush()
+        return True
+    except (OSError, ValueError):
+        _point_at_devnull(err)
+        return False
+
+
+def _text_layer_bytes(out, buf, text: str) -> bytes:
+    """The bytes Python's own stdout text layer writes for `text` as the first thing written: its encoding and error
+    handler, "\\n" as os.linesep where the platform translates it (not Linux; not measured here), and a byte order mark only
+    where that layer puts one — utf-16 / utf-32 only on a stdout seekable at offset 0 (a file), utf-8-sig on a pipe too,
+    none on a seekable stdout past offset 0 (measured on 3.9, 3.11 and 3.13, 13/10/2026)."""
+    import codecs
+    if os.linesep != "\n":
+        text = text.replace("\n", os.linesep)
+    encoding = out.encoding or "utf-8"
+    enc = codecs.getincrementalencoder(encoding)(out.errors or "strict")
+    try:
+        seekable = buf.seekable()
+        at_start = seekable and buf.tell() == 0
+    except (OSError, ValueError):
+        seekable = at_start = False
+    if (seekable and not at_start) or (not seekable and codecs.lookup(encoding).name in ("utf-16", "utf-32")):
+        enc.setstate(0)   # no byte order mark
+    return enc.encode(text, final=True)
+
+
+def _wait_writable(buf) -> None:
+    """stdout is non-blocking and full: wait until it can take more, as a blocking write would (the reader is slow, not
+    gone; one that goes away makes the next write EPIPE). `select` sleeps in the kernel and Python retries it after a
+    signal (PEP 475). The descriptor is asked for only here: a byte stream with no descriptor (an io.BytesIO under a
+    TextIOWrapper, as pytest's capsys) never blocks. POSIX only: on Windows `select` waits on sockets only, so a full
+    non-blocking pipe there is reported as 74 (not measured)."""
+    import select
+    try:
+        select.select([], [buf.fileno()], [])
+    except (OSError, ValueError) as e:   # no descriptor, or one select cannot wait on
+        raise OSError(f"stdout is non-blocking and cannot be waited for: {e}")
+
+
+def _write_all(text: str) -> None:
+    """Write the whole text to stdout and flush it; raise OSError when it did not all get there. The bytes go to
+    `sys.stdout.buffer` in a loop that checks the count: with -u or PYTHONUNBUFFERED that is a raw FileIO whose write() can
+    take part of the data (a file size limit, a disk nearly full) and return the count without raising, or return None (a
+    full non-blocking pipe) — the text layer above dropped the rest in silence, so 0.11.3 exited with the verdict's code
+    and a cut receipt (13/10/2026). A non-blocking stdout that is full is waited for, never given up on."""
+    out = sys.stdout
+    if out is None:
+        raise OSError("stdout is closed")
+    try:
+        out.flush()   # whatever the text layer still holds goes first
+        buf = getattr(out, "buffer", None)
+        if buf is None:   # an in-process text stream (io.StringIO): no bytes below it
+            out.write(text)
+            out.flush()
+            return
+        data = memoryview(_text_layer_bytes(out, buf, text))
+        while data:
+            try:
+                n = buf.write(data)
+                waited = False
+            except BlockingIOError as e:   # buffered stdout on a full non-blocking pipe: part of it taken
+                n, waited = e.characters_written, True
+            if n is None:   # raw stdout on a full non-blocking pipe: nothing taken
+                n, waited = 0, True
+            if n < 0 or n > len(data) or (n == 0 and not waited):
+                raise OSError(f"short write: {len(data)} bytes not written")
+            data = data[n:]
+            if data and waited:
+                _wait_writable(buf)
+        while True:   # flushed HERE, before the exit code is decided, not by the interpreter at exit
+            try:
+                buf.flush()
+                return
+            except BlockingIOError:
+                _wait_writable(buf)
+    except ValueError as e:   # I/O operation on a closed file, or text the stream cannot encode
+        raise OSError(str(e))
+
+
 def write_receipt(text: str) -> bool:
     """Write `text` to stdout and flush it. True only when the whole text was handed to the operating system.
     On a failed write — stdout full (ENOSPC), its reader gone (EPIPE), stdout closed (EBADF, or `sys.stdout` None when
-    the process started with fd 1 closed) — one line `receipt not written: <reason>` goes to stderr (best effort: if
+    the process started with fd 1 closed), a file that took only part of it (a short write, then EFBIG or ENOSPC) — the
+    descriptor behind stdout is pointed at the null device, one line `receipt not written: <reason>` goes to stderr (if
     stderr fails too, nothing is raised) and the caller exits EX_IOERR (74), never the verdict's code (12/10/2026: with
     stdout full or its reader gone 0.11.2 exited 120, or 1 with a traceback when the receipt was larger than the stream's
     buffer; with stdout closed it exited 0 / 1 in silence — the receipt lost every time)."""
-    out = sys.stdout
     try:
-        if out is None:
-            raise OSError("stdout is closed")
-        out.write(text)
-        out.flush()    # flushed HERE, before the exit code is decided, not by the interpreter at exit
+        _write_all(text)
         return True
-    except (OSError, ValueError) as e:   # ValueError: a closed file object, or text the stream cannot encode
-        err = sys.stderr
-        try:
-            if err is not None:
-                err.write(f"receipt not written: {e}\n")
-                err.flush()
-        except (OSError, ValueError):   # stderr full or closed too: the exit is 74 all the same
-            if err is not None:
-                _point_at_devnull(err)
-        if out is not None:
-            _point_at_devnull(out)
+    except OSError as e:
+        if sys.stdout is not None:
+            _point_at_devnull(sys.stdout)
+        _say(f"receipt not written: {e}\n")
         return False
+
+
+class CliParser(argparse.ArgumentParser):
+    """argparse with its output through the writers above (0.11.3). The usage and error lines go to stderr with a write
+    that never raises (argparse's own: with stderr full the interpreter's last flush exited 120; with stderr closed the
+    usage went to STDOUT, and the exit was 1 on Python 3.9 and 3.11 — measured 13/10/2026); the exit code stays 2. `-h`
+    prints the help as the command's output: not written whole, the exit is 74."""
+
+    def print_usage(self, file=None):   # argparse calls it only from error(), meaning stderr
+        _say(self.format_usage())
+
+    def print_help(self, file=None):
+        if file is not None:
+            return super().print_help(file)
+        if not write_receipt(self.format_help()):
+            self._help_lost = True
+
+    def exit(self, status=0, message=None):
+        if message:
+            _say(message)
+        raise SystemExit(EX_IOERR if getattr(self, "_help_lost", False) else status)
 
 
 def main(argv=None) -> int:
     """`python -m omega_evidence.verifier <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq] [--require-signed]`
     prints the receipt as JSON; exit 0 only when `valid` (and, with a PQ requirement, `pq_protected`) and the receipt was
     written whole; exit 74 when it was not (stdout full, closed, or its reader gone), whatever the verdict."""
-    import argparse
-    p = argparse.ArgumentParser(allow_abbrev=False, add_help=False, prog="omega-evidence-verify")   # r3: -h/--help exit 0 here, 2 in the three (usage on stderr documents the flags)
+    p = CliParser(allow_abbrev=False, add_help=False, prog="omega-evidence-verify")   # r3: -h/--help exit 0 here, 2 in the three (usage on stderr documents the flags)
     p.add_argument("pack")
     p.add_argument("--ledger")
     p.add_argument("--trust-store")

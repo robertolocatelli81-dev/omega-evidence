@@ -1651,12 +1651,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     [--require-signatures] [--epochs anchors.json] [--tsa-ca pem]` prints the verdict as JSON (exit 0 only when ok);
     `... csv <chain.jsonl>` prints the §10.3 CSV. Whatever was computed, an output not written whole (stdout full, closed,
     or its reader gone) is exit 74 with one `receipt not written: <reason>` line on stderr (0.11.3)."""
-    import argparse
-    from ..verifier import EX_IOERR, write_receipt
+    from ..verifier import EX_IOERR, CliParser, write_receipt
 
     def emit(text: str, code: int) -> int:
         return code if write_receipt(text) else EX_IOERR
-    p = argparse.ArgumentParser(prog="omega-evidence-aat")
+    p = CliParser(prog="omega-evidence-aat")
     sub = p.add_subparsers(dest="cmd", required=True)
     v = sub.add_parser("verify", help="verify an AAT (-04) chain offline")
     v.add_argument("chain", help="JSONL, one record per line, genesis first")
