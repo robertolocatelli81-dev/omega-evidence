@@ -530,9 +530,56 @@ def _verify_pack(layers, path, ledger_path, trust_store, expected_pq_public_key_
     return roll
 
 
+EX_IOERR = 74   # sysexits.h EX_IOERR: the receipt could not be written whole, whatever the verdict was (0.11.3)
+
+
+def _point_at_devnull(stream) -> None:
+    """After a failed write the text is still in the stream's buffer and the interpreter flushes stdout and stderr again at
+    exit — that second failure is what turned the exit code into 120 ("Exception ignored in: <_io.TextIOWrapper
+    name='<stdout>'>"). Pointing the stream's fd at the null device lets that last flush succeed, so the exit code stays
+    the one this module chose."""
+    try:
+        fd = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(fd, stream.fileno())
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, AttributeError):   # no fd behind the stream (closed, or not a real file): nothing left to flush
+        pass
+
+
+def write_receipt(text: str) -> bool:
+    """Write `text` to stdout and flush it. True only when the whole text was handed to the operating system.
+    On a failed write — stdout full (ENOSPC), its reader gone (EPIPE), stdout closed (EBADF, or `sys.stdout` None when
+    the process started with fd 1 closed) — one line `receipt not written: <reason>` goes to stderr (best effort: if
+    stderr fails too, nothing is raised) and the caller exits EX_IOERR (74), never the verdict's code (12/10/2026: with
+    stdout full or its reader gone 0.11.2 exited 120, or 1 with a traceback when the receipt was larger than the stream's
+    buffer; with stdout closed it exited 0 / 1 in silence — the receipt lost every time)."""
+    out = sys.stdout
+    try:
+        if out is None:
+            raise OSError("stdout is closed")
+        out.write(text)
+        out.flush()    # flushed HERE, before the exit code is decided, not by the interpreter at exit
+        return True
+    except (OSError, ValueError) as e:   # ValueError: a closed file object, or text the stream cannot encode
+        err = sys.stderr
+        try:
+            if err is not None:
+                err.write(f"receipt not written: {e}\n")
+                err.flush()
+        except (OSError, ValueError):   # stderr full or closed too: the exit is 74 all the same
+            if err is not None:
+                _point_at_devnull(err)
+        if out is not None:
+            _point_at_devnull(out)
+        return False
+
+
 def main(argv=None) -> int:
     """`python -m omega_evidence.verifier <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq] [--require-signed]`
-    prints the receipt as JSON; exit 0 only when `valid` (and, with a PQ requirement, `pq_protected`)."""
+    prints the receipt as JSON; exit 0 only when `valid` (and, with a PQ requirement, `pq_protected`) and the receipt was
+    written whole; exit 74 when it was not (stdout full, closed, or its reader gone), whatever the verdict."""
     import argparse
     p = argparse.ArgumentParser(allow_abbrev=False, add_help=False, prog="omega-evidence-verify")   # r3: -h/--help exit 0 here, 2 in the three (usage on stderr documents the flags)
     p.add_argument("pack")
@@ -581,7 +628,8 @@ def main(argv=None) -> int:
         r = internal_error_receipt([], e)
         r["verdict"] = "NOT_ASSESSED"
         out = json.dumps(r, indent=1)
-    print(out)
+    if not write_receipt(out + "\n"):
+        return EX_IOERR   # the verdict is not delivered: never 0, 1 or 77 (0.11.3)
     if r["verdict"] == "PASS":
         return 0
     return 1 if r["verdict"] == "FAIL" else 77   # 77 = nothing could be checked here, never "the pack is bad"

@@ -373,7 +373,24 @@ public class OeVerify {
         try { run(args); }
         // a fault outside verifyPack's own guard: still not a finding — NOT_ASSESSED, exit 77 (25/09/2026: this printed
         // verdict FAIL and exited 1 on ANY Throwable, an OutOfMemoryError included)
-        catch (Throwable t) { System.out.println(j(internalError(new ArrayList<>(), t))); System.exit(77); }
+        catch (Throwable t) { emit(j(internalError(new ArrayList<>(), t)), 77); }
+    }
+    static final int EX_IOERR = 74;   // sysexits.h EX_IOERR: the receipt was not written whole, whatever the verdict (0.11.3)
+    // The receipt goes to fd 1 through a FileOutputStream, so a failed write is an IOException with its reason: System.out
+    // (a PrintStream) swallows it, and 0.11.2 exited 0 / 1 with stdout on /dev/full, on a pipe whose reader had gone and with
+    // stdout closed (12/10/2026). The receipt is ASCII (writeString escapes everything outside 0x20..0x7e), so these are the
+    // bytes System.out wrote in any ASCII-compatible stdout encoding (with -Dstdout.encoding=UTF-16 it wrote two bytes per
+    // character; the receipt is ASCII now); the line separator is println's.
+    static void emit(String receipt, int code) {
+        try {
+            FileOutputStream fd1 = new FileOutputStream(FileDescriptor.out);
+            fd1.write((receipt + System.lineSeparator()).getBytes(StandardCharsets.US_ASCII));   // unbuffered: no flush to forget
+        } catch (IOException e) {
+            System.err.println("receipt not written: " + Objects.toString(e.getMessage(), e.getClass().getSimpleName()));
+            System.err.flush();
+            System.exit(EX_IOERR);
+        }
+        System.exit(code);
     }
     // A fault of the TOOL is not a finding about the pack: the layer "internal" is FAIL with assessed=false, so the run is
     // NOT_ASSESSED unless a layer judged before the fault is adverse (FAIL > NOT_ASSESSED > PASS); never authenticated,
@@ -407,9 +424,8 @@ public class OeVerify {
         }
         if (pack == null) { usage(); return; }
         Map<String, Object> r = verifyPack(pack, ledger, trust, epq, reqPQ, reqSigned);
-        System.out.println(j(r));
         String v = (String) r.get("verdict");
-        System.exit("PASS".equals(v) ? 0 : "FAIL".equals(v) ? 1 : 77);   // 77 = the check did not run on this JDK
+        emit(j(r), "PASS".equals(v) ? 0 : "FAIL".equals(v) ? 1 : 77);   // 77 = the check did not run on this JDK; 74 = receipt not written
     }
 
     static Map<String, Object> verifyPack(String packPath, String ledgerPath, String trustStore, String expectedPQ, boolean requirePQ) {

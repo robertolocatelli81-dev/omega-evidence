@@ -11,7 +11,7 @@
 // on an older OpenSSL the layer is reported as before: present-but-unverified (null), never true.
 // Usage: node oeverify.mjs <pack.json> [--ledger L] [--trust-store T] [--expect-pq-key B64] [--require-pq] [--require-signed]
 import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
-import { closeSync, constants as FS, existsSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants as FS, existsSync, fstatSync, openSync, readSync, writeSync } from "node:fs";
 
 
 
@@ -481,7 +481,25 @@ function main(argv) {
   const code = r.verdict === "PASS" ? 0 : r.verdict === "FAIL" ? 1 : 77;   // 77 = nothing adverse found, the check did not run here
   // The receipt is written with a callback and the process exits only once it is drained: with `console.log` followed by an
   // immediate `process.exit`, a receipt longer than the pipe buffer (64 KiB — e.g. a layer detail quoting a 70 000-byte
-  // sig_alg) reached a piped reader truncated and unparsable, while a file got it whole (0.9.1 too; 29/09/2026 code review, D3)
-  process.stdout.write(out + "\n", () => process.exit(code));
+  // sig_alg) reached a piped reader truncated and unparsable, while a file got it whole (0.9.1 too; 29/09/2026 code review, D3).
+  // A write that FAILS (stdout full, its reader gone) is exit 74, never the verdict's code: 0.11.2 passed the callback's error
+  // to nobody and exited 0 / 1 with the receipt lost (12/10/2026). The callback receives the error (ENOSPC, EPIPE) and the
+  // process exits inside it, before any 'error' event on the stream (measured on Node 22.23 and 24.19); the stderr line is
+  // written synchronously so it is not lost to the exit.
+  const notWritten = (e) => {
+    try { writeSync(2, "receipt not written: " + ((e && (e.code || e.message)) || String(e)) + "\n"); } catch { /* stderr gone too: still 74 */ }
+    process.exit(74);
+  };
+  // A regular file is written here, whole: Node's stdout on a file calls writeSync once and drops what a short write left
+  // (a file at its size limit or a disk nearly full: 4 096 bytes of a receipt over 64 KiB in the file, exit 0 — 12/10/2026).
+  // Node ignores SIGXFSZ, so past RLIMIT_FSIZE the next write is an EFBIG error: exit 74.
+  let regular = false;
+  try { regular = fstatSync(1).isFile(); } catch { /* fd 1 not usable: the stream path reports it */ }
+  if (regular) {
+    const buf = Buffer.from(out + "\n", "utf8");
+    try { for (let off = 0; off < buf.length;) off += writeSync(1, buf, off, buf.length - off); } catch (e) { notWritten(e); }
+    process.exit(code);
+  }
+  process.stdout.write(out + "\n", (err) => (err ? notWritten(err) : process.exit(code)));
 }
 if (process.argv[1] && process.argv[1].endsWith("oeverify.mjs")) main(process.argv.slice(2));

@@ -1649,8 +1649,13 @@ def _load_key_arg(spec: str) -> Tuple[str, Any]:
 def main(argv: Optional[List[str]] = None) -> int:
     """`python -m omega_evidence.interop.aat verify <chain.jsonl> [--key kid=file ...] [--pubkey pem] [--agent-kid KID]
     [--require-signatures] [--epochs anchors.json] [--tsa-ca pem]` prints the verdict as JSON (exit 0 only when ok);
-    `... csv <chain.jsonl>` prints the §10.3 CSV."""
+    `... csv <chain.jsonl>` prints the §10.3 CSV. Whatever was computed, an output not written whole (stdout full, closed,
+    or its reader gone) is exit 74 with one `receipt not written: <reason>` line on stderr (0.11.3)."""
     import argparse
+    from ..verifier import EX_IOERR, write_receipt
+
+    def emit(text: str, code: int) -> int:
+        return code if write_receipt(text) else EX_IOERR
     p = argparse.ArgumentParser(prog="omega-evidence-aat")
     sub = p.add_subparsers(dest="cmd", required=True)
     v = sub.add_parser("verify", help="verify an AAT (-04) chain offline")
@@ -1672,9 +1677,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         with open(a.chain, encoding="utf-8") as f:
             records = from_jsonl(f.read())
     except (OSError, ValueError, UnicodeDecodeError) as ex:
-        print(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"})); return 2
+        return emit(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"}) + "\n", 2)
     if a.cmd == "csv":
-        print(to_csv(records), end=""); return 0
+        return emit(to_csv(records), 0)
     try:
         keys = dict(_load_key_arg(k) for k in a.key)
         pub = None
@@ -1682,12 +1687,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             with open(a.pubkey, "rb") as fk:
                 pub = fk.read()
     except (OSError, ValueError) as ex:
-        print(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"})); return 2
+        return emit(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"}) + "\n", 2)
     try:
         out = verify_chain(records, pubkey_pem=pub, keys=keys or None, agent_kid=a.agent_kid, require_signatures=a.require_signatures,
                            external_timestamp_ca_file=a.tsa_ca, allow_legacy_03=a.allow_legacy_03, tombstone_kids=a.tombstone_kid or None, recorder_kid=a.recorder_kid)
     except Exception as ex:  # noqa: BLE001 — a verifier prints a verdict, never a traceback
-        print(json.dumps({"ok": False, "error": f"verifier error: {type(ex).__name__}: {ex}"})); return 2
+        return emit(json.dumps({"ok": False, "error": f"verifier error: {type(ex).__name__}: {ex}"}) + "\n", 2)
     if a.epochs:
         try:
             with open(a.epochs, encoding="utf-8") as f:
@@ -1695,14 +1700,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             if not isinstance(anchors, list):
                 raise ValueError("epochs file must be a JSON array")
         except (OSError, ValueError, RecursionError) as ex:
-            print(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"})); return 2
+            return emit(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"}) + "\n", 2)
         try:
             out["epochs"] = verify_epochs(records, anchors, tsa_ca_file=a.tsa_ca, require_complete=a.epochs_complete)
         except Exception as ex:  # noqa: BLE001
-            print(json.dumps({"ok": False, "error": f"verifier error: {type(ex).__name__}: {ex}"})); return 2
+            return emit(json.dumps({"ok": False, "error": f"verifier error: {type(ex).__name__}: {ex}"}) + "\n", 2)
         out["ok"] = bool(out["ok"] and out["epochs"]["ok"])
-    print(json.dumps(out, indent=1))
-    return 0 if out["ok"] else 1
+    return emit(json.dumps(out, indent=1) + "\n", 0 if out["ok"] else 1)
 
 
 if __name__ == "__main__":

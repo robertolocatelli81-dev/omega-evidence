@@ -24,7 +24,7 @@ jobs:
           python -m pip install --no-deps .
           if [ "${{ matrix.cryptography }}" = "yes" ]; then python -m pip install cryptography; fi
       - name: Run tests
-        run: python tests/test_toolkit.py && python tests/test_stamp_granted.py && python tests/test_readme_version.py
+        run: python tests/test_toolkit.py && python tests/test_stamp_granted.py && python tests/test_readme_version.py && python tests/test_receipt_exit74.py TestPython TestPythonAAT
 
   fuzz-smoke:
     # Short, deterministic (fixed seed): the same 3 000 mutations on every push, plus the six positive controls
@@ -98,6 +98,8 @@ jobs:
         run: javac -d "$RUNNER_TEMP/oej" verifiers/java/OeVerify.java
       - name: "Differential oracle: Python vs Go vs Java vs Node must agree on every pack case"
         run: OEVERIFY_GO="$RUNNER_TEMP/oeverify" OEVERIFY_JAVA="java -cp $RUNNER_TEMP/oej OeVerify" python verifiers/differential_oracle.py
+      - name: "A receipt not written whole is exit 74 in the four CLIs (real processes: /dev/full, a closed pipe, stdout closed)"
+        run: OE_EXIT74_REQUIRE_ALL=1 OEVERIFY_GO="$RUNNER_TEMP/oeverify" OEVERIFY_JAVA="java -cp $RUNNER_TEMP/oej OeVerify" python tests/test_receipt_exit74.py
 
   cryptovalid-interop:
     # The ledger profile is cryptovalid's: a ledger written here must verify with the NEWEST cryptovalid-opencore

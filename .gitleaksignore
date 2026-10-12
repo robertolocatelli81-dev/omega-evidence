@@ -3,3 +3,5 @@
 474122b54816b63f96626c066b897c4864a2e133:verifiers/differential_oracle.py:generic-api-key:269
 # the same public point, same line moved to 280 by the 0.10.0 oracle cases (directory scan, no commit; reviewed 29/09/2026)
 verifiers/differential_oracle.py:generic-api-key:280
+# the same public point, same line moved to 282 by the 0.11.x oracle cases (directory scan, no commit; reviewed 12/10/2026)
+verifiers/differential_oracle.py:generic-api-key:282
