@@ -602,8 +602,9 @@ def _write_all(text: str) -> None:
     """Write the whole text to stdout and flush it; raise OSError when it did not all get there. The bytes go to
     `sys.stdout.buffer` in a loop that checks the count: with -u or PYTHONUNBUFFERED that is a raw FileIO whose write() can
     take part of the data (a file size limit, a disk nearly full) and return the count without raising, or return None (a
-    full non-blocking pipe) — the text layer above dropped the rest in silence, so 0.11.3 exited with the verdict's code
-    and a cut receipt (13/10/2026). A non-blocking stdout that is full is waited for, never given up on."""
+    full non-blocking pipe) — the text layer above dropped the rest in silence, so the first version of this fix (5520cd8)
+    exited with the verdict's code and a cut receipt (13/10/2026). A non-blocking stdout that is full is waited for, never
+    given up on."""
     out = sys.stdout
     if out is None:
         raise OSError("stdout is closed")
