@@ -609,8 +609,15 @@ def _write_all(text: str) -> None:
     if out is None:
         raise OSError("stdout is closed")
     try:
-        out.flush()   # whatever the text layer still holds goes first
         buf = getattr(out, "buffer", None)
+        while True:   # whatever the text layer still holds goes first: text the caller wrote and left unflushed, on a full
+            try:      # non-blocking stdout, is waited for like the receipt (at 5b78982 that was exit 74 with nothing written)
+                out.flush()
+                break
+            except BlockingIOError:
+                if buf is None:
+                    raise
+                _wait_writable(buf)
         if buf is None:   # an in-process text stream (io.StringIO): no bytes below it
             out.write(text)
             out.flush()

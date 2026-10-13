@@ -374,12 +374,14 @@ appended to a file of 1 000 bytes under `ulimit -f 1`, both Python CLIs exited w
 bytes of the receipt, and a 71 162-byte receipt through `| head -c 100` exited 0; on a non-blocking stdout read 1 s late,
 Python and Java exited 74 with 65 536 bytes of the receipt (71 162 and 70 996) in the pipe, where a blocking write would have
 delivered it whole, and Python unbuffered exited 0 with them; a usage error with stderr full or its reader gone exited 120,
-and with stderr closed the usage went to stdout (exit 1 on 3.9 and 3.11, 2 on 3.13); the AAT `-h` on a full stdout exited 0.
+and with stderr closed the usage went to stdout (exit 1 on 3.9 and 3.11, 2 on 3.13); the AAT `-h` on a full stdout or a gone reader exited 120 (under `-u` 1 on 3.9 and 3.11, 0 on 3.13), and with stdout
+closed exited 0 with the help on stderr.
 
 Now, the same rule in the four pack CLIs and the AAT CLI: the receipt is written and flushed before the exit code is
 decided; if the write fails, one line `receipt not written: <reason>` goes to stderr (if stderr fails too, nothing is
 raised) and the exit is **74** (sysexits `EX_IOERR`), whatever the verdict. Python encodes the receipt as its stdout text
-layer would (encoding, error handler, a byte order mark only where that layer writes one) and writes the bytes to
+layer would (encoding, error handler, a byte order mark only where that layer writes one as the first thing written;
+in process, after text the caller wrote to a `utf-8-sig` pipe, the receipt carries a second one) and writes the bytes to
 `sys.stdout.buffer` in a loop that sees the count — a short count continues, a full non-blocking stdout is waited for in
 `select`, nothing taken without waiting is an error — flushes before the exit code is decided and, after a failure, points
 the descriptor behind the failed stream (from `stream.fileno()`, never the number 1 or 2) at the null device, so the
@@ -408,20 +410,23 @@ a file limited to 4 096 bytes (`ulimit -f 4`: a short write, then EFBIG — 74);
 under `ulimit -f 1`) in the four runtimes and, for Python, unbuffered too; a stdout that is non-blocking and already full when
 the process starts, small receipts and the 71 KB one, buffered and unbuffered, in the four runtimes — the process must wait
 asleep (in some 1-second window under 0.2 s of CPU; a loop retrying EAGAIN uses about 1 s) and, once the pipe is read, deliver
-the whole receipt with the verdict's code; a usage error with stderr full, closed and on a pipe whose reader has gone (exit 2,
+the whole receipt with the verdict's code within 0.5 s (the reader coming back at three phases a third of a second apart); a usage error with stderr full, closed and on a pipe whose reader has gone (exit 2,
 nothing on stdout) in the four runtimes and the AAT CLI; the AAT `-h` lost (74); the receipt's bytes in five stdout encodings
 and one error handler, to a new file, appended to one and to a pipe, buffered and unbuffered, against a second process that
 writes the same text through Python's own text layer; `main()` in process with `sys.stdout` a `StringIO`, a `TextIOWrapper`
-over `io.BytesIO` (with and without `write_through`) and after text the caller wrote first; for the AAT CLI also the `--key`,
+over `io.BytesIO` (with and without `write_through`) and after text the caller wrote first (also left
+unflushed on a full non-blocking pipe: waited for, not 74); for the AAT CLI also the `--key`,
 `--pubkey` and `--epochs` error objects and a CSV that an ASCII stdout cannot encode (74). Measured on this line on 13 October
 2026 with Python 3.9.25, 3.11.2 and 3.13.15, Node 22.23.2 and 24.19.0, Go 1.27.1 and JDK 27: 39 tests green; the same file on
-the 0.11.2 code: 34 fail (the positive control); on `5520cd8`: 8 fail. 53 mutants of the lines that write — among them the
+the 0.11.2 code: 34 do not pass (33 failures, 1 error: the positive control); on `5520cd8`: 9 fail. 53 mutants of the lines that write — among them the
 text layer back in place of the byte loop, the count ignored, EAGAIN not waited for or retried in a spin (in the write, in the
 flush, `select` with a zero timeout, Java's sleep replaced by a spin, Java's `FileOutputStream.write` back), the descriptor asked
 for before writing, no fallback for a `StringIO`, a fixed encoding or error handler, the byte order mark always or never
 dropped, argparse's own usage, help and exit back — 51 killed; the two alive are a guard no input reaches here (a write that
 takes 0 bytes without EAGAIN) and the explicit flush of the stderr line, equivalent because Python's stderr is line-buffered
-(3.9 on) or write-through and every line ends in `\n`. Not reached by any input here, so not covered: the two `verifier error`
+(3.9 on) or write-through and every line ends in `\n`. Six more on the review's additions: the caller's unflushed text not
+waited for, or retried in a spin, Java's sleep uncapped, or 1 s — killed; alive, below the test's 0.5 s resolution, a cap of
+400 ms and a sleep not reset after a write that took bytes (still at most 50 ms). Not reached by any input here, so not covered: the two `verifier error`
 objects of the AAT CLI and the last-resort handlers of Go (`recover`) and Java (`catch (Throwable)`). A generative bench (not in
 this repository) ran every CLI on four inputs (valid, tampered, a receipt over 64 KiB, a directory; for the AAT CLI an
 unreadable chain and the CSV) × 13 stdout modes × stderr ok, full and closed × Python buffered and unbuffered — 588 runs per
@@ -430,7 +435,8 @@ a receipt was lost without 74, a deliverable one did not arrive whole, a whole o
 stderr line, or a traceback appeared: on 0.11.2 351 of 588 (Python 107 of 168 buffered and 107 of 168 unbuffered, Node 41 of
 84, Go 41 of 84, Java 55 of 84), 214 of 336 on 3.9 and on 3.13, 41 of 84 on Node 22; on `5520cd8` 13 of 588 (Python unbuffered
 11, Python and Java on the non-blocking pipe read late 1 each), 12 of 336 on 3.9 and 3.13, 0 of 84 on Node 22; on this line 0
-in every one of them. Receipts to a regular file, the 188 cases of the differential oracle in the four runtimes and once
+in every one of them. Receipts to a regular file, the 188 pack cases of the differential oracle (its other 18
+cases are command-line ones) in the four runtimes and once
 more in Python unbuffered (against 0.11.2 buffered), 940 runs: the same exit code and the same bytes on 0.11.2 and on this line
 apart from the `verified_utc` second (0 differences; the same comparison with one space added before the receipt's newline
 finds 188 of 188).

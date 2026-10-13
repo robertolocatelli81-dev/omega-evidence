@@ -247,12 +247,13 @@ def _cpu_seconds(pid):
     return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 
 
-def run_prefilled(argv, env=None):
+def run_prefilled(argv, env=None, late=0.0):
     """stdout is a NON-BLOCKING pipe that is already full when the process starts, and nobody reads it for a while: the
     process must wait asleep, as on a blocking pipe — still alive, and in some 1-second window (looked at from the 1st to
     the 10th second, so a slow start is not taken for a spin) using under 0.2 s of CPU, which a loop retrying EAGAIN never
-    does — and once the pipe is drained the receipt must arrive whole. Returns (idle, min_cpu_window, rc, receipt bytes or
-    None, stderr text)."""
+    does — and once the pipe is drained the receipt must arrive whole, promptly (Java sleeps 1 to 50 ms between tries).
+    Returns (idle, min_cpu_window, rc, receipt bytes or None, stderr text, seconds from the first read to the receipt's last
+    byte)."""
     import fcntl
     r, w = os.pipe()
     fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) | os.O_NONBLOCK)
@@ -284,18 +285,28 @@ def run_prefilled(argv, env=None):
         if c1 - c0 < 0.2:
             idle = True
             break
-    chunks = []
+    time.sleep(late)   # the moment the reader comes back, moved within a waiter's sleep (see PROMPT)
+    chunks, t_drain, latency = [], time.time(), None
     while True:
         b = os.read(r, 1 << 16)
         if not b:
             break
         chunks.append(b)
+        if latency is None and b.endswith(b"\n"):   # the receipt's last byte (the filler has no newline)
+            latency = time.time() - t_drain
     os.close(r)
     rc = p.wait(timeout=120)
     t.join()
     p.stderr.close()
     data = b"".join(chunks)
-    return idle, min(windows, default=None), rc, data[filled:] if data[:filled] == b"P" * filled else None, errs["err"].decode("utf-8", "replace")
+    return (idle, min(windows, default=None), rc, data[filled:] if data[:filled] == b"P" * filled else None,
+            errs["err"].decode("utf-8", "replace"), latency)
+
+
+PROMPT = 0.5   # seconds from the first read to the receipt's last byte: a waiter that sleeps at most 50 ms is well within it.
+LATE = {"valid": 0.0, "big": 0.33, "invalid": 0.66}   # the reader comes back at three phases a third of a second apart, so
+# a waiter that sleeps 1 s or more between tries (its schedule fixed from its start, like the windows above) is caught in at
+# least one of them: one phase alone can fall just before its wake-up every time (NEMESIS 13/10/2026: nap = 1000 survived)
 
 
 def usage_with_stderr_lost(argv):
@@ -392,10 +403,11 @@ class _PackCLI(_Base):
             _, whole, _ = run_mode(argv, "file")
             for env in self.BUFFERINGS:
                 label = f"{self.runtime} {k} {env}"
-                idle, cpu, rc, got, err = run_prefilled(argv, env)
+                idle, cpu, rc, got, err, latency = run_prefilled(argv, env, LATE[k])
                 self.assertTrue(idle, f"{label}: not waiting asleep (least CPU in a 1 s window {cpu}, exit {rc}, stderr {err[-300:]!r})")
                 self.assertEqual(rc, expected, f"{label}: stderr {err[-300:]!r}")
                 self.assertTrue(got is not None and same_receipt(got, whole), f"{label}: {len(got or b'')} bytes against {len(whole)}")
+                self.assertTrue(latency is not None and latency < PROMPT, f"{label}: {latency} s from the first read to the receipt's end")
 
     def test_usage_with_stderr_lost(self):   # the usage error keeps exit 2 and never goes to stdout
         self.assertEqual(usage_with_stderr_lost(RUNTIMES[self.runtime][:]), [])
@@ -489,6 +501,47 @@ class TestPython(_PackCLI):
             sys.stdout = saved
         head, _, rest = s.buffer.getvalue().decode("utf-8").partition("\n")
         self.assertEqual((rc, head, json.loads(rest)["verdict"]), (0, "before", "PASS"))
+        # ... also when that text is still buffered and stdout is a non-blocking pipe that is full: the caller's text is
+        # flushed first and waited for like the receipt (at 5b78982: exit 74 and nothing written, NEMESIS 13/10/2026)
+        import fcntl
+        r, w = os.pipe()
+        fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) | os.O_NONBLOCK)
+        filled = 0
+        while True:
+            try:
+                filled += os.write(w, b"P" * 4096)
+            except BlockingIOError:
+                break
+        s = io.TextIOWrapper(io.BufferedWriter(io.FileIO(w, "w", closefd=False)), encoding="utf-8")
+        s.write("before\n")
+        got = []
+
+        def drain():
+            time.sleep(0.5)
+            while True:
+                b = os.read(r, 1 << 16)
+                if not b:
+                    break
+                got.append(b)
+        th = threading.Thread(target=drain)
+        th.start()
+        saved = sys.stdout
+        sys.stdout = s
+        c0 = time.process_time()
+        try:
+            rc = verifier.main([FX["valid"], "--ledger", FX["valid"][:-5] + ".ledger.jsonl"])
+        finally:
+            cpu = time.process_time() - c0   # 0.5 s of waiting: asleep in select it costs next to nothing
+            sys.stdout = saved
+            os.close(w)
+            th.join(60)
+            os.close(r)
+        data = b"".join(got)
+        self.assertEqual(data[:filled], b"P" * filled)
+        head, _, rest = data[filled:].decode("utf-8").partition("\n")
+        self.assertEqual((rc, head), (0, "before"), data[filled:filled + 200])
+        self.assertEqual(json.loads(rest)["verdict"], "PASS")
+        self.assertLess(cpu, 0.3, "the wait for the caller's text spins")
 
 
 class TestNode(_PackCLI):
@@ -553,9 +606,10 @@ class TestPythonAAT(_Base):
     def test_full_non_blocking_stdout_is_waited_for(self):
         _, whole, _ = run_mode(self.AAT + ["verify", FX["chain"]], "file")
         for env in ({}, {"PYTHONUNBUFFERED": "1"}):
-            idle, cpu, rc, got, err = run_prefilled(self.AAT + ["verify", FX["chain"]], env)
+            idle, cpu, rc, got, err, latency = run_prefilled(self.AAT + ["verify", FX["chain"]], env)
             self.assertTrue(idle, f"{env}: least CPU in a 1 s window {cpu}, exit {rc}, {err[-300:]!r}")
             self.assertEqual((rc, got), (0, whole), env)
+            self.assertTrue(latency is not None and latency < PROMPT, f"{env}: {latency} s")
 
     def test_usage_with_stderr_lost(self):
         for args in (["verify"], ["nosuchcommand"], []):
