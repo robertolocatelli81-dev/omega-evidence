@@ -683,7 +683,8 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
     (no two records at one index, every index below the anchor's leaf_count, never more distinct leaves than
     leaf_count) and, when every leaf of an epoch is in `records`, the tree rebuilt from them must give the anchored
     root; with `tsa_ca_file` the RFC 3161 token over the root is verified with openssl (without it: recorded, NOT
-    verified — never green: `tsa` carries verified None and a warning). Epochs with fewer leaves in `records` than
+    verified — never green: `tsa` carries verified None and a warning; openssl present but not runnable here raises
+    timestamp.CheckNotRun, never a problem with the token, 0.11.4). Epochs with fewer leaves in `records` than
     the anchor's leaf_count are listed in `incomplete` (a warning; a problem with `require_complete=True` — an epoch
     may legitimately span sessions, but a record stripped of its `batch` or deleted looks exactly the same)."""
     problems: List[Dict[str, Any]] = []
@@ -967,7 +968,8 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     strict base64) — `pubkey_pem` is also matched by its thumbprint; a signed record WITHOUT `signer_kid` violates §3.3 (MUST) and is a
     problem unless `allow_legacy_03=True`, which then resolves it with `pubkey_pem` (the -03 rule). A signature that cannot be verified on this host (no `cryptography`, or no ML-DSA in it)
     is a problem, never a pass. `require_signatures=True` makes an unsigned record a problem. `external_timestamp`
-    tokens are verified with openssl when `external_timestamp_ca_file` is given (else recorded, NOT verified).
+    tokens are verified with openssl when `external_timestamp_ca_file` is given (else recorded, NOT verified); openssl
+    present but not runnable here raises timestamp.CheckNotRun, never a problem with the token (0.11.4).
     With `agent_kid`, a self-recorded record signed by another key is a problem (§6.3 step 3a; a key rotation mid-session
     therefore needs a new session). Independence (§5.2) is decided for the whole session (genesis `recording_mode`, or any
     record naming a recording component other than the agent) and then required of every record. DECLARED DEVIATION: a
@@ -1650,8 +1652,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     """`python -m omega_evidence.interop.aat verify <chain.jsonl> [--key kid=file ...] [--pubkey pem] [--agent-kid KID]
     [--require-signatures] [--epochs anchors.json] [--tsa-ca pem]` prints the verdict as JSON (exit 0 only when ok);
     `... csv <chain.jsonl>` prints the §10.3 CSV. Whatever was computed, an output not written whole (stdout full, closed,
-    or its reader gone) is exit 74 with one `receipt not written: <reason>` line on stderr (0.11.3)."""
-    from ..verifier import EX_IOERR, CliParser, write_receipt
+    or its reader gone) is exit 74 with one `receipt not written: <reason>` line on stderr (0.11.3). With `--tsa-ca`, an
+    RFC 3161 check that cannot be run here (openssl not started, no answer within the timeout, no temporary file) is
+    exit 74 with one `receipt not written: cannot run openssl here: <reason>` line (`receipt not written: cannot write a
+    temporary file for openssl: <reason>` without one) and nothing on stdout, never a verdict
+    on the chain (0.11.4; 0.11.3 reported the token as not verifying, exit 1)."""
+    from ..timestamp import CheckNotRun
+    from ..verifier import EX_IOERR, CliParser, _say, write_receipt
+
+    def not_run(ex: BaseException) -> int:
+        _say(f"receipt not written: {ex}\n")
+        return EX_IOERR
 
     def emit(text: str, code: int) -> int:
         return code if write_receipt(text) else EX_IOERR
@@ -1690,6 +1701,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         out = verify_chain(records, pubkey_pem=pub, keys=keys or None, agent_kid=a.agent_kid, require_signatures=a.require_signatures,
                            external_timestamp_ca_file=a.tsa_ca, allow_legacy_03=a.allow_legacy_03, tombstone_kids=a.tombstone_kid or None, recorder_kid=a.recorder_kid)
+    except CheckNotRun as ex:   # 0.11.4: neither ok nor a problem with the chain
+        return not_run(ex)
     except Exception as ex:  # noqa: BLE001 — a verifier prints a verdict, never a traceback
         return emit(json.dumps({"ok": False, "error": f"verifier error: {type(ex).__name__}: {ex}"}) + "\n", 2)
     if a.epochs:
@@ -1702,6 +1715,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return emit(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"}) + "\n", 2)
         try:
             out["epochs"] = verify_epochs(records, anchors, tsa_ca_file=a.tsa_ca, require_complete=a.epochs_complete)
+        except CheckNotRun as ex:   # 0.11.4
+            return not_run(ex)
         except Exception as ex:  # noqa: BLE001
             return emit(json.dumps({"ok": False, "error": f"verifier error: {type(ex).__name__}: {ex}"}) + "\n", 2)
         out["ok"] = bool(out["ok"] and out["epochs"]["ok"])

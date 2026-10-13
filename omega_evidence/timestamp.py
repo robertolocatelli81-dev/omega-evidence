@@ -32,10 +32,33 @@ from urllib.parse import urlparse
 from typing import Dict, Optional
 
 
-def _reply_facts(exe: str, tsr_path: str, timeout: int):
+class CheckNotRun(OSError):
+    """An RFC 3161 check asked for (`verify` with `ca_file`) that cannot be RUN here: openssl present but not started
+    (fork refused, no descriptor left, the binary gone since `which`), openssl giving no answer within the timeout, or
+    no temporary file for the bytes openssl reads. Raised, never returned as `verified: False`, which is a verdict on
+    the token (0.11.4; measured 13/10/2026 on 0.11.3 under RLIMIT_NPROC 1: a valid token was `verified: False` and the
+    evidence record carrying it `valid: false`). openssl ABSENT is still `verified: None`."""
+
+
+def _not_run(what: str, e: BaseException) -> CheckNotRun:
+    why = os.strerror(e.errno) if isinstance(getattr(e, "errno", None), int) else str(e)
+    return CheckNotRun(f"{what}: {type(e).__name__}: {why}")
+
+
+def _run_openssl(cmd, **kw):
+    """subprocess.run of openssl for a check: not started, or no answer within the timeout, is CheckNotRun."""
+    try:
+        return subprocess.run(cmd, **kw)  # nosec B603 - fixed args, no shell
+    except subprocess.TimeoutExpired as e:
+        raise _not_run("cannot run openssl here", OSError(f"no answer within {e.timeout:g} s")) from e
+    except OSError as e:
+        raise _not_run("cannot run openssl here", e) from e
+
+
+def _reply_facts(exe: str, tsr_path: str, timeout: int, run=subprocess.run):
     """(granted, imprint_hex) read from an RFC 3161 reply with `openssl ts -reply -text`: what the reply CLAIMS, not
     proof that a real TSA issued it (that needs `ts -verify` with a trust anchor)."""
-    r = subprocess.run(  # nosec B603 - decode only, fixed args, no shell
+    r = run(  # nosec B603 - decode only, fixed args, no shell
         [exe, "ts", "-reply", "-in", tsr_path, "-text"], capture_output=True, text=True, timeout=timeout)
     text = r.stdout or ""
     granted = "Status: Granted" in text or "Granted." in text
@@ -220,7 +243,8 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
     claimed contents, it does NOT prove a real TSA issued it — so we return
     {verified: None} ("recorded, not verified"), NEVER a green. With `ca_file` we run
     `openssl ts -verify -CAfile <ca> -digest <hex> -in <tsr>` and require 'Verification: OK'.
-    openssl absent → {verified: None}."""
+    openssl absent → {verified: None}. openssl present but not started here, no answer within `timeout`, or no
+    temporary file → CheckNotRun is raised (0.11.4): neither verified nor a failed check."""
     exe = shutil.which("openssl")
     # what the caller holds: a token string, or none at all (absent, empty or not a string) — never claimed otherwise
     tok = "token recorded" if isinstance(tsr_b64, str) and tsr_b64 else "no token recorded (tsr_b64 missing, empty or not a string)"
@@ -231,20 +255,29 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
                                           "verified; supply the TSA roots to verify"}
     if not os.path.exists(ca_file):
         return {"verified": False, "note": f"ca_file not found: {ca_file}"}
-    d = tempfile.mkdtemp()
+    try:
+        d = tempfile.mkdtemp()   # gettempdir() probes each candidate by writing a file there
+    except OSError as e:
+        raise _not_run("cannot write a temporary file for openssl", OSError("no usable temporary directory")) from e
     try:
         tsr = os.path.join(d, "t.tsr")
-        with open(tsr, "wb") as f:
-            f.write(base64.b64decode(tsr_b64))
-        vr = subprocess.run(  # nosec B603 - fixed args, no shell
+        raw = base64.b64decode(tsr_b64)   # a token that is not base64 is the input's fault: verified False, as before
+        try:
+            with open(tsr, "wb") as f:
+                f.write(raw)
+        except OSError as e:
+            raise _not_run("cannot write a temporary file for openssl", e) from e
+        vr = _run_openssl(
             [exe, "ts", "-verify", "-in", tsr, "-digest", expected_digest_hex.lower(),
              "-CAfile", ca_file], capture_output=True, text=True, timeout=timeout)
         vtext = (vr.stdout or "") + (vr.stderr or "")
         crypto_ok = vr.returncode == 0 and "Verification: OK" in vtext
-        granted, imprint_hex = _reply_facts(exe, tsr, timeout)
+        granted, imprint_hex = _reply_facts(exe, tsr, timeout, run=_run_openssl)
         imprint_ok = imprint_hex == expected_digest_hex.lower()
         return {"verified": bool(crypto_ok and granted and imprint_ok),
                 "crypto_verified": crypto_ok, "granted": granted, "imprint_ok": imprint_ok}
+    except CheckNotRun:
+        raise
     except Exception as e:  # noqa: BLE001
         return {"verified": False, "note": f"{type(e).__name__}: {str(e)[:80]}"}
     finally:

@@ -202,7 +202,9 @@ def verify_evidence_record(record: Dict[str, Any],
     Merkle root, and every renewal binding across algorithm changes. Optionally
     bind to the real packs. An RFC 3161 token is verified with openssl against `tsa_ca_file`
     (the TSA's trusted roots) and is PASS or FAIL; without openssl or without `tsa_ca_file` it is
-    SKIP, not verified (timestamp.verify returns verified: None, never a green). An entry that declares
+    SKIP, not verified (timestamp.verify returns verified: None, never a green); with openssl present but not
+    runnable here (not started, no answer within the timeout, no temporary file) timestamp.CheckNotRun is raised,
+    never a PASS or a FAIL of the token (0.11.4). An entry that declares
     `time_source: rfc3161` without a token (`tsr_b64` missing, empty or not a string) is a FAIL, with or
     without `tsa_ca_file`: the claim of trusted time has no proof to verify, now or later (RFC 4998 §4.1).
     A pack of `pack_paths` that cannot be read as an evidence pack is a FAIL of

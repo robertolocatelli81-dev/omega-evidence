@@ -21,7 +21,7 @@ but do not derive from, this toolkit.
 pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
 
 # or straight from the tagged source
-pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.11.3
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.11.4
 ```
 
 Release artifacts (`.whl` / `.tar.gz`) are attached to each
@@ -357,6 +357,50 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 `drop_pq=True`. Without `cryptography` ≥ 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0; the backend is
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
+
+### 0.11.4 — an RFC 3161 check that openssl cannot start, finish in time or read here is not a verdict (13 October 2026)
+
+Measured on 0.11.3 (`6d712c8`) on 13 October 2026 with Python 3.11.2 and a token from a local TSA built with openssl.
+`timestamp.verify(tsr_b64, digest, ca_file=...)`, on a valid token, returned `verified: False` — a verdict on the
+token — when openssl could not be started (fork refused under `RLIMIT_NPROC` 1; the binary gone since `which`), when it
+gave no answer within the timeout (15 s), and when the token's temporary file was refused (EFBIG under `RLIMIT_FSIZE`
+0); with no usable temporary directory it raised a bare `FileNotFoundError`. `preservation.verify_evidence_record(...,
+tsa_ca_file=...)` made the record carrying that token `valid: false` in the same four cases, and
+`python -m omega_evidence.interop.aat verify ... --tsa-ca` exited 1 under `RLIMIT_NPROC` 1, for a token in an epoch
+anchor ("does not verify") and for one in a record's `external_timestamp` ("not verified"). Now each case raises
+`timestamp.CheckNotRun` (an `OSError`) with `cannot run openssl here: <reason>` (`... no answer within 15 s` for the
+timeout) or `cannot write a temporary file for openssl: <reason>`, and the AAT CLI exits 74 with that message after
+`receipt not written: ` as its one line on stderr, and nothing on stdout. Unchanged: without openssl
+the result is `verified: None` (a SKIP layer), and a token that is not base64 is `verified: False`. Not covered: an
+openssl that starts and then ends without an answer (killed by a signal, or exit 127 when it cannot load its
+libraries; both measured with a stand-in for openssl) still gives `verified: False`. The pack CLI
+`python -m omega_evidence` passes no trust anchor to `timestamp.verify` and starts no openssl: under `RLIMIT_NPROC` 1
+its receipt for a pack with an RFC 3161 sidecar is byte for byte the one without the limit, before and after.
+
+`tests/test_check_not_run_20261013.py` (now in CI) runs these cases as real processes: at `6d712c8` it fails 9 of its
+14 tests on Python 3.9, 3.11, 3.13 and 3.14 (the other five are controls: a valid token, the two AAT runs without a
+limit, openssl absent, a token that is not base64); none fail now. Of 14
+mutants of the new lines, 14 are killed. Not changed by this release: the 188 cases of the differential oracle in the
+four verifiers (and Python under `PYTHONUNBUFFERED`), 940 receipts written to a file, are byte for byte those of 0.11.3
+(only `verified_utc` normalised), and the oracle still reports 0/206 disagreements. Measured on Linux, 13 October 2026.
+
+Known limitation, not changed (measured on `6d712c8`, 13 October 2026): a run under a file size limit can leave
+Python's own bytecode cache cut. CPython 3.9 and 3.11 write each `.pyc` with one raw write: from a copy without
+`__pycache__`, one run of `python -m omega_evidence` (also `-m omega_evidence.verifier` and
+`-m omega_evidence.interop.aat verify`) under a limit smaller than a module's `.pyc` (bash `ulimit -f 1`, or 512 bytes;
+the package's `.pyc` files are 292 + n to 86 558 + n bytes on 3.9.25 and 343 + n to 159 519 + n on 3.11.2, n being the
+length of the path of the directory that holds the package) left 19 of them cut (20 for
+the AAT command) with `cryptography` installed, one more without it (`_ed25519_pure` is imported then; measured on
+3.9.25), while the `.pyc` files under 1 024 bytes were written whole; and every later run, and every import, exited 1
+with `EOFError: marshal data too short`. The failure
+is loud — no receipt and no exit code of a verdict comes from a cut file — and lasts until `__pycache__` is removed, or
+is avoided with `python -B` or `PYTHONDONTWRITEBYTECODE=1`. Python 3.13.15 and 3.14.8 wrote no cut file in the same
+runs; a cut file put there stops them as well. CPython fixed this upstream as GH-126606 ("don't write incomplete pyc
+files"), backported to the 3.12 and 3.13 branches on 13 November 2024 (commits `df59b64589` and `ad1b23bf29`); the 3.9,
+3.10 and 3.11 branches do not have it (read in their sources); the first point release carrying it was not checked
+here. With pip's default install every `.pyc` is compiled at install time: a
+run of `omega-evidence-verify` under `ulimit -f 1` left all 24 in place and the next run gave the receipt; installed
+with `pip install --no-compile` (measured on 3.11) the console script behaves as `python -m` above.
 
 ### 0.11.3 — a receipt that was not written is exit 74, never the verdict's code (12–13 October 2026)
 
