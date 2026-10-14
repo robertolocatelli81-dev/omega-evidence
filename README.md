@@ -393,8 +393,10 @@ length of the path of the directory that holds the package) left 19 of them cut 
 the AAT command) with `cryptography` installed, one more without it (`_ed25519_pure` is imported then; measured on
 3.9.25), while the `.pyc` files under 1 024 bytes were written whole; and every later run, and every import, exited 1
 with `EOFError: marshal data too short`. The failure
-is loud — no receipt and no exit code of a verdict comes from a cut file — and lasts until `__pycache__` is removed, or
-is avoided with `python -B` or `PYTHONDONTWRITEBYTECODE=1`. Python 3.13.15 and 3.14.8 wrote no cut file in the same
+is loud — no receipt and no exit code of a verdict comes from a cut file — and lasts until `__pycache__` is removed or
+`PYTHONPYCACHEPREFIX` points elsewhere; `python -B` and `PYTHONDONTWRITEBYTECODE=1` keep a cut file from being written but
+do not help once one is there (measured on 3.11.2 on 14 October 2026: `EOFError` with either; corrected after 0.11.4,
+whose text said they avoid the failure). Python 3.13.15 and 3.14.8 wrote no cut file in the same
 runs; a cut file put there stops them as well. CPython fixed this upstream as GH-126606 ("don't write incomplete pyc
 files"), backported to the 3.12 and 3.13 branches on 13 November 2024 (commits `df59b64589` and `ad1b23bf29`); the 3.9,
 3.10 and 3.11 branches do not have it (read in their sources); the first point release carrying it was not checked
