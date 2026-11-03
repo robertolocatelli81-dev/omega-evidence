@@ -1,8 +1,8 @@
 name: Build and test the release distributions
 
 # On a GitHub Release: build sdist + wheel, check metadata, run the tests. Distribution is the GitHub
-# Release itself (and the author's PEP 503 index); publication on PyPI was dropped by decision of the
-# author on 15/09/2026 — no OIDC / trusted-publisher job remains here.
+# Release itself (and the author's PEP 503 index). The upload to PyPI is pypi.yml: it takes the released wheel and
+# sdist as they are (checked against SHA256SUMS), after the author approves the pypi environment.
 
 on:
   release:

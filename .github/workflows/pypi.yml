@@ -1,0 +1,53 @@
+name: pypi
+
+# Uploads to PyPI the wheel and sdist of a GitHub Release exactly as released (the files listed in the release's
+# SHA256SUMS, nothing rebuilt), through PyPI Trusted Publishing; the publish action adds PEP 740 attestations.
+# Runs on a published release, or by hand for an existing tag.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, e.g. v1.7.2"
+        required: true
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download the released files and check them against SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          # TAG and GITHUB_REPOSITORY come from the environment
+          case "$TAG" in v[0-9]*) ;; *) echo "tag '$TAG' is not vX.Y.Z"; exit 1;; esac
+          v="${TAG#v}"
+          rm -rf rel dist; mkdir rel dist
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D rel -p '*.whl' -p '*.tar.gz' -p SHA256SUMS
+          cd rel
+          n=0
+          for f in *.whl *.tar.gz; do
+            [ -e "$f" ] || { echo "no $f in the release"; exit 1; }
+            case "$f" in *-"$v"-py3-none-any.whl|*-"$v".tar.gz) ;; *) echo "$f is not version $v"; exit 1;; esac
+            want=$(awk -v f="$f" '$2==f {print $1}' SHA256SUMS)
+            [ -n "$want" ] || { echo "$f is not listed in SHA256SUMS"; exit 1; }
+            got=$(sha256sum "$f" | cut -d' ' -f1)
+            [ "$got" = "$want" ] || { echo "$f: sha256 $got, SHA256SUMS says $want"; exit 1; }
+            echo "$f sha256 $got = SHA256SUMS"
+            mv "$f" ../dist/; n=$((n+1))
+          done
+          [ "$n" -eq 2 ] || { echo "expected one wheel and one sdist, found $n files"; exit 1; }
+        shell: bash
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/
