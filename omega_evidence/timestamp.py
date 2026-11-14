@@ -26,7 +26,11 @@ never calls a token qualified: judging qualification is left to the consumer.
 from __future__ import annotations
 
 import base64
+import binascii
+import calendar
+import datetime
 import os
+import re
 import shutil
 import subprocess  # nosec B404 - fixed-arg openssl calls, no shell
 import tempfile
@@ -58,6 +62,43 @@ def _run_openssl(cmd, **kw):
         raise _not_run("cannot run openssl here", OSError(f"no answer within {e.timeout:g} s")) from e
     except OSError as e:
         raise _not_run("cannot run openssl here", e) from e
+
+
+_MONTHS = {m: i for i, m in enumerate(("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+                                       "Dec"), 1)}
+_GEN_TIME = re.compile(r"\ATime stamp: ([A-Z][a-z]{2}) {1,2}(\d{1,2}) (\d\d):(\d\d):(\d\d)(?:\.\d+)? (\d{4}) GMT\Z", re.ASCII)
+
+
+def _gen_time_from_text(text: str) -> Optional[int]:
+    """genTime (whole seconds since the epoch, fraction dropped) from `openssl ts -reply -text`; None when the reply
+    holds no single line of that exact form."""
+    hits = [m for m in (_GEN_TIME.match(ln) for ln in text.splitlines()) if m]
+    if len(hits) != 1 or hits[0].group(1) not in _MONTHS:
+        return None
+    mon, day, hh, mm, ss, year = hits[0].group(1), *(int(x) for x in hits[0].groups()[1:])
+    try:
+        return calendar.timegm(datetime.datetime(year, _MONTHS[mon], day, hh, mm, ss).timetuple())
+    except ValueError:
+        return None
+
+
+def gen_time_of(tsr_b64: str, timeout: int = 15) -> Optional[int]:
+    """The genTime a token CLAIMS (whole seconds since the epoch), read with openssl; None without openssl or for bytes
+    that are not a granted reply. A claim, not a verified time: verify() proves it with a trust anchor."""
+    exe = shutil.which("openssl")
+    if not exe or not isinstance(tsr_b64, str) or not tsr_b64:
+        return None
+    d = tempfile.mkdtemp()
+    try:
+        p = os.path.join(d, "t.tsr")
+        with open(p, "wb") as f:
+            f.write(base64.b64decode(tsr_b64))
+        r = _run_openssl([exe, "ts", "-reply", "-in", p, "-text"], capture_output=True, text=True, timeout=timeout)
+        return _gen_time_from_text(r.stdout or "") if r.returncode == 0 else None
+    except (ValueError, binascii.Error):
+        return None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _reply_facts(exe: str, tsr_path: str, timeout: int, run=subprocess.run):
@@ -240,7 +281,7 @@ def _fetch_crls(urls, timeout: int):
 
 
 def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
-           ca_file: Optional[str] = None) -> Dict:
+           ca_file: Optional[str] = None, at_time: Optional[int] = None) -> Dict:
     """CRYPTOGRAPHICALLY verify an RFC 3161 token against a TRUST ANCHOR.
 
     `ca_file` = PEM of the TSA's trusted root/chain. A token whose SignerInfo names its signer by subjectKeyIdentifier
@@ -251,7 +292,15 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
     {verified: None} ("recorded, not verified"), NEVER a green. With `ca_file` we run
     `openssl ts -verify -CAfile <ca> -digest <hex> -in <tsr>` and require 'Verification: OK'.
     openssl absent → {verified: None}. openssl present but not started here, no answer within `timeout`, or no
-    temporary file → CheckNotRun is raised (0.11.4): neither verified nor a failed check."""
+    temporary file → CheckNotRun is raised (0.11.4): neither verified nor a failed check.
+
+    `at_time` (whole seconds since the epoch) checks the TSA certificate chain at that instant (`openssl ts -verify
+    -attime`) instead of now: RFC 4998 section 5.3 step 2, "Each Archive Timestamp MUST be valid relative to the time
+    of the following Archive Timestamp"; only the last one is checked at the time of verification. Anything but a
+    int from 0 to 253402300799 (9999-12-31T23:59:59Z) is refused with ValueError. The result names the instant (`validated_at`) and, when openssl
+    refuses the token, its reason (`reason`, the last informative field of its last error line). Revocation is not checked at either instant."""
+    if at_time is not None and (isinstance(at_time, bool) or not isinstance(at_time, int) or not 0 <= at_time <= 253402300799):
+        raise ValueError("at_time must be an int of seconds since the epoch, 0 to 9999-12-31T23:59:59Z, not %r" % (at_time,))
     exe = shutil.which("openssl")
     # what the caller holds: a token string, or none at all (absent, empty or not a string) — never claimed otherwise
     tok = "token recorded" if isinstance(tsr_b64, str) and tsr_b64 else "no token recorded (tsr_b64 missing, empty or not a string)"
@@ -290,15 +339,26 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
             if k["why"]:
                 out["note"] = k["why"]
             return out
-        vr = _run_openssl(
-            [exe, "ts", "-verify", "-in", tsr, "-digest", expected_digest_hex.lower(),
-             "-CAfile", ca_file], capture_output=True, text=True, timeout=timeout)
+        cmd = [exe, "ts", "-verify", "-in", tsr, "-digest", expected_digest_hex.lower(), "-CAfile", ca_file]
+        if at_time is not None:
+            cmd += ["-attime", str(at_time)]
+        vr = _run_openssl(cmd, capture_output=True, text=True, timeout=timeout)
         vtext = (vr.stdout or "") + (vr.stderr or "")
         crypto_ok = vr.returncode == 0 and "Verification: OK" in vtext
         granted, imprint_hex = _reply_facts(exe, tsr, timeout, run=_run_openssl)
         imprint_ok = imprint_hex == expected_digest_hex.lower()
-        return {"verified": bool(crypto_ok and granted and imprint_ok),
-                "crypto_verified": crypto_ok, "granted": granted, "imprint_ok": imprint_ok}
+        out = {"verified": bool(crypto_ok and granted and imprint_ok),
+               "crypto_verified": crypto_ok, "granted": granted, "imprint_ok": imprint_ok,
+               "validated_at": "now" if at_time is None else
+               datetime.datetime.fromtimestamp(at_time, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        if not crypto_ok:
+            errs = [ln.strip() for ln in vtext.splitlines() if "error" in ln.lower()]
+            # the last field of the last error line that is not empty, a source file or a line number: an OpenSSL 3
+            # line ends "...:<reason>:<file>.c:<line>:<data>", and <data> is empty for a CA file it cannot load
+            fields = [x.strip() for x in (errs[-1].split(":") if errs else [])]
+            fields = [x for x in fields if x and not x.isdigit() and not x.endswith(".c")]
+            out["reason"] = (fields[-1] if fields else "openssl ts -verify did not print OK")[:160]
+        return out
     except CheckNotRun:
         raise
     except Exception as e:  # noqa: BLE001

@@ -465,6 +465,45 @@ Verdicts change, so this is a minor version. Measured on 17 November 2026 with O
 - **No paid work.** "Contact and citation" no longer offers paid evaluation pilots: no paid pilot, support contract or
   commercial licence is offered (non-commercial open source).
 
+### 0.12.0 — a renewed evidence record stays valid after its first TSA certificate expires (RFC 4998 5.3) (14 November 2026)
+
+RFC 4998 section 5.3, step 2: "Each Archive Timestamp MUST be valid relative to the time of the following Archive
+Timestamp"; only the last one "has to be valid at the time the verification is performed". Up to this change
+`preservation.verify_evidence_record(..., tsa_ca_file=...)` checked every RFC 3161 token of a record at the current
+time, so once the certificate of the TSA behind an early entry expired, a record renewed while that certificate was
+valid became `valid: false` — the case renewal exists for. Measured on 14 November 2026 with OpenSSL 3.0.22 on a real
+token, `test/fixtures/identrust/issue-104.tsr` of trailofbits/rfc3161-client at `7a85980` (genTime
+2025-03-11T08:52:08Z, TSA certificate valid until 2026-01-17): `openssl ts -verify` fails with "certificate has
+expired" at the current time and succeeds with `-attime` at its genTime.
+
+Now the entries are checked from the last to the first. An RFC 3161 token is checked (`openssl ts -verify
+-attime`) at the genTime of the next RFC 3161 token, passing over `asserted` entries, which prove no time. It is
+checked now when there is no next token, when the next token is not verified (FAIL, SKIP, no token), and when an
+entry between them does not bind the one before it (its `renewal[i]` layer is FAIL). The token of a
+`timestamp-renewal` entry is checked over its `prev_binding`, the token of the initial entry and of a
+`hash-tree-renewal` over its `merkle_root`: until the review of 14 November 2026 `merkle_root` came first for every
+type, so a `timestamp-renewal` entry carrying an extra `merkle_root` was checked over that value, and a genuine token
+over other data lent its genTime to an expired entry (record `valid: true`; measured). An entry is FAIL when the next
+token's genTime is earlier than its own, or when its own genTime cannot be read and a next token lends it a time. A
+token is FAIL, and lends no time, when its genTime is outside 1970-01-01 to 9999-12-31 or when its TSA certificate
+chain does not verify at its own genTime: `openssl ts -verify` does not compare the genTime with the validity period
+of the signer's certificate (measured on 14 November 2026 with OpenSSL 3.0.22: a token dated 59 days before its
+certificate's notBefore verifies), and until that review such a token moved the check of the entry before it into the
+past. Each `time[i]-rfc3161` layer that openssl checked names the instant it was checked at.
+`timestamp.verify` takes `at_time` (an int of seconds since the epoch, 0 to 253402300799; anything else is
+`ValueError`) and returns `validated_at` and, when openssl refuses the token, `reason` (the last field of openssl's
+last error line that is not empty, a source file or a line number). `verify_pack` checks the `rfc3161` layer of a pack
+without a trust anchor, so that layer is SKIP and never shows a reason; it would show it on a FAIL.
+`timestamp.gen_time_of(tsr_b64)` returns the genTime a token claims (read in ASCII digits only), or None. Revocation is
+still not checked, at either instant. The Go, Java and JavaScript verifiers do not verify RFC 3161 tokens or read
+evidence records, so they are unchanged.
+
+New tests: `tests/test_rfc4998_validity_time_20261114.py` (21; the tests that need a TSA build their own under one local
+CA, with certificates that expire seconds after use or stay valid for an hour). 16 fail on
+`533e4ad`; the 5 others (a renewal made after the expiry, an `asserted` renewal, a tampered renewal, a broken link, a
+middle entry without a token) give the same result there. 34 targeted mutants of the changed lines are each killed by
+it. It runs in CI. The unused `import json` in `preservation._pack_sha3_of` is removed.
+
 ### 0.11.4 — an RFC 3161 check that openssl cannot start, finish in time or read here is not a verdict (13 October 2026)
 
 Measured on 0.11.3 (`6d712c8`) on 13 October 2026 with Python 3.11.2 and a token from a local TSA built with openssl.

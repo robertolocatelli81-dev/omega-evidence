@@ -92,7 +92,6 @@ def _merkle_root(leaf_hexes: List[str], alg: str) -> str:
 
 
 def _pack_sha3_of(pack_path: str) -> str:
-    import json
     d = loads_bounded(Path(pack_path).read_text(encoding="utf-8"))
     v = d.get("pack_sha3", "")
     if not v:
@@ -256,12 +255,14 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
             f"seq0 {a0['hash_alg']}")
 
     # 3) renewal chain — every entry binds the previous one
+    bound: Dict[int, bool] = {}            # entry i binds entry i-1 (read by step 4: no time crosses a broken link)
     for i in range(1, len(ats)):
         cur, prev = ats[i], ats[i - 1]
         alg = cur["hash_alg"]
         if cur.get("type") == "timestamp-renewal":
             ok = cur.get("prev_binding") == _prev_binding(prev, alg)
             add(f"renewal[{i}]-timestamp", ok, "binds previous archive timestamp")
+            bound[i] = ok
         elif cur.get("type") == "hash-tree-renewal":
             data_leaves = _leaves(pack_sha3, alg)
             chain_binding = _digest(alg, canonical_json(ats[:i]))
@@ -270,11 +271,26 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
                   cur.get("leaves") == expect_leaves and
                   cur.get("merkle_root") == _merkle_root(expect_leaves, alg))
             add(f"renewal[{i}]-hash-tree", ok, f"re-hashed to {alg}, carries previous chain")
+            bound[i] = ok
         else:
             add(f"renewal[{i}]-type", False, f"unknown renewal type: {cur.get('type')}")
 
-    # 4) time source — trusted vs asserted (never a false claim of time)
-    for i, a in enumerate(ats):
+    # 4) time source — trusted vs asserted (never a false claim of time). RFC 4998 section 5.3 step 2: "Each Archive
+    # Timestamp MUST be valid relative to the time of the following Archive Timestamp"; only the last one "has to be
+    # valid at the time the verification is performed". So the entries are checked from the last to the first: an RFC
+    # 3161 token is checked at the genTime of the NEXT RFC 3161 token (asserted entries in between prove no time and are
+    # passed over), or now when there is none, when that token is not verified (FAIL, SKIP, no token), or when an entry
+    # between them does not bind the one before it (step 3). A next genTime earlier than this entry's makes it FAIL. A
+    # token whose own TSA chain does not verify at its own genTime is FAIL and lends no time (openssl ts -verify does not
+    # compare genTime with the signer's validity period). Up to 0.11.4 every token was checked now,
+    # so the expiry of a TSA certificate turned a record renewed in time into valid: false (measured 14/11/2026).
+    from .timestamp import gen_time_of, verify as ts_verify
+    time_layers: List[tuple] = []
+    later_gen: Optional[int] = None          # genTime of the nearest later token that verified; None = check now
+    for i in range(len(ats) - 1, -1, -1):
+        a = ats[i]
+        if i + 1 < len(ats) and not bound.get(i + 1, False):   # entry i+1 does not bind this one: its time says nothing
+            later_gen = None
         ts = a.get("timestamp", {})
         if ts.get("time_source") == "rfc3161":
             tok = ts.get("tsr_b64")
@@ -283,21 +299,51 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
                 # never be verified, with or without a trust anchor (RFC 4998 §4.1: timeStamp is the one field of
                 # ArchiveTimeStamp that is not OPTIONAL; the producer writes it only from a granted reply). Until 0.10.0
                 # it was SKIP with valid: true without tsa_ca_file and FAIL with it (audit V2 decision, 04/10/2026).
-                add(f"time[{i}]-rfc3161", False,
-                    "time_source rfc3161 declared but no token recorded (tsr_b64 missing, empty or not a string)")
+                time_layers.append((f"time[{i}]-rfc3161", False,
+                                    "time_source rfc3161 declared but no token recorded (tsr_b64 missing, empty or not "
+                                    "a string)", False))
+                later_gen = None
                 continue
-            from .timestamp import verify as ts_verify
-            covered = a.get("merkle_root") or a.get("prev_binding") or ""
-            r = ts_verify(tok, covered, ca_file=tsa_ca_file)
+            # what the token must cover, by entry type: a timestamp renewal covers prev_binding (the previous entry), the
+            # initial entry and a hash-tree renewal their merkle_root. Up to the review of 14/11/2026 it was merkle_root
+            # first for every type, so a timestamp renewal carrying an extra merkle_root was checked against that value
+            # and a token over other data lent its genTime to the entries before it.
+            covered = (a.get("prev_binding") if a.get("type") == "timestamp-renewal" else a.get("merkle_root")) or ""
+            r = ts_verify(tok, covered, ca_file=tsa_ca_file, at_time=later_gen)
             # timestamp.verify's contract: verified None = recorded, NOT verified (no openssl / no trust anchor);
             # True / False = verified. Until 0.10.0 this read a "status" key that verify() never returns, so every
             # record with an RFC 3161 token was FAIL (audit V2 final round, 02/10/2026).
             if r.get("verified") is None:
-                add(f"time[{i}]-rfc3161", True, r.get("note", "token recorded, not verified"), skip=True)
-            else:
-                add(f"time[{i}]-rfc3161", r.get("verified") is True, ts.get("tsa", "") or r.get("note", ""))
+                time_layers.append((f"time[{i}]-rfc3161", True, r.get("note", "token recorded, not verified"), True))
+                later_gen = None
+                continue
+            ok = r.get("verified") is True
+            when = "checked at " + str(r.get("validated_at", "now")) + (
+                " (genTime of the following trusted archive timestamp, RFC 4998 5.3)" if later_gen is not None else "")
+            detail = "; ".join(x for x in (ts.get("tsa", "") or r.get("note", ""), when,
+                                           "" if ok else str(r.get("reason", ""))) if x)
+            gen = gen_time_of(tok) if ok else None
+            if ok and gen is not None and not 0 <= gen <= 253402300799:
+                ok, detail = False, detail + "; genTime outside 1970-01-01 to 9999-12-31"
+                gen = None
+            if ok and gen is not None:
+                # its genTime is used as a time only if the TSA certificate chain was valid then (RFC 5280 4.1.2.5):
+                # openssl ts -verify does not compare genTime with the signer's validity period (measured 14/11/2026)
+                own = ts_verify(tok, covered, ca_file=tsa_ca_file, at_time=gen)
+                if own.get("verified") is not True:
+                    ok, detail = False, detail + "; the TSA certificate chain is not valid at the token's own genTime (" \
+                        + str(own.get("reason", "") or own.get("note", "")) + ")"
+                    gen = None
+            if ok and later_gen is not None and gen is None:     # the order with the following entry cannot be read
+                ok, detail = False, detail + "; genTime not readable from the token"
+            if ok and later_gen is not None and gen > later_gen:
+                ok, detail = False, detail + "; the following archive timestamp is dated before this one"
+            time_layers.append((f"time[{i}]-rfc3161", ok, detail, False))
+            later_gen = gen if ok else None
         else:
-            add(f"time[{i}]-asserted", True, "asserted time — NOT trusted time", skip=True)
+            time_layers.append((f"time[{i}]-asserted", True, "asserted time — NOT trusted time", True))
+    for name, ok, detail, skip in reversed(time_layers):
+        add(name, ok, detail, skip=skip)
 
     checked = [x for x in layers if x["status"] in ("PASS", "FAIL")]
     valid = bool(checked) and all(x["status"] == "PASS" for x in checked)
