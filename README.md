@@ -17,8 +17,8 @@ but do not derive from, this toolkit.
 ## Install
 
 ```bash
-# from the static PEP 503 index (artifacts on GitHub Releases, sha256-pinned)
-pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
+# from PyPI (since 0.11.4, uploaded from the GitHub Release by Trusted Publishing, PEP 740 attestations)
+pip install omega-evidence
 
 # or straight from the tagged source
 pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.12.0
@@ -1093,10 +1093,11 @@ Distribution is the **GitHub Release** and the author's PEP 503 index (`https://
 sha256-pinned to the release assets); publication on PyPI was dropped by decision of the author on 15 September 2026.
 A release ships the wheel and sdist, a CycloneDX SBOM, a CRA evidence pack (ledger, pack, AWS KMS Ed25519 signature,
 trust store) and `SHA256SUMS`; `release-build.yml` rebuilds the distributions, checks their metadata and runs the tests
-on every published release. Install:
+on every published release; `pypi.yml` uploads the same wheel and sdist to PyPI, checked against `SHA256SUMS`, after a
+human approval. Install:
 
 ```bash
-pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
+pip install omega-evidence
 ```
 
 CI (`ci.yml`) runs the test suite on every push and pull request across Python 3.9 / 3.11 / 3.13, with and without
