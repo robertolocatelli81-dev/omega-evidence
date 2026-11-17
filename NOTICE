@@ -9,5 +9,26 @@ This toolkit is the open, Apache-2.0 reference layer extracted from the OMEGA
 project. It is self-contained and does NOT include OMEGA's proprietary sector
 engines, which remain under a separate licence and are not distributed here.
 
-Dependency: `cryptography` (BSD/Apache-2.0), used for Ed25519 signatures.
+Dependency: `cryptography` (Apache-2.0 OR BSD-3-Clause), used for Ed25519, ES256
+and ML-DSA-65 signatures.
 Optional runtime tool: `openssl`, used for RFC 3161 timestamping.
+
+Third-party material included in this repository:
+
+- omega_evidence/pqbackends/vectors/acvp_mldsa65_sigver.txt: ML-DSA-65 sigVer and
+  sigGen test cases from the NIST Automated Cryptographic Validation Protocol
+  (https://github.com/usnistgov/ACVP-Server). Source: the National Institute of
+  Standards and Technology. Software developed by NIST employees is not subject to
+  copyright protection within the United States; the NIST notice asks that modified
+  works say what was changed: the cases were selected and rewritten one per line
+  (tcId|expect|reason|pk|message|context|signature, hex) in September 2026.
+- tests: test vectors and examples copied from IETF RFCs (Copyright (c) IETF Trust and
+  the persons identified as the document authors; BCP 78 and the IETF Trust's Legal
+  Provisions): RFC 8032 §7.1 (Ed25519), RFC 7517 Appendix A.1 (an EC public key),
+  RFC 9964 Appendix A (an ML-DSA-65 public key and its kid), RFC 8785 Appendix B
+  (number serialisation).
+
+Not third-party: tests/fixtures/rfc6962_cryptovalid_vectors.json is computed with
+cryptovalid-opencore, and omega_evidence/_tsa_keyid.py is ported from
+cryptovalid-opencore's cryptovalid_tsa.py; both are by the same author, who licenses
+these files here under Apache-2.0.

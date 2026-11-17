@@ -14,7 +14,7 @@
 """
 omega_evidence.interop.sdjwt — issue and verify SD-JWT (RFC 9901, Selective
 Disclosure for JWTs), so OMEGA can produce PII-free, selectively-disclosable
-credentials for the eIDAS 2.0 / EUDI wallet lane.
+credentials, and verify the issuer JWS of an SD-JWT VC (scope below).
 
 The holder can present only chosen claims; the verifier checks the issuer's
 signature and that each presented claim's digest is in the signed `_sd` array —
@@ -23,15 +23,21 @@ leaking.
 
 issue() writes top-level, selectively disclosable claims in the RFC 9901 wire format below (no decoy digests, no
 nested or array-element Disclosures) and refuses names RFC 9901 §4.1 / §4.2.1 forbid; verify() applies §7.1 (see its
-docstring for what is left to the caller or not implemented):
+docstring for what is left to the caller or not implemented) and, since 0.12.0, the JOSE header of an SD-JWT VC
+(draft-ietf-oauth-sd-jwt-vc-27 §2.2.1: `typ` "dc+sd-jwt", compared as RFC 7515 §4.1.9 says) and the issuer signature
+in ES256 (ECDSA on P-256 with SHA-256, RFC 7518 §3.4; OpenID4VC HAIP 1.0, Final, §7: issuers, verifiers and wallets
+MUST at least support it) as well as EdDSA/Ed25519,
+each algorithm bound to one curve (RFC 9864):
   * Disclosure = base64url_nopad(utf8(json([salt, name, value])))
   * digest     = base64url_nopad(sha256(ascii(Disclosure)))     ; _sd_alg="sha-256"
   * Combined   = <JWS>~<Disclosure>~...~     (trailing '~', no key-binding JWT here)
   * JWS header = {"alg":"EdDSA","typ":"dc+sd-jwt"}, Ed25519 over the JWS input.
 
-Honest scope: this is the SD-JWT wire format + issuer signature. It is NOT an
-eIDAS-qualified credential, NOT SD-JWT VC typing/status, and carries NO
-key-binding (holder proof-of-possession) — those are separate layers. The digests
+Scope: the SD-JWT wire format, the SD-JWT VC header (`typ`) and the issuer signature. It is NOT an eIDAS-qualified
+credential; the SD-JWT VC claims (`vct`, `status`, `cnf`) are not checked; issue() puts `vct` only if the caller passes
+it in `plain_claims`; there is NO key binding (holder proof-of-possession): an SD-JWT+KB, which a wallet presents, is
+refused as a whole (HAIP 1.0 §6.1.1.1: a KB-JWT MUST be present when an SD-JWT VC with holder binding is presented). Those
+are separate layers. The digests
 are recomputed per-spec (sha-256), NOT reused from attestation.py's sha3 digests.
 Self-contained: Python stdlib + this toolkit's Ed25519 signing. Apache-2.0.
 """
@@ -52,6 +58,107 @@ from ..signing import Identity, verify_signature
 
 JWS_TYP = "dc+sd-jwt"
 SD_ALG = "sha-256"
+# 0.12.0: each JWS algorithm accepted here, bound to the one key type it verifies with. ES256 is ECDSA on P-256 with
+# SHA-256 (RFC 7518 §3.4); "Ed25519" is the fully specified name and "EdDSA" the polymorphic one, deprecated by RFC 9864
+# §2.2 and held here to Ed25519 only. Any other "alg" is refused (never "none", RFC 8725 §3.2).
+ALG_KEY = {"ES256": "P-256", "Ed25519": "Ed25519", "EdDSA": "Ed25519"}
+_ASCII_LOWER = {c: c + 32 for c in range(0x41, 0x5B)}
+
+
+def _media_type(typ: str) -> str:
+    """RFC 7515 §4.1.9: a media type compared without regard to ASCII case (only A-Z folded: str.lower would make
+    U+212A KELVIN SIGN a 'k'), with "application/" implied when the value has no '/'"""
+    t = typ.translate(_ASCII_LOWER)
+    return t if "/" in t else "application/" + t
+
+
+def check_jose_header(header: Any, expected_typ: str) -> Optional[str]:
+    """The JOSE header of the issuer JWS: None when it holds, else the reason. `crit` is refused (RFC 7515 §4.1.11: no
+    extension is understood here); `alg` a string of ALG_KEY; `typ` a string equal to `expected_typ` as RFC 7515 §4.1.9
+    compares media types. The same checks, in the same order, as ap2-evidence-pack's check_jose_header (SPEC §13)."""
+    if not isinstance(header, dict):
+        return "header_not_object"
+    if "crit" in header:
+        return "crit_not_understood"
+    if "alg" not in header:
+        return "alg_missing"
+    if not isinstance(header["alg"], str):
+        return "alg_not_string"
+    if header["alg"] not in ALG_KEY:
+        return "alg_not_allowed"
+    if "typ" not in header:
+        return "typ_missing"
+    if not isinstance(header["typ"], str):
+        return "typ_not_string"
+    if _media_type(header["typ"]) != _media_type(expected_typ):
+        return "typ_mismatch"
+    return None
+
+
+class _NoBackend(Exception):
+    pass
+
+
+def _issuer_key(key: Any):
+    """("Ed25519", standard-base64 raw key) or ("P-256", cryptography public key) or (other kind, None). `key` is the
+    standard base64 of a raw Ed25519 key (as before 0.12.0), a PEM SubjectPublicKeyInfo, or a JWK (RFC 7517) of kty
+    OKP/Ed25519 or EC/P-256. A JWK's `use` other than "sig", or `key_ops` without "verify", makes it unusable (RFC 7517
+    §4.2, §4.3); its `alg`, when present, must be the header's (checked by the caller); other members are ignored, as
+    RFC 7517 §4 says."""
+    if isinstance(key, dict):
+        kty, crv = key.get("kty"), key.get("crv")
+        if ("use" in key and key["use"] != "sig") or ("key_ops" in key and (not isinstance(key["key_ops"], list)
+                                                                            or "verify" not in key["key_ops"])):
+            return "unusable", None
+        if kty == "OKP" and crv == "Ed25519":
+            x = _b64u_dec(key.get("x"))
+            if len(x) != 32:
+                raise ValueError("Ed25519 JWK: x is not 32 bytes")
+            return "Ed25519", base64.b64encode(x).decode()
+        if kty == "EC" and crv == "P-256":
+            x, y = _b64u_dec(key.get("x")), _b64u_dec(key.get("y"))
+            if len(x) != 32 or len(y) != 32:
+                raise ValueError("P-256 JWK: x and y are 32 bytes each (RFC 7518 §6.2.1.2)")
+            try:
+                from cryptography.hazmat.primitives.asymmetric import ec
+            except ImportError as e:
+                raise _NoBackend from e
+            pub = ec.EllipticCurvePublicNumbers(int.from_bytes(x, "big"), int.from_bytes(y, "big"),
+                                                ec.SECP256R1()).public_key()   # ValueError when not on the curve
+            return "P-256", pub
+        return f"{kty}/{crv}", None
+    if isinstance(key, str) and key.lstrip().startswith("-----BEGIN PUBLIC KEY-----"):
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+        except ImportError as e:
+            raise _NoBackend from e
+        pub = serialization.load_pem_public_key(key.encode("ascii"))
+        if isinstance(pub, ed25519.Ed25519PublicKey):
+            raw = pub.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+            return "Ed25519", base64.b64encode(raw).decode()
+        if isinstance(pub, ec.EllipticCurvePublicKey):
+            return ("P-256", pub) if pub.curve.name == "secp256r1" else (pub.curve.name, None)
+        return type(pub).__name__, None
+    if isinstance(key, str):
+        return "Ed25519", key
+    raise TypeError("issuer key: a base64 Ed25519 key, a PEM public key or a JWK")
+
+
+def _es256_ok(pub, raw_sig: bytes, signing_input: bytes) -> bool:
+    """RFC 7518 §3.4: the JWS signature is R || S, 32 bytes each"""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+    if len(raw_sig) != 64:
+        return False
+    try:
+        pub.verify(encode_dss_signature(int.from_bytes(raw_sig[:32], "big"), int.from_bytes(raw_sig[32:], "big")),
+                   signing_input, ec.ECDSA(hashes.SHA256()))
+        return True
+    except InvalidSignature:
+        return False
 
 
 def _b64u(data: bytes) -> str:
@@ -146,10 +253,15 @@ def present(sdjwt: str, disclose: List[str]) -> str:
     return jws + "~" + "".join(d + "~" for d in keep)
 
 
-def verify(sdjwt: str, issuer_public_key_b64: str, now: Optional[float] = None) -> Dict[str, Any]:
+def verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float] = None,
+           expected_typ: str = JWS_TYP) -> Dict[str, Any]:
     """Verify an SD-JWT per RFC 9901 §7.1 and return {verified, header, plain_claims, disclosed_claims,
-    undisclosed_digests, processed_payload}. `verified` is True only if every step holds: alg EdDSA (never "none"),
-    the issuer's Ed25519 signature, `_sd_alg` sha-256 (the default when absent, §4.1.1), every Disclosure of the right
+    undisclosed_digests, processed_payload}. `verified` is True only if every step holds: the JOSE header
+    (check_jose_header: no `crit`, `alg` ES256, Ed25519 or EdDSA, never "none"; `typ` equal to `expected_typ`, by default
+    "dc+sd-jwt" of SD-JWT VC -27 §2.2.1, compared as RFC 7515 §4.1.9 says; since 0.12.0, before which only EdDSA was
+    accepted and `typ` not read), the issuer key of the kind the algorithm names (ALG_KEY: a P-384 key under ES256 is
+    refused; `issuer_public_key_b64` is the base64 of a raw Ed25519 key as before, a PEM public key or a JWK) and its
+    signature, `_sd_alg` sha-256 (the default when absent, §4.1.1), every Disclosure of the right
     shape and referenced exactly once (recursively, in objects and array elements), no claim name `_sd` / `...` or one
     already present at that level, no digest seen twice, and `exp` / `nbf` when present (at `now`, default the clock).
     Format rules of §4.2.1 / §4.2.4.1 are enforced too: a salt is a string, an `_sd` key refers to an array of strings.
@@ -157,11 +269,18 @@ def verify(sdjwt: str, issuer_public_key_b64: str, now: Optional[float] = None) 
     A malformed token is a verdict, never a traceback. Left to the caller or not implemented: Key Binding (§7.3) — an
     SD-JWT+KB (anything after the last '~') is rejected as a whole; that the key belongs to the Issuer (step 2.c), which
     is the caller's choice of `issuer_public_key_b64`; `aud` and which validity claims are required (step 6, §9.7);
-    the JWS `crit` header (RFC 7515). Stricter than §7.1, and declared: the same Disclosure presented twice is a reject."""
+    the SD-JWT VC claims (`vct`, `status`, `cnf`). Stricter than §7.1, and declared: the same Disclosure presented twice
+    is a reject. ES256 needs the `cryptography` package: without it, an ES256 token is `verified: None` (not checked
+    here), never False."""
+    if not isinstance(expected_typ, str) or not expected_typ:
+        raise ValueError("expected_typ: a non-empty string")
     try:
-        return _verify(sdjwt, issuer_public_key_b64, now)
+        return _verify(sdjwt, issuer_public_key_b64, now, expected_typ)
     except _Reject as e:
         return {"verified": False, "error": str(e), "disclosed_claims": {}}
+    except _NoBackend:
+        return {"verified": None, "error": "ES256 or a PEM key needs the cryptography package: not checked here",
+                "disclosed_claims": {}}
     except (ValueError, TypeError, AttributeError, KeyError, RecursionError) as e:
         # a malformed token is a verdict, never a traceback (audit V2 #4, 30/09/2026)
         return {"verified": False, "error": f"malformed SD-JWT: {type(e).__name__}", "disclosed_claims": {}}
@@ -177,7 +296,7 @@ def _loads(raw: bytes) -> Any:
     return loads_bounded(raw.decode("utf-8"), parse_constant=_no_constant)
 
 
-def _verify(sdjwt: str, issuer_public_key_b64: str, now: Optional[float]) -> Dict[str, Any]:
+def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expected_typ: str) -> Dict[str, Any]:
     if not isinstance(sdjwt, str):
         raise TypeError("SD-JWT is not a string")
     if not sdjwt.endswith("~"):
@@ -191,11 +310,20 @@ def _verify(sdjwt: str, issuer_public_key_b64: str, now: Optional[float]) -> Dic
     except ValueError:
         return {"verified": False, "error": "malformed JWS", "disclosed_claims": {}}
     header = _loads(_b64u_dec(h_b64))
-    if not isinstance(header, dict) or header.get("alg") != "EdDSA":
-        raise _Reject("alg must be EdDSA (step 2.a: the only algorithm this verifier accepts; never 'none')")
+    why = check_jose_header(header, expected_typ)
+    if why is not None:
+        raise _Reject(f"JOSE header: {why} (step 2.a; SD-JWT VC -27 §2.2.1; RFC 7515 §4.1.9, §4.1.11)")
+    alg = header["alg"]
+    if isinstance(issuer_public_key_b64, dict) and "alg" in issuer_public_key_b64 and issuer_public_key_b64["alg"] != alg:
+        raise _Reject(f"the issuer JWK is for alg {issuer_public_key_b64['alg']!r}, the header says {alg!r} (RFC 7517 §4.4)")
+    kind, key = _issuer_key(issuer_public_key_b64)
+    if kind != ALG_KEY[alg] or key is None:
+        raise _Reject(f"alg {alg} verifies with a {ALG_KEY[alg]} key, not {kind} (RFC 7518 §3.4, RFC 9864)")
     signing_input = (h_b64 + "." + p_b64).encode("ascii")
     raw_sig = _b64u_dec(sig_b64)
-    if not verify_signature(issuer_public_key_b64, base64.b64encode(raw_sig).decode(), signing_input):
+    ok = _es256_ok(key, raw_sig, signing_input) if kind == "P-256" else \
+        verify_signature(key, base64.b64encode(raw_sig).decode(), signing_input)
+    if not ok:
         return {"verified": False, "error": "issuer signature invalid", "header": header, "disclosed_claims": {}}
     body = _loads(_b64u_dec(p_b64))
     if not isinstance(body, dict):

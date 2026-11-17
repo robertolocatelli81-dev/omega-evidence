@@ -21,7 +21,7 @@ but do not derive from, this toolkit.
 pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ omega-evidence
 
 # or straight from the tagged source
-pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.11.4
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.12.0
 ```
 
 Release artifacts (`.whl` / `.tar.gz`) are attached to each
@@ -37,7 +37,7 @@ the index links carry `#sha256=` fragments, so pip verifies every download.
 | `pack` | Self-describing evidence pack — a **mandatory `honest_scope`** stating what it does *not* prove; a recomputable `pack_sha3` |
 | `signing` | Ed25519 producer identity and signatures (bound to the payload) |
 | `trust` | TOFU trust registry with explicit rotation and revocation |
-| `timestamp` | RFC 3161 trusted timestamping (a qualified TSA adds legal presumption of time) |
+| `timestamp` | RFC 3161 trusted timestamping; a token whose signer is named by subjectKeyIdentifier is verified too (0.12.0). It never calls a token qualified (see Standards) |
 | `attestation` | PII-free attestation primitive — salted per-record digests, **no linkability** |
 | `verifier` | One offline verifier with **graduated authenticity** |
 | `interop.aat` | Export/verify **Agent Audit Trail** chains (draft-sharif-agent-audit-trail-**04**): JCS hash chain, record phases, §7 detail fields, ES256 / ML-DSA-65 / hybrid signatures resolved by RFC 7638 thumbprint, Merkle epochs (RFC 6962), tombstones, session close, JSONL/CSV |
@@ -94,10 +94,22 @@ prevents silent key-swap, not the legal identity of the holder.
 
 ## Agent Audit Trail interop (draft -04, 2026-09-19)
 
-Compared with the 2026 field (observability schemas, security-event schemas, EU AI Act Art. 12): the requirement has
+Compared with the 2026 field (observability schemas, security-event schemas, EU AI Act Art. 12, which applies to
+high-risk AI systems from 2 December 2027 for Annex III and 2 August 2028 for Annex I as amended by Regulation (EU)
+2026/1744, in force since 27 July 2026): the requirement has
 converged, the record has not. The Internet-Draft that proposes one is `draft-sharif-agent-audit-trail` (R. Sharif; an
 individual draft, not an IETF standard; -00 of 29 March 2026, **-04 of 15 September 2026, expires 19 March 2027**;
 the author has an IPR disclosure on the datatracker: reading, writing and verifying the format is what this module does).
+**The current revision is -09** (26 October 2026, expires 29 April 2027; IETF datatracker, read on 17 November 2026);
+this module still implements **-04**. What changed after -04, from the -09 change log, and how this -04 verifier
+answers (measured on 17 November 2026): -05 adds OPTIONAL `sequence_number`, heartbeat records, `prior_generation_tail`
+and JCS on export; -06 requires a tombstone in a signed chain to be signed anew by the deleting authority (this module
+already did so, below) and a verifier to report a chain that does not end in a close record as inconclusive (not
+reported here); -07 makes `principal` mandatory (records of -06 and earlier SHOULD read as "principal not recorded");
+-08 adds an OPTIONAL `platform_attestation`; -09 removes `batch` before the §6.1 hash (this module already did) and adds
+`Ed25519` as an OPTIONAL `sig_alg`. A -05…-09 record carrying `sequence_number`, `principal` or `platform_attestation`
+verifies here with those fields hashed but not checked; a -07+ record WITHOUT `principal` is not flagged; a record
+signed with `Ed25519` is refused (`sig_alg not in the registry`).
 `omega_evidence.interop.aat` implements **-04**: it exports an `AgentEvidenceLog` ledger as AAT chains — one chain per
 session, opened by a synthesised (and so labelled) genesis record and, on request, closed by a `session_end` record with
 the draft's `session_hash` — and verifies any AAT chain offline, fail-closed: chain (`prev_hash` = SHA-256 over the JCS
@@ -106,8 +118,9 @@ pre-execution rules, the §7 REQUIRED `action_detail` fields per action type, re
 fail-safe trust level, nonces, tombstones (§9.3), size bounds, the §13 rule that a decision may be called `reproducible`
 only with a closed attestation, and every signature present: **ES256** (P-256, IEEE P1363), **ML-DSA-65** (FIPS 204,
 empty context, through `cryptography` ≥ 48) and the **hybrid** mode, each key resolved by its `signer_kid` — the RFC 7638
-JWK thumbprint for P-256 (checked against jwcrypto 1.6.1) and the AKP thumbprint of draft-ietf-cose-dilithium-11 for
-ML-DSA-65 (reproduces the draft's own example `kid`). Optional §6.4 **Merkle batch anchoring** builds RFC 6962 epochs with
+JWK thumbprint for P-256 (checked against jwcrypto 1.6.1) and the AKP thumbprint of RFC 9964 §6 (May 2026, formerly
+draft-ietf-cose-dilithium-11) for ML-DSA-65 (reproduces the `kid` of the ML-DSA-65 JWK example in RFC 9964 Appendix A;
+the same `pub` and `kid` as in the -11 draft, compared byte for byte on 17 November 2026). Optional §6.4 **Merkle batch anchoring** builds RFC 6962 epochs with
 audit paths (roots and paths identical to cryptovalid's implementation for 1…20 leaves) and anchors the root with an
 RFC 3161 token (verified only against a trust anchor, never green without one). Exports: JSONL (§10.1, the JCS form, so
 the file re-reads to the same hashes) and CSV (§10.3, lossy, declared).
@@ -318,8 +331,21 @@ offline, tested — not the RFC 4998 ASN.1 wire format); Ed25519 with an optiona
 co-signature — since 0.7.0 **ML-DSA-65 (FIPS 204)** built in through `cryptography` ≥ 48, SLH-DSA (FIPS 205)
 through an external liboqs backend; any PQ scheme is admitted only by a known-answer-test gate (the built-in
 ML-DSA backend must pass the NIST ACVP sigVer vectors shipped in `pqbackends/vectors/` before it is registered) —
-no home-grown PQ crypto; SD-JWT (RFC 9901) issue/verify for the eIDAS 2.0 / EUDI wallet lane; PII-free by design
+no home-grown PQ crypto; SD-JWT (RFC 9901) issue/verify, and since 0.12.0 the issuer JWS of an SD-JWT VC: `typ`
+"dc+sd-jwt" (draft-ietf-oauth-sd-jwt-vc-27 §2.2.1, compared as RFC 7515 §4.1.9 says) and ES256 on P-256 (RFC 7518
+§3.4; OpenID4VC High Assurance Interoperability Profile 1.0, Final, 24 December 2025, §7: issuers, verifiers and
+wallets MUST at least support ES256) besides EdDSA/Ed25519, each algorithm bound to one curve (RFC 9864). Not covered:
+Key Binding (an SD-JWT+KB is refused as a whole, while HAIP 1.0 §6.1.1.1 requires a KB-JWT whenever an SD-JWT VC with
+holder binding is presented, so a wallet's presentation of such a credential is refused here), the SD-JWT VC claims (`vct`, `status`,
+`cnf`), the issuer's key discovery (the caller supplies the key) and eIDAS qualification. PII-free by design
 (salted per-record digests, no linkability).
+
+**Qualified time stamps.** A qualified electronic time stamp enjoys the presumption of the accuracy of its date and
+time and of the integrity of the data it is bound to (eIDAS, Regulation (EU) No 910/2014, Art. 41(2)). A token the TSA
+declares qualified contains one non-critical qcStatements extension with the statement `esi4-qtstStatement-1`
+(Commission Implementing Regulation (EU) 2025/1929, Annex, adaptation of ETSI EN 319 422 clause 9.1; in force since
+20 October 2025), and the TSA is listed as qualified for time stamps on the EU Trusted List. `timestamp.verify` checks
+neither: it verifies a token against the trust anchors the caller gives and never calls it qualified.
 
 ## Hybrid post-quantum packs (0.7.0)
 
@@ -357,6 +383,48 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 `drop_pq=True`. Without `cryptography` ≥ 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0; the backend is
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
+
+### 0.12.0 — SD-JWT VC in ES256 with its `typ`; an RFC 3161 signer named by key identifier; current citations (17 November 2026)
+
+Verdicts change, so this is a minor version. Measured on 17 November 2026 with OpenSSL 3.0.22, Python 3.9.25
+(`cryptography` 50.0.0) and 3.14.8 (`cryptography` 50.0.2); every "before" is the tag v0.11.4 run with the new tests.
+
+- **RFC 3161, a signer named by subjectKeyIdentifier** (RFC 5652 §5.3 allows it). `openssl ts -verify` cannot read such
+  a token, so `timestamp.verify(..., ca_file=)` answered `verified: False` for a valid one: before, `{verified: False,
+  crypto_verified: False, granted: False, imprint_ok: False}`; now `verified: True`, with `signer_named_by:
+  "subjectKeyIdentifier"`. For that form the checks of `ts -verify` are made one by one (`_tsa_keyid`, ported from
+  cryptovalid-opencore's SPEC §11 step 7): the reply read as strict DER (granted, TSTInfo, imprint), the CMS signature,
+  the ESS signingCertificate(V2) attribute, the `tsa` field (names compared as OpenSSL's X509_NAME_cmp), and
+  `openssl verify -purpose timestampsign` against `ca_file`. A token whose signer is named by issuer and serial number
+  takes the same `openssl ts -verify` path as before. Tests: `tests/test_tsa_signer_key_id_20261117.py`, 12 cases on
+  tokens made here with openssl (another digest, another CA, no timeStamping, no ESS attribute, an ESS certHash of
+  another certificate, a `tsa` field naming another TSA or the same name in other letter case, not granted, a changed
+  signature byte).
+- **SD-JWT VC: ES256 and `typ`.** `interop.sdjwt.verify` accepted only EdDSA and did not read `typ`; ES256 is the
+  algorithm OpenID4VC HAIP 1.0 (Final) §7 requires issuers, verifiers and wallets to support. Now
+  the JOSE header is checked as ap2-evidence-pack's `check_jose_header` checks it: `crit` refused (RFC 7515 §4.1.11);
+  `alg` ES256, Ed25519 or EdDSA; `typ` equal to "dc+sd-jwt" (draft-ietf-oauth-sd-jwt-vc-27 §2.2.1; another value with
+  `expected_typ=`), compared as RFC 7515 §4.1.9 says (ASCII letters only folded, "application/" implied). Each
+  algorithm verifies with one key type (`ALG_KEY`, RFC 7518 §3.4 and RFC 9864): ES256 a P-256 key, Ed25519/EdDSA an
+  Ed25519 key; the issuer key may be a JWK or a PEM key as well as the base64 Ed25519 key of before. Before → now, on
+  tokens made in the tests: an ES256 SD-JWT VC `False` ("alg must be EdDSA") → `True`; an EdDSA token with no `typ`,
+  with `typ` "jwt", or with `crit` `True` → `False`; a P-384 key under ES256, a P-256 key under EdDSA, a JWK of
+  another `alg` → `False`. Without `cryptography`, ES256 is `verified: None` (not checked here). Tokens written by
+  `issue()` (EdDSA, `typ` "dc+sd-jwt") verify as before. Key Binding (an SD-JWT+KB, which HAIP 1.0 §6.1.1.1 requires for a
+  credential with holder binding) is still refused as a whole, and `vct`, `status`, `cnf` are not checked (README, Standards). Tests:
+  `tests/test_sdjwt_es256_typ_20261117.py`; the SD-JWT fixtures of `tests/test_toolkit.py` now carry `typ`.
+- **Hand mutants** of the new and changed lines: 29, each killed by the two new test files.
+- **`cryptography` >= 50.0.0** (was >= 3.4). OSV.dev, read on 17 November 2026: 21 advisories for 3.4, 2 for 49.0.0
+  (GHSA-g6cj-pr64-35w5 = PYSEC-2026-3552, CVE-2026-69247, fixed in 50.0.0), 0 for 50.0.0 and 50.0.2. 50.0.0 has wheels
+  for Python 3.9 (cp39-abi3); the CI's 3.9 job now installs exactly 50.0.0.
+- **Citations.** The AKP thumbprint is RFC 9964 §6 (May 2026; it was draft-ietf-cose-dilithium-11); the known-answer
+  `kid` of RFC 9964 Appendix A is the one tested before (same `pub`, compared byte for byte). Agent Audit Trail: the
+  current revision is -09; this module still implements -04, and the README says what -05…-09 change and how this
+  verifier answers. EU AI Act Art. 12: high-risk dates of Regulation (EU) 2026/1744. CRA dates re-read in the Official
+  Journal text. Qualified time stamps: what Implementing Regulation (EU) 2025/1929 requires, and that this toolkit
+  checks neither the qcStatements nor the Trusted List.
+- **NOTICE** lists the third-party material (NIST ACVP vectors, vectors and examples from RFCs); **SIGNING.md** says
+  which keys sign the releases and how to check them.
 
 ### 0.11.4 — an RFC 3161 check that openssl cannot start, finish in time or read here is not a verdict (13 October 2026)
 
@@ -971,6 +1039,8 @@ lock there), NFS, other hardware.
 ```bash
 python3 tests/test_toolkit.py                       # unit + end-to-end, incl. N threads / N processes appending to one ledger
 python3 tests/test_receipt_exit74.py                # a receipt not written whole is exit 74 in the four CLIs (real processes)
+python3 tests/test_tsa_signer_key_id_20261117.py    # RFC 3161: a signer named by subjectKeyIdentifier (local TSA built with openssl)
+python3 tests/test_sdjwt_es256_typ_20261117.py      # SD-JWT VC: ES256 bound to P-256 and typ dc+sd-jwt (needs cryptography)
 python3 tests/fuzz_toolkit.py --iterations 3000     # seeded mutation fuzz of the verifier and the ledger (exit 1 on a violation)
 python3 tests/fuzz_toolkit.py --ablate signature    # positive control: the sabotaged verifier must make the fuzzer red (6 ablations)
 python3 tests/bench_toolkit.py --json bench.json    # latencies, throughput, memory, the 1 000 000-entry run (see below)

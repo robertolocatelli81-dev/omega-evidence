@@ -1208,7 +1208,7 @@ def _forge_tombstone(aat, rec, key, original_action_type="lifecycle"):
 
 class TestAAT04(unittest.TestCase):
     """draft -04 (2026-09-15): record_phase and the §4.2 rules, §7 REQUIRED action_detail fields (0.7.0 exports
-    violated them), signer_kid (RFC 7638 / AKP thumbprints, KAT from draft-ietf-cose-dilithium-11), ML-DSA-65 and
+    violated them), signer_kid (RFC 7638 / AKP thumbprints, KAT from RFC 9964 Appendix A, formerly draft-ietf-cose-dilithium-11), ML-DSA-65 and
     hybrid signatures, §5 recording independence, §5.3 fail-safe, nonces, tombstones (§9.3), session close (§8.3),
     §13 closure, Merkle epochs (§6.4) against cryptovalid's RFC 6962 implementation, JSONL/CSV (§10)."""
 
@@ -1261,7 +1261,7 @@ class TestAAT04(unittest.TestCase):
 
     def test_thumbprints_kat(self):
         from omega_evidence.interop import aat
-        # draft-ietf-cose-dilithium-11 appendix: ML-DSA-65 JWK with kid = AKP thumbprint (KAT on the pub prefix hash)
+        # RFC 9964 Appendix A (same pub and kid as draft-ietf-cose-dilithium-11): ML-DSA-65 JWK with kid = AKP thumbprint
         pub = base64.urlsafe_b64decode("QksvJn5Y1bO0TXGs_Gpla7JpUNV8YdsciAvPof6rRD8JQquL2619cIq7w1YHj22ZolInH-YsdAkeuUr7m5JkxQqIjg3-2AzV-yy9NmfmDVOevkSTAhnNT67RXbs0VaJkgCufSbzkLudVD-_91GQqVa3mk4aKRgy-wD9PyZpOMLzP-opHXlOVOWZ067galJN1h4gPbb0nvxxPWp7kPN2LDlOzt_tJxzrfvC1PjFQwNSDCm_l-Ju5X2zQtlXyJOTZSLQlCtB2C7jdyoAVwrftUXBFDkisElvgmoKlwBks23fU0tfjhwc0LVWXqhGtFQx8GGBQ-zol3e7P2EXmtIClf4KbgYq5u7Lwu848qwaItyTt7EmM2IjxVth64wHlVQruy3GXnIurcaGb_qWg764qZmteoPl5uAWwuTDX292Sa071S7GfsHFxue5lydxIYvpVUu6dyfwuExEubCovYMfz_LJd5zNTKMMatdbBJg-Qd6JPuXznqc1UYC3CccEXCLTOgg_auB6EUdG0b_cy-5bkEOHm7Wi4SDipGNig_ShzUkkot5qSqPZnd2I9IqqToi_0ep2nYLBB3ny3teW21Qpccoom3aGPt5Zl7fpzhg7Q8zsJ4sQ2SuHRCzgQ1uxYlFx21VUtHAjnFDSoMOkGyo4gH2wcLR7-z59EPPNl51pljyNefgCnMSkjrBPyz1wiET-uqi23f8Bq2TVk1jmUFxOwdfLsU7SIS30WOzvwD_gMDexUFpMlEQyL1-Y36kaTLjEWGCi2tx1FTULttQx5JpryPW6lW5oKw5RMyGpfRliYCiRyQePYqipZGoxOHpvCWhCZIN4meDY7H0RxWWQEpiyCzRQgWkOtMViwao6Jb7wZWbLNMebwLJeQJXWunk-gTEeQaMykVJobwDUiX-E_E7fSybVRTZXherY1jrvZKh8C5Gi5VADg5Vs319uN8-dVILRyOOlvjjxclmsRcn6HEvTvxd9MS7lKm2gI8BXIqhzgnTdqNGwTpmDHPV8hygqJWxWXCltBSSgY6OkGkioMAmXjZjYq_Ya9o6AE7WU_hUdm-wZmQLExwtJWEIBdDxrUxA9L9JL3weNyQtaGItPjXcheZiNBBbJTUxXwIYLnXtT1M0mHzMqGFFWXVKsN_AIdHyv4yDzY9m-tuQRfbQ_2K7r5eDOL1Tj8DZ-s8yXG74MMBqOUvlglJNgNcbuPKLRPbSDoN0E3BYkfeDgiUrXy34a5-vU-PkAWCsgAh539wJUUBxqw90V1Du7eTHFKDJEMSFYwusbPhEX4ZTwoeTHg--8Ysn4HCFWLQ00pfBCteqvMvMflcWwVfTnogcPsJb1bEFVSc3nTzhk6Ln8J-MplyS0Y5mGBEtVko_WlyeFsoDCWj4hqrgU7L-ww8vsCRSQfskH8lodiLzj0xmugiKjWUXbYq98x1zSnB9dmPy5P3UNwwMQdpebtR38N9I-jup4Bzok0-JsaOe7EORZ8ld7kAgDWa4K7BAxjc2eD540Apwxs-VLGFVkXbQgYYeDNG2tW1Xt20-XezJqZVUl6-IZXsqc7DijwNInO3fT5o8ZAcLKUUlzSlEXe8sIlHaxjLoJ-oubRtlKKUbzWOHeyxmYZSxYqQhSQj4sheedGXJEYWJ-Y5DRqB-xpy-cftxL10fdXIUhe1hWFBAoQU3b5xRY8KCytYnfLhsFF4O49xhnax3vuumLpJbCqTXpLureoKg5PvWfnpFPB0P-ZWQN35mBzqbb3ZV6U0rU55DvyXTuiZOK2Z1TxbaAd1OZMmg0cpuzewgueV-Nh_UubIqNto5RXCd7vqgqdXDUKAiWyYegYIkD4wbGMqIjxV8Oo2ggOcSj9UQPS1rD5u0rLckAzsxyty9Q5JsmKa0w8Eh7Jwe4Yob4xPVWWbJfm916avRgzDxXo5gmY7txdGFYHhlolJKdhBU9h6f0gtKEtbiUzhp4IWsqAR8riHQs7lLVEz6P537a4kL1r5FjfDf_yjJDBQmy_kdWMDqaNln-MlKK8eENjUO-qZGy0Ql4bMZtNbHXjfJUuSzapA-RqYfkqSLKgQUOW8NTDKhUk73yqCU3TQqDEKaGAoTsPscyMm7u_8QrvUK8kbc-XnxrWZ0BZJBjdinzh2w-QvjbWQ5mqFp4OMgY94__tIU8vvCUNJiYA1RdyodlfPfH5-avpxOCvBD6C7ZIDyQ-6huGEQEAb6DP8ydWIZQ8xY603DoEKKXkJWcP6CJo3nHFEdj_vcEbDQ-WESDpcQFa1fRIiGuALj-sEWcjGdSHyE8QATOcuWl4TLVzRPKAf4tCXx1zyvhJbXQu0jf0yfzVpOhPun4n-xqK4SxPBCeuJOkQ2VG9jDXWH4pnjbAcrqjveJqVti7huMXTLGuqU2uoihBw6mGqu_WSlOP2-XTEyRyvxbv2t-z9V6GPt1V9ceBukA0oGwtJqgD-q7NXFK8zhw7desI5PZMXf3nuVgbJ3xdvAlzkmm5f9RoqQS6_hqwPQEcclq1MEZ3yML5hc99TDtZWy9gGkhR0Hs3QJxxgP7bEqGFP-HjTPnJsrGaT6TjKP7qCxJlcFKLUr5AU_kxMULeUysWWtSGJ9mpxBvsyW1Juo" + "=")
         self.assertEqual(len(pub), 1952)
         self.assertEqual(aat.mldsa65_thumbprint(pub), "Suiu29qbfuaBaR4Ats-c6XQBePB_OpAxAwcTR_0KXVM")
@@ -3011,7 +3011,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         self.assertTrue(v["verified"], v)
         self.assertEqual(v["processed_payload"]["zones"], [{"lvl": 2}])
         # NaN in a signed SD-JWT payload is not JSON (Q4)
-        h = b64u(json.dumps({"alg": "EdDSA"}).encode()); p = b64u(b'{"iss":"x","exp":NaN}')
+        h = b64u(json.dumps({"alg": "EdDSA", "typ": "dc+sd-jwt"}).encode()); p = b64u(b'{"iss":"x","exp":NaN}')
         nan_tok = f"{h}.{p}.{b64u(base64.b64decode(sk.sign((h + '.' + p).encode())))}~"
         self.assertFalse(sdjwt.verify(nan_tok, sk.public_key_b64, now=1000)["verified"])
         self.assertFalse(sdjwt.verify(tok(base, [d1]).replace(".", ".", 1)[:-1] + "~~", sk.public_key_b64, now=1000)["verified"])
@@ -3188,7 +3188,7 @@ class TestSDJWTSection71Held(unittest.TestCase):
     def _disc(self, arr):
         return self._b64u(json.dumps(arr).encode())
 
-    def _tok(self, body, discs, header=b'{"alg":"EdDSA"}'):
+    def _tok(self, body, discs, header=b'{"alg":"EdDSA","typ":"dc+sd-jwt"}'):
         h = self._b64u(header)
         p = self._b64u(body if isinstance(body, bytes) else json.dumps(body).encode())
         s = self._b64u(base64.b64decode(self.i.sign((h + "." + p).encode())))
@@ -3208,7 +3208,7 @@ class TestSDJWTSection71Held(unittest.TestCase):
             "exp null": self._tok({"exp": None}, []), "exp false": self._tok({"exp": False}, []),        # N305
             "exp 0": self._tok({"exp": 0}, []),
             "2.d _sd_alg null": self._tok({"_sd_alg": None}, []),                                        # N306
-            "NaN in the header": self._tok({}, [], header=b'{"alg":"EdDSA","x":NaN}'),                   # N311
+            "NaN in the header": self._tok({}, [], header=b'{"alg":"EdDSA","typ":"dc+sd-jwt","x":NaN}'),                   # N311
             "NaN exp inside a Disclosure": self._tok({"_sd": [D(nan_exp)]}, [nan_exp]),                  # N312
             "NaN in another disclosed claim": self._tok({"_sd": [D(self._b64u(b'["s","n",NaN]'))]}, [self._b64u(b'["s","n",NaN]')]),
             "claim name not a string": self._tok({"_sd": [D(num_name)]}, [num_name]),                    # N313
@@ -3242,7 +3242,7 @@ class TestSDJWTSection71Held(unittest.TestCase):
         # (verified: True) on the Python 3.14 of a CI runner. 600 levels parse on every Python: only the 512 bound refuses.
         for n in (100000, 600):
             deep = b'{"a":' + b"[" * n + b"]" * n + b"}"
-            for t in (self._tok(deep, []), self._tok({}, [], header=b'{"alg":"EdDSA","x":' + b"[" * n + b"]" * n + b"}")):
+            for t in (self._tok(deep, []), self._tok({}, [], header=b'{"alg":"EdDSA","typ":"dc+sd-jwt","x":' + b"[" * n + b"]" * n + b"}")):
                 r = self._v(t)
                 self.assertFalse(r["verified"], n)
         ok = b'{"a":' + b"[" * 500 + b"]" * 500 + b"}"                                                 # control: under the bound
@@ -3307,7 +3307,7 @@ class TestSDJWTIssueRefuses(unittest.TestCase):
         self.assertFalse(sdjwt.verify(t, self.pk, now=1000)["verified"])                  # presented: rejected
         for big in (b"1e400", b"-1e400"):                                                # parses to +-inf: never a valid time
             b = lambda x: base64.urlsafe_b64encode(x).rstrip(b"=").decode()
-            h, p = b(b'{"alg":"EdDSA"}'), b(b'{"iss":"y","exp":' + big + b'}')
+            h, p = b(b'{"alg":"EdDSA","typ":"dc+sd-jwt"}'), b(b'{"iss":"y","exp":' + big + b'}')
             tok = f"{h}.{p}.{b(base64.b64decode(self.i.sign((h + '.' + p).encode())))}~"
             r = sdjwt.verify(tok, self.pk, now=1000)
             self.assertFalse(r["verified"]); self.assertIn("exp is not a finite number", r["error"])
@@ -3317,7 +3317,7 @@ class TestSDJWTIssueRefuses(unittest.TestCase):
 
     def test_salt_message(self):                                                                           # I11, N4
         b = lambda x: base64.urlsafe_b64encode(x).rstrip(b"=").decode()
-        d = b(json.dumps([5, "n", 1]).encode()); h = b(b'{"alg":"EdDSA"}'); p = b(json.dumps({"_sd": [sdjwt._digest(d)]}).encode())
+        d = b(json.dumps([5, "n", 1]).encode()); h = b(b'{"alg":"EdDSA","typ":"dc+sd-jwt"}'); p = b(json.dumps({"_sd": [sdjwt._digest(d)]}).encode())
         s = b(base64.b64decode(self.i.sign((h + "." + p).encode())))
         r = sdjwt.verify(f"{h}.{p}.{s}~{d}~", self.pk, now=1000)
         self.assertFalse(r["verified"]); self.assertIn("salt is not a string", r["error"])

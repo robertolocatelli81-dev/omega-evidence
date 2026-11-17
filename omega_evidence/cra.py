@@ -15,8 +15,9 @@
 omega_evidence.cra — firm-side evidence for the EU Cyber Resilience Act
 (Regulation (EU) 2024/2847).
 
-Two obligations, two evidence kinds (verified against primary sources on
-2026-08-25 — digital-strategy.ec.europa.eu, ENISA, EUR-Lex 32024R2847):
+Two obligations, two evidence kinds (dates re-read on 2026-11-17 in the Official Journal text of
+Regulation (EU) 2024/2847, CELEX 32024R2847 through the Publications Office: Art. 71(2) and Annex I, Part II(1);
+first read on 2026-08-25 from digital-strategy.ec.europa.eu, ENISA and EUR-Lex):
 
   * VULNERABILITY / INCIDENT REPORTING — the 24h early-warning to the CSIRT /
     ENISA Single Reporting Platform applies from **11 September 2026**.

@@ -4,17 +4,22 @@
 omega_evidence.interop.aat — Agent Audit Trail (IETF draft-sharif-agent-audit-trail-04) interop.
 
 Why (2026-09-14, brought to -04 on 2026-09-19): the field is converging on the REQUIREMENT (tamper-evident logs
-of what an AI agent did, EU AI Act Art. 12) but not yet on the RECORD. The Internet-Draft that proposes one is
+of what an AI agent did, EU AI Act Art. 12: high-risk systems, from 2 December 2027 for Annex III and 2 August 2028
+for Annex I, Regulation (EU) 2026/1744) but not yet on the RECORD. The Internet-Draft that proposes one is
 "Agent Audit Trail: A Standard Logging Format for Autonomous AI Systems" (R. Sharif; -00 of 29 March 2026,
 -04 of 15 September 2026, expires 19 March 2027; individual draft, NOT an IETF standard; an IPR disclosure by
 the author is on the IETF datatracker — reading, writing and verifying the format is what this module does).
 This module EXPORTS an `AgentEvidenceLog` ledger as AAT chains and VERIFIES an AAT chain (ours or foreign)
 offline, fail-closed.
 
+Current revision (17/11/2026): -09 of 26 October 2026. This module implements -04; what -05…-09 change and how this
+verifier answers is in the README ("Agent Audit Trail interop"): new fields are hashed but not checked, a -07+ record
+without `principal` is not flagged, an `Ed25519` signature (-09) is refused.
+
 What -04 fixes and this module implements (transcribed from the draft, section numbers are the draft's):
   §3.1 mandatory fields incl. `record_phase` (pre_execution | post_execution | concurrent; mandatory since -01);
   §3.2 optional fields: `signature` + `sig_alg` (ES256 default, ML-DSA-65) + `signer_kid` (RFC 7638 JWK
-       thumbprint — for ML-DSA-65 the AKP thumbprint of draft-ietf-cose-dilithium-11 §6 over {alg, kty, pub}),
+       thumbprint — for ML-DSA-65 the AKP thumbprint of RFC 9964 §6, formerly draft-ietf-cose-dilithium-11, over {alg, kty, pub}),
        hybrid `signature_classical` + `signer_kid_classical`, `nonce`, `deny_reasons`, `external_timestamp`
        (RFC 3161), `content_fingerprint`, `recording_component`, `trust_assignment`, detached `batch`;
   §3.3 size bounds (64 KB SHOULD, 256 KB MUST), reserved `aat_` prefix in action_detail;
@@ -25,7 +30,7 @@ What -04 fixes and this module implements (transcribed from the draft, section n
        action_detail this verifier cannot know by itself);
   §6.1 prev_hash = hex(SHA-256(JCS(previous record without `batch`))); §6.2 signed message =
        SHA-256(JCS(record without signature-value fields and `batch`)), ES256 as IEEE P1363 r||s, ML-DSA-65 raw
-       (FIPS 204, empty context — the draft names no context; draft-ietf-cose-dilithium says it MUST be empty);
+       (FIPS 204, empty context — the draft names no context; RFC 9964 §5 says it MUST be empty);
   §6.3 chain verification incl. nonce uniqueness (enforced, the draft says MAY/MUST for untrusted sources);
   §6.4 Merkle batch anchoring with the RFC 6962 construction (leaf 0x00, node 0x01) and audit paths;
   §7   per-action_type REQUIRED action_detail fields; §8 genesis / ordered chain / session close with
@@ -1340,8 +1345,8 @@ def p256_thumbprint(pubkey_pem: bytes) -> str:
 
 
 def mldsa65_thumbprint(public_key: bytes) -> str:
-    """AKP JWK thumbprint (draft-ietf-cose-dilithium-11 §6): {"alg":"ML-DSA-65","kty":"AKP","pub":b64url(raw key)};
-    reproduces the kid of the draft's own ML-DSA-65 JWK example (tested)."""
+    """AKP JWK thumbprint (RFC 9964 §6, formerly draft-ietf-cose-dilithium-11): {"alg":"ML-DSA-65","kty":"AKP",
+    "pub":b64url(raw key)}; reproduces the kid of the ML-DSA-65 JWK example of RFC 9964 Appendix A (tested)."""
     if len(public_key) != 1952:
         raise ValueError("ML-DSA-65 public key is 1952 bytes")
     return _thumbprint({"alg": "ML-DSA-65", "kty": "AKP", "pub": _b64u(public_key)})

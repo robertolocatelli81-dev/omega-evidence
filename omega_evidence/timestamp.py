@@ -15,9 +15,12 @@
 omega_evidence.timestamp — RFC 3161 trusted timestamping via openssl.
 
 Graceful degradation: if openssl is absent, verification returns None
-("not verified") — never a false positive. A qualified TSA (on the
-EU Trusted List) additionally carries legal presumption of time; judging
-qualification is left to the consumer of the evidence.
+("not verified") — never a false positive. A qualified electronic time stamp
+enjoys the presumption of the accuracy of its date and time (eIDAS Art. 41(2)); a
+token the TSA declares qualified carries a non-critical qcStatements extension with
+esi4-qtstStatement-1 (Implementing Regulation (EU) 2025/1929, Annex, EN 319 422
+clause 9.1) and its TSA is on the EU Trusted List. This module checks neither and
+never calls a token qualified: judging qualification is left to the consumer.
 """
 
 from __future__ import annotations
@@ -30,6 +33,8 @@ import tempfile
 import urllib.request
 from urllib.parse import urlparse
 from typing import Dict, Optional
+
+from . import _tsa_keyid
 
 
 class CheckNotRun(OSError):
@@ -238,7 +243,9 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
            ca_file: Optional[str] = None) -> Dict:
     """CRYPTOGRAPHICALLY verify an RFC 3161 token against a TRUST ANCHOR.
 
-    `ca_file` = PEM of the TSA's trusted root/chain. WITHOUT it, the token's signature
+    `ca_file` = PEM of the TSA's trusted root/chain. A token whose SignerInfo names its signer by subjectKeyIdentifier
+    (RFC 5652 §5.3), which `openssl ts` cannot read, is checked step by step by `_tsa_keyid` (0.12.0; until 0.11.4 such a
+    valid token was `verified: False`); its result carries `signer_named_by: "subjectKeyIdentifier"`. WITHOUT it, the token's signature
     and TSA certificate chain CANNOT be validated — decoding a token only reads its
     claimed contents, it does NOT prove a real TSA issued it — so we return
     {verified: None} ("recorded, not verified"), NEVER a green. With `ca_file` we run
@@ -267,6 +274,22 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
                 f.write(raw)
         except OSError as e:
             raise _not_run("cannot write a temporary file for openssl", e) from e
+        facts = _tsa_keyid.read_reply(raw)
+        if facts is not None:   # 0.12.0: a signer named by subjectKeyIdentifier, which openssl ts cannot read
+            def _write(path, data):
+                try:
+                    with open(path, "wb") as fw:
+                        fw.write(data)
+                except OSError as e:
+                    raise _not_run("cannot write a temporary file for openssl", e) from e
+            k = _tsa_keyid.check(exe, facts, ca_file, d, timeout, _run_openssl, _write)
+            imprint_ok = facts["imprint_hex"] == expected_digest_hex.lower()
+            crypto_ok = k["signature_ok"] and k["anchor_ok"]
+            out = {"verified": bool(crypto_ok and facts["granted"] and imprint_ok), "crypto_verified": crypto_ok,
+                   "granted": facts["granted"], "imprint_ok": imprint_ok, "signer_named_by": "subjectKeyIdentifier"}
+            if k["why"]:
+                out["note"] = k["why"]
+            return out
         vr = _run_openssl(
             [exe, "ts", "-verify", "-in", tsr, "-digest", expected_digest_hex.lower(),
              "-CAfile", ca_file], capture_output=True, text=True, timeout=timeout)
