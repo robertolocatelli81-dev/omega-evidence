@@ -148,6 +148,51 @@ class TestKeyBinding(unittest.TestCase):
         r = self.v(self.kb(self.sd(cnf={"jwk": dict(holder_jwk(self.holder), alg="EdDSA")})))
         self.assertIs(r["verified"], False)
 
+    def test_claims_kept_in_clear(self):
+        """SD-JWT VC -27 §2.2.2.3: iss, nbf, exp, cnf, vct, vct#integrity, aka_vcts, status (and their subclaims) are
+        never in Disclosures. A cnf or exp in a Disclosure can be withheld by whoever presents the token (then no Key
+        Binding is required and no expiry applied: measured on this tree before the rule), so a presented one is refused,
+        and issue() does not write one."""
+        import base64 as b64
+        def dec(d):
+            return json.loads(b64.urlsafe_b64decode(d + "=" * (-len(d) % 4)))
+        for name, value in (("cnf", {"jwk": holder_jwk(self.holder)}), ("exp", NOW - 3600), ("nbf", NOW + 3600),
+                            ("vct", "urn:eudi:pid:1"), ("status", {"status_list": {"idx": 1, "uri": "https://s.example"}})):
+            plain = {k: v for k, v in (("iss", "https://issuer.example"), ("vct", "urn:eudi:pid:1")) if k != name}
+            tok = E.token(self.issuer, E.H, claims={"given_name": "Ada", name: value}, plain=plain)
+            r = self.v(tok)
+            self.assertIs(r["verified"], False, name); self.assertIn("§2.2.2.3", r["error"], name)
+            jws = tok.split("~")[0]                                     # the same token, that Disclosure withheld:
+            kept = [d for d in tok.split("~")[1:] if d and dec(d)[1] != name]
+            r = self.v(jws + "~" + "".join(d + "~" for d in kept))      # invisible to any verifier (declared in README)
+            self.assertIs(r["verified"], True, (name, r))
+        nested = E.token(self.issuer, E.H, plain={"iss": "https://issuer.example", "vct": "urn:eudi:pid:1",
+                                                  "cnf": {"_sd": ["x" * 43]}})
+        r = self.v(nested)
+        self.assertIs(r["verified"], False); self.assertIn("subclaim", r["error"])
+        listed = E.token(self.issuer, E.H, plain={"iss": "https://issuer.example", "vct": "urn:eudi:pid:1",
+                                                  "aka_vcts": ["urn:a", {"...": "x" * 43}]})
+        r = self.v(listed)
+        self.assertIs(r["verified"], False); self.assertIn("subclaim", r["error"])
+        for deeper in ({"status": {"status_list": {"_sd": ["x" * 43]}}},      # a subclaim of a subclaim
+                       {"aka_vcts": [["urn:a", {"...": "x" * 43}]]}):         # an element of a nested array
+            tok = E.token(self.issuer, E.H, plain=dict({"iss": "https://issuer.example", "vct": "urn:eudi:pid:1"},
+                                                       **deeper))
+            r = self.v(tok)
+            self.assertIs(r["verified"], False, deeper); self.assertIn("subclaim", r["error"], deeper)
+        d = sdjwt._disclosure("salt-n", "exp", NOW - 1)                 # "exp" as the name of a nested claim: not the JWT's
+        tok = E.token(self.issuer, E.H, plain={"iss": "https://issuer.example", "vct": "urn:eudi:pid:1",
+                                               "card": {"_sd": [sdjwt._digest(d)]}}) + d + "~"
+        r = self.v(tok)
+        self.assertIs(r["verified"], True, r); self.assertEqual(r["plain_claims"]["card"], {"_sd": [sdjwt._digest(d)]})
+        other = {"alg": "ES256", "typ": "example+sd-jwt"}               # another SD-JWT type: RFC 9901 alone, allowed
+        tok = E.token(self.issuer, other, claims={"given_name": "Ada", "exp": NOW + 3600})
+        self.assertIs(sdjwt.verify(tok, self.ipub, now=NOW, expected_typ="example+sd-jwt")["verified"], True)
+        from omega_evidence import signing
+        for name in ("cnf", "exp", "iss", "status"):
+            with self.assertRaises(ValueError):
+                sdjwt.issue({name: 1}, signing.Identity("acme"))
+
 
 DROP = object()
 

@@ -3303,10 +3303,10 @@ class TestSDJWTIssueRefuses(unittest.TestCase):
         for plain in ({"exp": "x"}, {"nbf": True}):                                                         # what a value means: not checked by issue()
             r = sdjwt.verify(sdjwt.issue({"n": 1}, self.i, plain_claims=plain), self.pk, now=1000)
             self.assertFalse(r["verified"]); self.assertIn("is not a finite number", r["error"])
-        # P4: a non-numeric exp in a Disclosure that is NOT presented is not in the processed payload: the token verifies
-        t = sdjwt.issue({"n": 1, "exp": "x"}, self.i)
-        self.assertTrue(sdjwt.verify(sdjwt.present(t, ["n"]), self.pk, now=1000)["verified"])
-        self.assertFalse(sdjwt.verify(t, self.pk, now=1000)["verified"])                  # presented: rejected
+        # P4, revised in 0.12.0: an exp in a Disclosure could be withheld (the token then verified with no expiry);
+        # SD-JWT VC -27 §2.2.2.3 keeps it in clear, so issue() refuses it (tests/test_sdjwt_kb_20261117.py: verify())
+        with self.assertRaises(ValueError):
+            sdjwt.issue({"n": 1, "exp": "x"}, self.i)
         for big in (b"1e400", b"-1e400"):                                                # parses to +-inf: never a valid time
             b = lambda x: base64.urlsafe_b64encode(x).rstrip(b"=").decode()
             h, p = b(b'{"alg":"EdDSA","typ":"dc+sd-jwt"}'), b(b'{"iss":"y","exp":' + big + b'}')

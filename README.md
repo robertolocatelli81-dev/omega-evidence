@@ -334,10 +334,16 @@ ML-DSA backend must pass the NIST ACVP sigVer vectors shipped in `pqbackends/vec
 no home-grown PQ crypto; SD-JWT (RFC 9901) issue/verify, and since 0.12.0 the issuer JWS of an SD-JWT VC: `typ`
 "dc+sd-jwt" (draft-ietf-oauth-sd-jwt-vc-27 §2.2.1, compared as RFC 7515 §4.1.9 says) and ES256 on P-256 (RFC 7518
 §3.4; OpenID4VC High Assurance Interoperability Profile 1.0, Final, 24 December 2025, §7: issuers, verifiers and
-wallets MUST at least support ES256) besides EdDSA/Ed25519, each algorithm bound to one curve (RFC 9864), and the Key
+wallets MUST at least support ES256 to validate the objects that section lists, for a verifier the presentation's
+signature, such as the KB-JWT of an SD-JWT VC, and status information) besides EdDSA/Ed25519, each algorithm bound to
+one curve (RFC 9864), and the Key
 Binding JWT of an SD-JWT+KB (RFC 9901 §7.3: holder key from `cnf.jwk`, `typ` "kb+jwt", signature, `iat` window, `aud`
 and `nonce` given by the caller, `sd_hash`), required whenever the credential carries `cnf` as HAIP 1.0 §6.1.1.1 asks,
-unless the caller's policy says otherwise. Not covered: the issuer's key resolution from the `x5c` chain that HAIP
+unless the caller's policy says otherwise. The claims SD-JWT VC -27 §2.2.2.3 keeps out of Disclosures (`iss`, `nbf`,
+`exp`, `cnf`, `vct`, `vct#integrity`, `aka_vcts`, `status`, and their subclaims) are refused in a presented Disclosure,
+and `issue()` does not write one; a Disclosure the holder withholds is invisible to any verifier, so with a credential
+from an issuer that put `cnf` or `exp` in one, only `require_key_binding=True` makes Key Binding certain.
+Not covered: the issuer's key resolution from the `x5c` chain that HAIP
 1.0 §6.1.1 mandates (the caller supplies the issuer key), the SD-JWT VC claims `vct` and `status`, and eIDAS
 qualification. So this is not a complete EUDI / HAIP verifier. PII-free by design
 (salted per-record digests, no linkability).
@@ -403,7 +409,8 @@ Verdicts change, so this is a minor version. Measured on 17 November 2026 with O
   another certificate, a `tsa` field naming another TSA or the same name in other letter case, not granted, a changed
   signature byte).
 - **SD-JWT VC: ES256 and `typ`.** `interop.sdjwt.verify` accepted only EdDSA and did not read `typ`; ES256 is the
-  algorithm OpenID4VC HAIP 1.0 (Final) §7 requires issuers, verifiers and wallets to support. Now
+  algorithm OpenID4VC HAIP 1.0 (Final) §7 requires issuers, verifiers and wallets to support for the objects it lists
+  (for a verifier, the presentation's signature such as the KB-JWT, and status information). Now
   the JOSE header is checked as ap2-evidence-pack's `check_jose_header` checks it: `crit` refused (RFC 7515 §4.1.11);
   `alg` ES256, Ed25519 or EdDSA; `typ` equal to "dc+sd-jwt" (draft-ietf-oauth-sd-jwt-vc-27 §2.2.1; another value with
   `expected_typ=`), compared as RFC 7515 §4.1.9 says (ASCII letters only folded, "application/" implied). Each
@@ -417,7 +424,10 @@ Verdicts change, so this is a minor version. Measured on 17 November 2026 with O
 - **Key Binding JWT** (RFC 9901 §4.3, §7.3; OpenID4VC HAIP 1.0 §6.1.1.1). Until 0.11.4 an SD-JWT+KB was refused as a
   whole and a credential carrying `cnf` verified without a KB-JWT. Now `verify(..., require_key_binding=,
   expected_aud=, expected_nonce=, kb_max_age=300, kb_clock_skew=60)`: the policy is the caller's (§7.3 step 1); left
-  at None it requires Key Binding exactly when the credential carries `cnf` (HAIP). With Key Binding required: holder
+  at None it requires Key Binding exactly when the credential as presented carries `cnf` (HAIP), which SD-JWT VC -27
+  §2.2.2.3 keeps in clear: a presented Disclosure of `cnf`, `exp`, `nbf` or another claim of that list is refused, and
+  `issue()` does not write one (measured before this rule: a `cnf` or an `exp` in a Disclosure, withheld, gave
+  `verified: True` with no Key Binding or no expiry). With Key Binding required: holder
   key `cnf.jwk` (P-256 or Ed25519, bound to the KB-JWT's `alg`), `typ` "kb+jwt" compared as RFC 7515 §4.1.9 says,
   `crit` refused, signature, `iat` within [now − 300 s, now + 60 s] (a choice of this module: §7.3 says "an acceptable
   window"), `aud` and `nonce` equal to the caller's values, `sd_hash` over the SD-JWT as presented, `exp`/`nbf` when
@@ -439,8 +449,8 @@ Verdicts change, so this is a minor version. Measured on 17 November 2026 with O
   tree `try_load()` registers the backend ("KAT gate passed on 5 NIST ACVP vectors (2 with the empty context)").
   Tests: `tests/test_nist_acvp_vectors_20261117.py` (every case against NIST's verdict, provenance equal to the tool's
   pins, closed reader).
-- **Hand mutants** of the new and changed lines: 31 (RFC 3161, SD-JWT) and 21 (Key Binding), each killed or, for one,
-  equivalent with OpenSSL 3.0.22.
+- **Hand mutants** of the new and changed lines: 31 (RFC 3161, SD-JWT), 21 (Key Binding) and 11 (the claims SD-JWT VC
+  keeps in clear), each killed or, for one, equivalent with OpenSSL 3.0.22.
 - **`cryptography` >= 50.0.0** (was >= 3.4). OSV.dev, read on 17 November 2026: 21 advisories for 3.4, 2 for 49.0.0
   (GHSA-g6cj-pr64-35w5 = PYSEC-2026-3552, CVE-2026-69247, fixed in 50.0.0), 0 for 50.0.0 and 50.0.2. 50.0.0 has wheels
   for Python 3.9 (cp39-abi3); the CI's 3.9 job now installs exactly 50.0.0.

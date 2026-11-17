@@ -27,15 +27,19 @@ counted on 2026-11-17).
 
 ## 3. Checksums and PyPI
 
-Every release from 0.7.0 on has a `SHA256SUMS` asset. The workflow `.github/workflows/pypi.yml` (on the main branch since 0.11.4) uploads to PyPI the wheel and the
-sdist of the GitHub release after checking them against `SHA256SUMS`, through Trusted Publishing, which adds PEP 740
-attestations. For 0.11.4 the two files on PyPI have the SHA-256 listed in `SHA256SUMS` and PyPI serves a provenance
-for the wheel (checked on 2026-11-17). The release build (`release-build.yml`) makes no GitHub artifact attestation.
+Every release from 0.7.0 on has a `SHA256SUMS` asset. The workflow `.github/workflows/pypi.yml` (added to the main
+branch on 2026-11-03, after the tag v0.11.4) uploads to PyPI the wheel and the sdist of the GitHub release after
+checking them against `SHA256SUMS`, through Trusted Publishing, which adds PEP 740 attestations. For 0.11.4 the two
+files on PyPI have the SHA-256 listed in `SHA256SUMS` and PyPI serves a provenance for each of them (checked on
+2026-11-17). The release build (`release-build.yml`) makes no GitHub artifact attestation.
 
-## 4. Key changes and compromise
+## 4. Key changes
 
-A key change is announced in the release notes and in this file. If a private key is suspected compromised, a
-GitHub security advisory is published on this repository and this file is updated.
+- A planned key change is announced in advance in the release notes, signed by both the old and the new key. The list
+  of every key ever used is kept in this file and never deleted.
+- If a key is suspected compromised, it stops being used immediately, and an advisory is published as soon as
+  possible, giving the cut-off date and the SHA-256 of the releases that remain trustworthy.
+- No SLA or fixed deadline is promised for these steps.
 
 ## 5. Post-quantum transition
 

@@ -66,6 +66,11 @@ KB_CLOCK_SKEW = 60         # seconds it may lie in the future
 # §2.2 and held here to Ed25519 only. Any other "alg" is refused (never "none", RFC 8725 §3.2).
 ALG_KEY = {"ES256": "P-256", "Ed25519": "Ed25519", "EdDSA": "Ed25519"}
 _ASCII_LOWER = {c: c + 32 for c in range(0x41, 0x5B)}
+# SD-JWT VC -27 §2.2.2.3: these registered claims, "including any of their subclaims", "MUST NOT be included in
+# Disclosures". A verifier sees only the Disclosures presented: a cnf or exp an issuer put in a Disclosure can be withheld
+# by whoever presents the token, and then neither Key Binding (required by cnf) nor the expiry is applied. So issue()
+# refuses them as selectively disclosable, and verify() refuses a presented Disclosure of one (SD-JWT VC typ only).
+SD_JWT_VC_IN_CLEAR = ("iss", "nbf", "exp", "cnf", "vct", "vct#integrity", "aka_vcts", "status")
 
 
 def _media_type(typ: str) -> str:
@@ -220,6 +225,8 @@ def issue(claims: Dict[str, Any], identity: Identity,
         if not isinstance(name, str) or name in ("_sd", "...", "_sd_alg") or name in plain:
             rule = "§4.1.1: _sd_alg stays at the top level, in clear" if name == "_sd_alg" else "§4.2.1"
             raise ValueError(f"claim name {name!r} cannot be selectively disclosed (RFC 9901 {rule})")
+        if name in SD_JWT_VC_IN_CLEAR:   # issue() writes typ dc+sd-jwt: an SD-JWT VC
+            raise ValueError(f"claim name {name!r} cannot be selectively disclosed in an SD-JWT VC (SD-JWT VC -27 §2.2.2.3)")
     json.dumps([claims, plain], allow_nan=False)   # NaN / Infinity are not JSON (RFC 8259): ValueError
     disclosures: List[str] = []
     digests: List[str] = []
@@ -274,7 +281,9 @@ def verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float] = None,
     A malformed token is a verdict, never a traceback.
     Key Binding (RFC 9901 §4.3, §7.3; 0.12.0): `require_key_binding` is the verifier's policy (§7.3 step 1: never decided
     by whether a KB-JWT came). None, the default, means: required when the processed payload carries `cnf` (OpenID4VC
-    HAIP 1.0 §6.1.1.1: a credential with holder binding is presented with a KB-JWT), not required otherwise. Required
+    HAIP 1.0 §6.1.1.1: a credential with holder binding is presented with a KB-JWT), not required otherwise; with the
+    SD-JWT VC `typ`, a presented Disclosure of a claim SD-JWT VC -27 §2.2.2.3 keeps in clear (SD_JWT_VC_IN_CLEAR: cnf,
+    exp, nbf, ...) or of one of their subclaims is a reject, and one the holder withholds cannot be seen here. Required
     and absent → rejected (step 2). Required: the holder key is `cnf.jwk` (RFC 7800 §3.2; P-256 or Ed25519, bound to the
     KB-JWT's `alg` as for the issuer), the KB-JWT header passes check_jose_header with `typ` "kb+jwt", its signature
     verifies, `iat` lies in [now - kb_max_age, now + kb_clock_skew], `aud` equals `expected_aud` and `nonce` equals
@@ -368,6 +377,19 @@ def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expect
         by_digest[dg] = d
     seen: set = set()
     used: set = set()
+    vc = _media_type(expected_typ) == _media_type(JWS_TYP)   # an SD-JWT VC: §2.2.2.3 applies
+
+    def _in_clear_only(node: Any) -> None:     # "including any of their subclaims": no _sd, no array element digest
+        if isinstance(node, dict):
+            if "_sd" in node:
+                raise _Reject("a subclaim of a claim SD-JWT VC -27 §2.2.2.3 keeps in clear is selectively disclosable")
+            for v in node.values():
+                _in_clear_only(v)
+        elif isinstance(node, list):
+            for el in node:
+                if isinstance(el, dict) and len(el) == 1 and "..." in el:
+                    raise _Reject("a subclaim of a claim SD-JWT VC -27 §2.2.2.3 keeps in clear is selectively disclosable")
+                _in_clear_only(el)
 
     def _take(dg: str, n: int) -> List[Any]:
         if dg in seen:
@@ -402,6 +424,9 @@ def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expect
                     raise _Reject("claim name is _sd or ... (step 3.c.ii.2)")
                 if name in out:
                     raise _Reject("claim name already exists at that level (step 3.c.ii.3)")
+                if vc and node is body and name in SD_JWT_VC_IN_CLEAR:
+                    raise _Reject(f"claim {name!r} in a Disclosure: SD-JWT VC -27 §2.2.2.3 keeps it in clear (a holder "
+                                  "could withhold it)")
                 out[name] = _process(value)
             return out
         if isinstance(node, list):
@@ -416,6 +441,10 @@ def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expect
             return res
         return node
 
+    if vc:
+        for name in SD_JWT_VC_IN_CLEAR:
+            if name in body:
+                _in_clear_only(body[name])
     processed = _process(body)
     if set(by_digest) - used:
         raise _Reject("a Disclosure is not referenced by any digest (step 5)")
