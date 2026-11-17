@@ -39,7 +39,7 @@ files on PyPI have the SHA-256 listed in `SHA256SUMS` and PyPI serves a provenan
   of every key ever used is kept in this file and never deleted.
 - If a key is suspected compromised, it stops being used immediately, and an advisory is published as soon as
   possible, giving the cut-off date and the SHA-256 of the releases that remain trustworthy.
-- No SLA or fixed deadline is promised for these steps.
+- Apart from withdrawing a suspected key, no SLA or fixed deadline is promised for these steps.
 
 ## 5. Post-quantum transition
 
