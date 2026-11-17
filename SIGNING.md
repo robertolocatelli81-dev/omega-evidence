@@ -20,10 +20,10 @@ Ed25519; the signer id is `roberto-locatelli-aws-kms`, a key the maintainer hold
 
 ## 2. Commits and tags (SSH signatures)
 
-Commits from 0.12.0 on are signed with an SSH Ed25519 key, fingerprint
+Commits after `6d69983` (main, 2026-11-03) are signed with an SSH Ed25519 key, fingerprint
 `SHA256:YTnE9PgWCm9XNiECrqk1Q645tWJUaRFO1WabYSJSfTo`. Check one locally with `git verify-commit <commit>` and an
-allowed-signers file containing that key. The tags `v0.1.0` … `v0.11.4` and their commits carry no signature (17 tags,
-counted on 2026-11-17).
+allowed-signers file containing that key. The tags `v0.1.0` … `v0.11.4`, their commits and the two commits on main
+after `v0.11.4` (`f722486`, `6d69983`) carry no signature (17 tags, counted on 2026-11-17).
 
 ## 3. Checksums and PyPI
 
