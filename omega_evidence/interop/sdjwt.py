@@ -33,11 +33,11 @@ each algorithm bound to one curve (RFC 9864):
   * Combined   = <JWS>~<Disclosure>~...~     (trailing '~', no key-binding JWT here)
   * JWS header = {"alg":"EdDSA","typ":"dc+sd-jwt"}, Ed25519 over the JWS input.
 
-Scope: the SD-JWT wire format, the SD-JWT VC header (`typ`) and the issuer signature. It is NOT an eIDAS-qualified
-credential; the SD-JWT VC claims (`vct`, `status`, `cnf`) are not checked; issue() puts `vct` only if the caller passes
-it in `plain_claims`; there is NO key binding (holder proof-of-possession): an SD-JWT+KB, which a wallet presents, is
-refused as a whole (HAIP 1.0 §6.1.1.1: a KB-JWT MUST be present when an SD-JWT VC with holder binding is presented). Those
-are separate layers. The digests
+Scope: the SD-JWT wire format, the SD-JWT VC header (`typ`), the issuer signature and, since 0.12.0, the Key Binding
+JWT of an SD-JWT+KB (RFC 9901 §7.3; required when the credential carries `cnf`, HAIP 1.0 §6.1.1.1). It is NOT an
+eIDAS-qualified credential; the issuer key is the caller's (no x5c resolution, HAIP 1.0 §6.1.1); `vct` and `status`
+are not checked; issue() puts `vct` only if the caller passes it in `plain_claims` and writes no KB-JWT (a holder
+does). The digests
 are recomputed per-spec (sha-256), NOT reused from attestation.py's sha3 digests.
 Self-contained: Python stdlib + this toolkit's Ed25519 signing. Apache-2.0.
 """
@@ -58,6 +58,9 @@ from ..signing import Identity, verify_signature
 
 JWS_TYP = "dc+sd-jwt"
 SD_ALG = "sha-256"
+KB_TYP = "kb+jwt"          # RFC 9901 §4.3
+KB_MAX_AGE = 300           # seconds a KB-JWT's iat may lie in the past (§7.3 step 5.e: "an acceptable window"; a choice)
+KB_CLOCK_SKEW = 60         # seconds it may lie in the future
 # 0.12.0: each JWS algorithm accepted here, bound to the one key type it verifies with. ES256 is ECDSA on P-256 with
 # SHA-256 (RFC 7518 §3.4); "Ed25519" is the fully specified name and "EdDSA" the polymorphic one, deprecated by RFC 9864
 # §2.2 and held here to Ed25519 only. Any other "alg" is refused (never "none", RFC 8725 §3.2).
@@ -254,7 +257,9 @@ def present(sdjwt: str, disclose: List[str]) -> str:
 
 
 def verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float] = None,
-           expected_typ: str = JWS_TYP) -> Dict[str, Any]:
+           expected_typ: str = JWS_TYP, require_key_binding: Optional[bool] = None,
+           expected_aud: Optional[str] = None, expected_nonce: Optional[str] = None,
+           kb_max_age: int = KB_MAX_AGE, kb_clock_skew: int = KB_CLOCK_SKEW) -> Dict[str, Any]:
     """Verify an SD-JWT per RFC 9901 §7.1 and return {verified, header, plain_claims, disclosed_claims,
     undisclosed_digests, processed_payload}. `verified` is True only if every step holds: the JOSE header
     (check_jose_header: no `crit`, `alg` ES256, Ed25519 or EdDSA, never "none"; `typ` equal to `expected_typ`, by default
@@ -266,16 +271,38 @@ def verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float] = None,
     already present at that level, no digest seen twice, and `exp` / `nbf` when present (at `now`, default the clock).
     Format rules of §4.2.1 / §4.2.4.1 are enforced too: a salt is a string, an `_sd` key refers to an array of strings.
     Any failure rejects the whole SD-JWT, never just the Disclosure (§7.1: «If any step fails, the SD-JWT is not valid»).
-    A malformed token is a verdict, never a traceback. Left to the caller or not implemented: Key Binding (§7.3) — an
-    SD-JWT+KB (anything after the last '~') is rejected as a whole; that the key belongs to the Issuer (step 2.c), which
-    is the caller's choice of `issuer_public_key_b64`; `aud` and which validity claims are required (step 6, §9.7);
-    the SD-JWT VC claims (`vct`, `status`, `cnf`). Stricter than §7.1, and declared: the same Disclosure presented twice
+    A malformed token is a verdict, never a traceback.
+    Key Binding (RFC 9901 §4.3, §7.3; 0.12.0): `require_key_binding` is the verifier's policy (§7.3 step 1: never decided
+    by whether a KB-JWT came). None, the default, means: required when the processed payload carries `cnf` (OpenID4VC
+    HAIP 1.0 §6.1.1.1: a credential with holder binding is presented with a KB-JWT), not required otherwise. Required
+    and absent → rejected (step 2). Required: the holder key is `cnf.jwk` (RFC 7800 §3.2; P-256 or Ed25519, bound to the
+    KB-JWT's `alg` as for the issuer), the KB-JWT header passes check_jose_header with `typ` "kb+jwt", its signature
+    verifies, `iat` lies in [now - kb_max_age, now + kb_clock_skew], `aud` equals `expected_aud` and `nonce` equals
+    `expected_nonce` (with require_key_binding=True both are required arguments, ValueError otherwise; when Key Binding
+    is required by `cnf` and they were not given, the presentation is rejected with that reason), `sd_hash` is the sha-256 of the SD-JWT part as
+    presented (§4.3.1), `exp`/`nbf` hold when present (step 5.h). Not required and a KB-JWT given → rejected (declared:
+    a KB-JWT is never accepted unchecked). The result carries `key_binding`: "verified" or "not_required".
+    Left to the caller or not implemented: that the key belongs to the Issuer (step 2.c), which is the caller's choice
+    of `issuer_public_key_b64` (HAIP 1.0 §6.1.1 resolves it from the x5c chain, not implemented here); `aud` and which
+    validity claims of the credential are required (step 6, §9.7); the SD-JWT VC claims `vct` and `status`. Stricter than §7.1, and declared: the same Disclosure presented twice
     is a reject. ES256 needs the `cryptography` package: without it, an ES256 token is `verified: None` (not checked
     here), never False."""
     if not isinstance(expected_typ, str) or not expected_typ:
         raise ValueError("expected_typ: a non-empty string")
+    if require_key_binding not in (None, True, False):
+        raise ValueError("require_key_binding: None, True or False")
+    for name, v in (("expected_aud", expected_aud), ("expected_nonce", expected_nonce)):
+        if v is not None and (not isinstance(v, str) or not v):
+            raise ValueError(f"{name}: a non-empty string")
+    for name, v in (("kb_max_age", kb_max_age), ("kb_clock_skew", kb_clock_skew)):
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            raise ValueError(f"{name}: a non-negative integer of seconds")
+    if require_key_binding is True and (expected_aud is None or expected_nonce is None):
+        raise ValueError("require_key_binding=True needs expected_aud and expected_nonce (RFC 9901 §7.3 step 5.f)")
+    kb = {"required": require_key_binding, "aud": expected_aud, "nonce": expected_nonce,
+          "max_age": kb_max_age, "skew": kb_clock_skew}
     try:
-        return _verify(sdjwt, issuer_public_key_b64, now, expected_typ)
+        return _verify(sdjwt, issuer_public_key_b64, now, expected_typ, kb)
     except _Reject as e:
         return {"verified": False, "error": str(e), "disclosed_claims": {}}
     except _NoBackend:
@@ -296,11 +323,14 @@ def _loads(raw: bytes) -> Any:
     return loads_bounded(raw.decode("utf-8"), parse_constant=_no_constant)
 
 
-def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expected_typ: str) -> Dict[str, Any]:
+def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expected_typ: str,
+            kbp: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(sdjwt, str):
         raise TypeError("SD-JWT is not a string")
-    if not sdjwt.endswith("~"):
-        raise _Reject("not an SD-JWT ending in '~' (an SD-JWT+KB is not supported here)")
+    if "~" not in sdjwt:
+        raise _Reject("not an SD-JWT: no '~'")
+    cut = sdjwt.rindex("~") + 1
+    sdjwt, kb_jwt = sdjwt[:cut], (sdjwt[cut:] or None)      # §7.3 step 3: the SD-JWT part and the KB-JWT, if any
     parts = sdjwt.split("~")
     jws, disclosures = parts[0], parts[1:-1]
     if any(d == "" for d in disclosures):
@@ -398,8 +428,67 @@ def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expect
                 raise _Reject(f"{claim} is not a finite number")   # 1e400 parses to inf: a token that would never expire
             if bad(v):
                 raise _Reject(f"{claim} check failed (step 6)")
+    required = ("cnf" in processed) if kbp["required"] is None else kbp["required"]   # §7.3 step 1, HAIP §6.1.1.1
+    if not required and kb_jwt is not None:
+        raise _Reject("a KB-JWT was presented but Key Binding is not required by this call: it is not accepted unchecked")
+    if required and kb_jwt is None:
+        raise _Reject("Key Binding is required and the presentation has no KB-JWT (RFC 9901 §7.3 step 2; "
+                      "HAIP 1.0 §6.1.1.1 when the credential carries cnf)")
+    if required:
+        if kbp["aud"] is None or kbp["nonce"] is None:
+            raise _Reject("Key Binding is required (the credential carries cnf) and the caller gave no expected_aud and "
+                          "expected_nonce to check it against (RFC 9901 §7.3 step 5.f)")
+        _check_kb(kb_jwt, processed, sdjwt, t, kbp)
     top_sd = body.get("_sd", [])
     disclosed = {k: v for k, v in processed.items() if k not in body}
     plain = {k: v for k, v in body.items() if k not in ("_sd", "_sd_alg")}
     return {"verified": True, "header": header, "plain_claims": plain, "disclosed_claims": disclosed,
-            "undisclosed_digests": sorted(set(top_sd) - used), "processed_payload": processed}
+            "undisclosed_digests": sorted(set(top_sd) - used), "processed_payload": processed,
+            "key_binding": "verified" if required else "not_required"}
+
+
+def _check_kb(kb_jwt: str, processed: Dict[str, Any], sd_part: str, t: float, kbp: Dict[str, Any]) -> None:
+    """RFC 9901 §7.3 step 5 on the KB-JWT; _Reject on the first step that fails."""
+    cnf = processed.get("cnf")
+    if not isinstance(cnf, dict) or not isinstance(cnf.get("jwk"), dict):
+        raise _Reject("Key Binding: the holder key is not a cnf.jwk object (step 5.a; RFC 7800 §3.2)")
+    try:
+        h_b64, p_b64, sig_b64 = kb_jwt.split(".")
+    except ValueError:
+        raise _Reject("Key Binding: the KB-JWT is not a compact JWS of three parts") from None
+    header, payload = _loads(_b64u_dec(h_b64)), _loads(_b64u_dec(p_b64))
+    why = check_jose_header(header, KB_TYP)
+    if why is not None:
+        raise _Reject(f"Key Binding: KB-JWT header: {why} (steps 5.b, 5.d; RFC 9901 §4.3)")
+    jwk = cnf["jwk"]
+    if "alg" in jwk and jwk["alg"] != header["alg"]:
+        raise _Reject(f"Key Binding: cnf.jwk is for alg {jwk['alg']!r}, the KB-JWT says {header['alg']!r}")
+    kind, key = _issuer_key(jwk)
+    if kind != ALG_KEY[header["alg"]] or key is None:
+        raise _Reject(f"Key Binding: alg {header['alg']} verifies with a {ALG_KEY[header['alg']]} key, not {kind}")
+    signing_input, raw_sig = (h_b64 + "." + p_b64).encode("ascii"), _b64u_dec(sig_b64)
+    ok = _es256_ok(key, raw_sig, signing_input) if kind == "P-256" else \
+        verify_signature(key, base64.b64encode(raw_sig).decode(), signing_input)
+    if not ok:
+        raise _Reject("Key Binding: the KB-JWT signature does not verify with cnf.jwk (step 5.c)")
+    if not isinstance(payload, dict):
+        raise _Reject("Key Binding: the KB-JWT payload is not a JSON object")
+    for claim in ("iat", "aud", "nonce", "sd_hash"):
+        if claim not in payload:
+            raise _Reject(f"Key Binding: {claim} missing (RFC 9901 §4.3)")
+    iat = payload["iat"]
+    if isinstance(iat, bool) or not isinstance(iat, (int, float)) or not math.isfinite(iat):
+        raise _Reject("Key Binding: iat is not a finite number (RFC 7519 §2 NumericDate)")
+    if not (t - kbp["max_age"] <= iat <= t + kbp["skew"]):
+        raise _Reject(f"Key Binding: iat outside [now - {kbp['max_age']} s, now + {kbp['skew']} s] (step 5.e)")
+    if payload["aud"] != kbp["aud"]:
+        raise _Reject("Key Binding: aud is not the expected audience (step 5.f; a single string, RFC 9901 §4.3)")
+    if payload["nonce"] != kbp["nonce"]:
+        raise _Reject("Key Binding: nonce is not the expected nonce (step 5.f)")
+    if payload["sd_hash"] != _b64u(hashlib.sha256(sd_part.encode("ascii")).digest()):
+        raise _Reject("Key Binding: sd_hash is not the digest of the presented SD-JWT (step 5.g; §4.3.1)")
+    for claim, bad in (("exp", lambda v: t >= v), ("nbf", lambda v: t < v)):   # step 5.h: a valid JWT (RFC 7519 §4.1.4/5)
+        if claim in payload:
+            v = payload[claim]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or bad(v):
+                raise _Reject(f"Key Binding: KB-JWT {claim} not valid (step 5.h)")

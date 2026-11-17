@@ -15,13 +15,22 @@ Optional runtime tool: `openssl`, used for RFC 3161 timestamping.
 
 Third-party material included in this repository:
 
-- omega_evidence/pqbackends/vectors/acvp_mldsa65_sigver.txt: ML-DSA-65 sigVer and
-  sigGen test cases from the NIST Automated Cryptographic Validation Protocol
-  (https://github.com/usnistgov/ACVP-Server). Source: the National Institute of
-  Standards and Technology. Software developed by NIST employees is not subject to
-  copyright protection within the United States; the NIST notice asks that modified
-  works say what was changed: the cases were selected and rewritten one per line
-  (tcId|expect|reason|pk|message|context|signature, hex) in September 2026.
+- omega_evidence/pqbackends/vectors/nist_acvp_mldsa65.jsonl: ML-DSA-65 test cases from
+  the NIST Automated Cryptographic Validation Protocol server
+  (https://github.com/usnistgov/ACVP-Server, commit
+  975de31eb83d87039ec88934fdc47d8c312b892d, files ML-DSA-sigVer-FIPS204 and
+  ML-DSA-sigGen-FIPS204 internalProjection.json; SHA-256 in the file's first line).
+  Source: the National Institute of Standards and Technology. Software developed by NIST
+  employees is not subject to copyright protection within the United States; the NIST
+  notice asks that modified works say what was changed: on 17 November 2026
+  tools/build_nist_acvp_mldsa65.py (this repository) selected the cases by its own rule
+  (every case of the ML-DSA-65 / external / pure sigVer group; the sigGen cases of the
+  same groups with an empty context), dropped the secret keys and the hedged randomness,
+  and wrote one JSON object per case. Up to 0.11.4 this repository carried instead
+  vectors/acvp_mldsa65_sigver.txt, whose 10 sigVer lines and header were byte for byte
+  those of crates/elara-record/tests/vectors/acvp_mldsa65_sigver.txt in
+  navigatorbuilds/elara-mesh (AGPL-3.0); that file is removed in 0.12.0 and no line of
+  it is in the new file.
 - tests: test vectors and examples copied from IETF RFCs (Copyright (c) IETF Trust and
   the persons identified as the document authors; BCP 78 and the IETF Trust's Legal
   Provisions): RFC 8032 §7.1 (Ed25519), RFC 7517 Appendix A.1 (an EC public key),

@@ -19,5 +19,8 @@ Homepage = "https://github.com/robertolocatelli81-dev"
 [tool.setuptools.packages.find]
 include = ["omega_evidence*"]
 
+[tool.setuptools.package-data]
+"omega_evidence.pqbackends" = ["vectors/*.jsonl"]   # 0.12.0: the NIST vectors of the ML-DSA KAT gate ship in the wheel
+
 [project.scripts]
 omega-evidence-verify = "omega_evidence.verifier:main"

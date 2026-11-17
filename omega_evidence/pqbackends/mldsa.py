@@ -21,10 +21,13 @@ bytes and public key 1952 bytes, both standard base64 with padding, decoded STRI
 `cryptography` >= 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0, 2026-05-04; 47.0.0 only on AWS-LC/BoringSSL
 builds — measured on 48.0.0 and 50.0.1, 16/09/2026); without it the layer is reported present-but-unverifiable, never a pass.
 
-The backend is registered only after the KAT gate (`gate.run_kat`) passes on the NIST ACVP ML-DSA-65 sigVer
-vectors shipped next to this file (`vectors/acvp_mldsa65_sigver.txt`: sigVer PASS vectors with the contexts NIST
-gives, plus two sigGen known-answer signatures with the EMPTY context — the path this profile actually uses — that
-are checked through the very function registered) — a backend that accepts a tampered signature is never wired in.
+The backend is registered only after the KAT gate (`gate.run_kat`) passes on the NIST ACVP ML-DSA-65 vectors shipped
+next to this file (`vectors/nist_acvp_mldsa65.jsonl`, 0.12.0: built by tools/build_nist_acvp_mldsa65.py from the NIST
+ACVP-Server JSON at a pinned commit and SHA-256; the sigVer cases NIST expects to pass, with their contexts, and the
+sigGen known-answer signatures with the EMPTY context — the path this profile actually uses — checked through the
+very function registered) — a backend that accepts a tampered signature is never wired in. Until 0.11.4 the vectors
+were `vectors/acvp_mldsa65_sigver.txt` and the wheel did not carry them, so an installed package never registered the
+backend (measured on the 0.11.4 wheel: "KAT vector file unusable: FileNotFoundError").
 
 Signers: `MlDsaFileSigner` (PKCS#8 DER base64 on disk, 0600) and `AwsKmsMlDsaSigner` (KeySpec ML_DSA_65,
 ML_DSA_SHAKE_256, MessageType RAW; the private key never enters process memory; the Sign response's KeyId must
@@ -35,6 +38,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 from typing import Any, Dict, Optional
 
@@ -44,7 +48,9 @@ from . import gate
 ALG = "ml-dsa-65"
 SIG_LEN, PK_LEN = 3309, 1952
 _HERE = os.path.dirname(os.path.abspath(__file__))
-KAT_FILE = os.path.join(_HERE, "vectors", "acvp_mldsa65_sigver.txt")
+KAT_FILE = os.path.join(_HERE, "vectors", "nist_acvp_mldsa65.jsonl")
+_KAT_HEAD_KEYS = {"kind", "source", "commit", "sha256", "group", "rule", "built_by"}
+_KAT_CASE_KEYS = {"kind", "file", "tgId", "tcId", "testPassed", "reason", "pk", "message", "context", "signature"}
 MLDSA65_SPKI_OID = bytes.fromhex("0609608648016503040312")   # id-ml-dsa-65 (RFC 9881)
 MLDSA65_SPKI_LEN = 1974
 
@@ -91,21 +97,42 @@ def verify_fn(public_key_b64: str, signature_b64: str, message: bytes) -> bool:
     return verify_raw(pk, message, sig)
 
 
-def load_kat() -> list:
-    """NIST ACVP sigVer vectors (tcId|expect|reason|pk|message|context|signature, hex) → the gate's shape.
-    Only the vectors NIST expects to PASS are given to the gate (it tampers each itself); their contexts are
-    carried through, so the gate exercises the real FIPS 204 context handling."""
-    out = []
+def _hex(v: Any, n: Optional[int] = None) -> bytes:
+    if not isinstance(v, str) or v != v.lower() or len(v) % 2:
+        raise ValueError("KAT vector file: a value is not lowercase hex")
+    b = bytes.fromhex(v)
+    if n is not None and len(b) != n:
+        raise ValueError(f"KAT vector file: {len(b)} bytes where {n} are expected")
+    return b
+
+
+def load_cases() -> list:
+    """Every case of the vector file, read closed: line 1 the provenance object, each other line a case object with
+    exactly the keys of _KAT_CASE_KEYS (hex lowercase; pk 1952 bytes, signature 3309). ValueError otherwise."""
+    cases = []
     with open(KAT_FILE, encoding="utf-8") as f:
-        for ln in f:
-            if not ln.strip() or ln.startswith("#"):
-                continue
-            tc, expect, _reason, pk, msg, ctx, sig = ln.rstrip("\n").split("|")
-            if expect != "P":
-                continue
-            out.append({"public": base64.b64encode(bytes.fromhex(pk)).decode(),
-                        "signature": base64.b64encode(bytes.fromhex(sig)).decode(),
-                        "message_hex": msg.lower(), "context_hex": ctx})
+        lines = [ln for ln in f.read().split("\n") if ln]
+    if not lines:
+        raise ValueError("KAT vector file: empty")
+    head = json.loads(lines[0])
+    if not isinstance(head, dict) or set(head) != _KAT_HEAD_KEYS or head["kind"] != "provenance":
+        raise ValueError("KAT vector file: the first line is not the provenance object")
+    for ln in lines[1:]:
+        c = json.loads(ln)
+        if not isinstance(c, dict) or set(c) != _KAT_CASE_KEYS or c["kind"] != "case" or c["file"] not in ("sigVer", "sigGen") \
+                or not isinstance(c["testPassed"], bool):
+            raise ValueError("KAT vector file: a case line is not a closed case object")
+        _hex(c["pk"], PK_LEN), _hex(c["signature"], SIG_LEN), _hex(c["message"]), _hex(c["context"])
+        cases.append(c)
+    return cases
+
+
+def load_kat() -> list:
+    """The cases NIST expects to PASS, in the gate's shape (it tampers each itself); their contexts are carried through,
+    so the gate exercises the real FIPS 204 context handling."""
+    out = [{"public": base64.b64encode(bytes.fromhex(c["pk"])).decode(),
+            "signature": base64.b64encode(bytes.fromhex(c["signature"])).decode(),
+            "message_hex": c["message"], "context_hex": c["context"]} for c in load_cases() if c["testPassed"]]
     keys = [(v["public"], v["message_hex"]) for v in out]
     if len(set(keys)) != len(keys):        # council r2: a hand-grown file must not silently under-test (last-wins)
         raise ValueError("KAT vector file: duplicate (key, message) pair")

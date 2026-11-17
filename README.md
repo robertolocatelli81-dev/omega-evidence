@@ -334,10 +334,12 @@ ML-DSA backend must pass the NIST ACVP sigVer vectors shipped in `pqbackends/vec
 no home-grown PQ crypto; SD-JWT (RFC 9901) issue/verify, and since 0.12.0 the issuer JWS of an SD-JWT VC: `typ`
 "dc+sd-jwt" (draft-ietf-oauth-sd-jwt-vc-27 §2.2.1, compared as RFC 7515 §4.1.9 says) and ES256 on P-256 (RFC 7518
 §3.4; OpenID4VC High Assurance Interoperability Profile 1.0, Final, 24 December 2025, §7: issuers, verifiers and
-wallets MUST at least support ES256) besides EdDSA/Ed25519, each algorithm bound to one curve (RFC 9864). Not covered:
-Key Binding (an SD-JWT+KB is refused as a whole, while HAIP 1.0 §6.1.1.1 requires a KB-JWT whenever an SD-JWT VC with
-holder binding is presented, so a wallet's presentation of such a credential is refused here), the SD-JWT VC claims (`vct`, `status`,
-`cnf`), the issuer's key discovery (the caller supplies the key) and eIDAS qualification. PII-free by design
+wallets MUST at least support ES256) besides EdDSA/Ed25519, each algorithm bound to one curve (RFC 9864), and the Key
+Binding JWT of an SD-JWT+KB (RFC 9901 §7.3: holder key from `cnf.jwk`, `typ` "kb+jwt", signature, `iat` window, `aud`
+and `nonce` given by the caller, `sd_hash`), required whenever the credential carries `cnf` as HAIP 1.0 §6.1.1.1 asks,
+unless the caller's policy says otherwise. Not covered: the issuer's key resolution from the `x5c` chain that HAIP
+1.0 §6.1.1 mandates (the caller supplies the issuer key), the SD-JWT VC claims `vct` and `status`, and eIDAS
+qualification. So this is not a complete EUDI / HAIP verifier. PII-free by design
 (salted per-record digests, no linkability).
 
 **Qualified time stamps.** A qualified electronic time stamp enjoys the presumption of the accuracy of its date and
@@ -410,10 +412,35 @@ Verdicts change, so this is a minor version. Measured on 17 November 2026 with O
   tokens made in the tests: an ES256 SD-JWT VC `False` ("alg must be EdDSA") → `True`; an EdDSA token with no `typ`,
   with `typ` "jwt", or with `crit` `True` → `False`; a P-384 key under ES256, a P-256 key under EdDSA, a JWK of
   another `alg` → `False`. Without `cryptography`, ES256 is `verified: None` (not checked here). Tokens written by
-  `issue()` (EdDSA, `typ` "dc+sd-jwt") verify as before. Key Binding (an SD-JWT+KB, which HAIP 1.0 §6.1.1.1 requires for a
-  credential with holder binding) is still refused as a whole, and `vct`, `status`, `cnf` are not checked (README, Standards). Tests:
-  `tests/test_sdjwt_es256_typ_20261117.py`; the SD-JWT fixtures of `tests/test_toolkit.py` now carry `typ`.
-- **Hand mutants** of the new and changed lines: 29, each killed by the two new test files.
+  `issue()` (EdDSA, `typ` "dc+sd-jwt") verify as before. Tests: `tests/test_sdjwt_es256_typ_20261117.py`; the SD-JWT
+  fixtures of `tests/test_toolkit.py` now carry `typ`.
+- **Key Binding JWT** (RFC 9901 §4.3, §7.3; OpenID4VC HAIP 1.0 §6.1.1.1). Until 0.11.4 an SD-JWT+KB was refused as a
+  whole and a credential carrying `cnf` verified without a KB-JWT. Now `verify(..., require_key_binding=,
+  expected_aud=, expected_nonce=, kb_max_age=300, kb_clock_skew=60)`: the policy is the caller's (§7.3 step 1); left
+  at None it requires Key Binding exactly when the credential carries `cnf` (HAIP). With Key Binding required: holder
+  key `cnf.jwk` (P-256 or Ed25519, bound to the KB-JWT's `alg`), `typ` "kb+jwt" compared as RFC 7515 §4.1.9 says,
+  `crit` refused, signature, `iat` within [now − 300 s, now + 60 s] (a choice of this module: §7.3 says "an acceptable
+  window"), `aud` and `nonce` equal to the caller's values, `sd_hash` over the SD-JWT as presented, `exp`/`nbf` when
+  present. A KB-JWT where none is required is refused, never accepted unchecked. Before → now: an ES256 SD-JWT VC +
+  KB-JWT `False` ("an SD-JWT+KB is not supported here") → `True`, `key_binding: "verified"`; an EdDSA credential with
+  `cnf` and no KB-JWT `True` → `False`. Tests: `tests/test_sdjwt_kb_20261117.py` (each step of §7.3 step 5 broken
+  alone, a Disclosure dropped after the holder signed, the window edges). Still not covered: the issuer key from `x5c`
+  (HAIP §6.1.1), `vct`, `status` (README, Standards).
+- **ML-DSA-65 known answers rebuilt from NIST, and shipped in the wheel.** The KAT gate's vectors are now
+  `pqbackends/vectors/nist_acvp_mldsa65.jsonl`, built by `tools/build_nist_acvp_mldsa65.py` from the NIST ACVP-Server
+  JSON (commit 975de31, SHA-256 of both files pinned and checked before reading): 15 sigVer cases (NIST's pass and
+  fail verdicts) and 2 empty-context sigGen known answers, one JSON object per line, read closed. They replace
+  `acvp_mldsa65_sigver.txt`, whose sigVer lines were a byte-for-byte copy of a file of the elara-mesh project
+  (AGPL-3.0), which the NOTICE of 0.11.4 did not say (NOTICE). Measured: no line of that file is in the new one; the
+  NIST values of its 9 cases are (they are NIST's). And a defect: **the 0.11.4 wheel did not contain the vector file**,
+  so an installed package never registered the ML-DSA-65 backend (`try_load()` on the 0.11.4 wheel: "KAT vector file
+  unusable: FileNotFoundError"; a source checkout was not affected): the PQ co-signature of a pack was reported
+  present-but-unverifiable, never verified. `pyproject.toml` now ships `vectors/*.jsonl`; on a wheel built from this
+  tree `try_load()` registers the backend ("KAT gate passed on 5 NIST ACVP vectors (2 with the empty context)").
+  Tests: `tests/test_nist_acvp_vectors_20261117.py` (every case against NIST's verdict, provenance equal to the tool's
+  pins, closed reader).
+- **Hand mutants** of the new and changed lines: 31 (RFC 3161, SD-JWT) and 21 (Key Binding), each killed or, for one,
+  equivalent with OpenSSL 3.0.22.
 - **`cryptography` >= 50.0.0** (was >= 3.4). OSV.dev, read on 17 November 2026: 21 advisories for 3.4, 2 for 49.0.0
   (GHSA-g6cj-pr64-35w5 = PYSEC-2026-3552, CVE-2026-69247, fixed in 50.0.0), 0 for 50.0.0 and 50.0.2. 50.0.0 has wheels
   for Python 3.9 (cp39-abi3); the CI's 3.9 job now installs exactly 50.0.0.
@@ -423,8 +450,8 @@ Verdicts change, so this is a minor version. Measured on 17 November 2026 with O
   verifier answers. EU AI Act Art. 12: high-risk dates of Regulation (EU) 2026/1744. CRA dates re-read in the Official
   Journal text. Qualified time stamps: what Implementing Regulation (EU) 2025/1929 requires, and that this toolkit
   checks neither the qcStatements nor the Trusted List.
-- **NOTICE** lists the third-party material (NIST ACVP vectors, vectors and examples from RFCs); **SIGNING.md** says
-  which keys sign the releases and how to check them.
+- **NOTICE** lists the third-party material (NIST ACVP vectors and where the earlier file came from, vectors and
+  examples from RFCs); **SIGNING.md** says which keys sign the releases and how to check them.
 
 ### 0.11.4 — an RFC 3161 check that openssl cannot start, finish in time or read here is not a verdict (13 October 2026)
 
@@ -1041,6 +1068,8 @@ python3 tests/test_toolkit.py                       # unit + end-to-end, incl. N
 python3 tests/test_receipt_exit74.py                # a receipt not written whole is exit 74 in the four CLIs (real processes)
 python3 tests/test_tsa_signer_key_id_20261117.py    # RFC 3161: a signer named by subjectKeyIdentifier (local TSA built with openssl)
 python3 tests/test_sdjwt_es256_typ_20261117.py      # SD-JWT VC: ES256 bound to P-256 and typ dc+sd-jwt (needs cryptography)
+python3 tests/test_sdjwt_kb_20261117.py             # SD-JWT+KB: Key Binding JWT, RFC 9901 §7.3 (needs cryptography)
+python3 tests/test_nist_acvp_vectors_20261117.py    # ML-DSA-65 vectors: every NIST case against NIST's verdict, closed reader
 python3 tests/fuzz_toolkit.py --iterations 3000     # seeded mutation fuzz of the verifier and the ledger (exit 1 on a violation)
 python3 tests/fuzz_toolkit.py --ablate signature    # positive control: the sabotaged verifier must make the fuzzer red (6 ablations)
 python3 tests/bench_toolkit.py --json bench.json    # latencies, throughput, memory, the 1 000 000-entry run (see below)

@@ -2350,9 +2350,11 @@ class TestMlDsaHybrid(unittest.TestCase):
             return self.m._kat_verify(p, s, m, next(v["context_hex"] for v in ctxed if v["public"] == p and v["message_hex"] == m.hex()))
         from omega_evidence.pqbackends import gate
         self.assertTrue(gate.run_kat(spy, ctxed)["passed"]); self.assertTrue(all(n == 2 for n in seen.values()))   # positive + negative, both with ctx
-        with unittest.mock.patch.object(self.m, "KAT_FILE", os.path.join(tempfile.gettempdir(), "dup_kat.txt")):
-            ln = [l for l in open(os.path.join(os.path.dirname(self.m.__file__), "vectors", "acvp_mldsa65_sigver.txt")) if not l.startswith("#") and l.strip()][0]
-            open(self.m.KAT_FILE, "w").write(ln + ln)
+        with unittest.mock.patch.object(self.m, "KAT_FILE", os.path.join(tempfile.gettempdir(), "dup_kat.jsonl")):
+            with open(os.path.join(os.path.dirname(self.m.__file__), "vectors", "nist_acvp_mldsa65.jsonl")) as f:
+                head, ln = f.readline(), next(l for l in f if '"testPassed":true' in l)
+            with open(self.m.KAT_FILE, "w") as f:
+                f.write(head + ln + ln)
             with self.assertRaises(ValueError):
                 self.m.load_kat()
 
