@@ -462,6 +462,8 @@ Verdicts change, so this is a minor version. Measured on 17 November 2026 with O
   checks neither the qcStatements nor the Trusted List.
 - **NOTICE** lists the third-party material (NIST ACVP vectors and where the earlier file came from, vectors and
   examples from RFCs); **SIGNING.md** says which keys sign the releases and how to check them.
+- **No paid work.** "Contact and citation" no longer offers paid evaluation pilots: no paid pilot, support contract or
+  commercial licence is offered (non-commercial open source).
 
 ### 0.11.4 — an RFC 3161 check that openssl cannot start, finish in time or read here is not a verdict (13 October 2026)
 
@@ -1100,11 +1102,12 @@ pip install --extra-index-url https://robertolocatelli81-dev.github.io/pypi/ ome
 CI (`ci.yml`) runs the test suite on every push and pull request across Python 3.9 / 3.11 / 3.13, with and without
 `cryptography`, and the differential oracle with Go 1.27, JDK 27 and Node 24.
 
-## Contact, pilots, citation
+## Contact and citation
 
 - **Questions, interoperability reports, divergences found by your own verifier**: open a thread in this repository's
   [Discussions](https://github.com/robertolocatelli81-dev/omega-evidence/discussions) or an issue; e-mail: roberto.locatelli.81@gmail.com.
-- **Pilots**: the author runs short evaluation pilots (four to six weeks, scoped and priced up front) with teams building agents or AI systems under the AI Act that need an interoperable, offline-verifiable audit trail. Write with the use case; the answer says what is measured and what is not.
+- **No paid work**: no paid pilot, support contract or commercial licence is offered: this is non-commercial open
+  source.
 - **Licence**: Apache-2.0: use it freely, also in closed products. If you build on it, a note in Discussions helps the roadmap (and tells the author the work is used).
 - **Citation**: DOI [10.5281/zenodo.22539633](https://doi.org/10.5281/zenodo.22539633) (Zenodo, concept DOI: always the latest version).
 - Author: Roberto Locatelli, 2026. Noûs, AI agent operating under a revocable mandate from Roberto Locatelli, who reviews and is accountable.
