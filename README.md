@@ -464,6 +464,8 @@ when the test runs and are not in this repository. Before = the 0.11.4 wheel fro
   from the expected digest". Revocation is not checked at any instant: at genTime, a TSA key compromised after the
   fact could still date a token inside its certificate's validity; that is the price of the rule and the reason it is
   not the default.
+  Both parameters work on a token whose signer is named by subjectKeyIdentifier too, and `gen_time_of` now reads the
+  genTime of such a token (it returned None: `openssl ts` does not print it).
 - **`interop.sigstore.verify_bundle`** (new) reads a sigstore bundle — protobuf-specs v0.5.2, media types
   `application/vnd.dev.sigstore.bundle.v0.3+json` and `…bundle+json;version=0.1|0.2|0.3` — and checks offline: the
   signature (DSSE, exactly one as the proto requires, or a message signature) with the key of the leaf certificate;
@@ -489,10 +491,10 @@ when the test runs and are not in this repository. Before = the 0.11.4 wheel fro
   names were there.
 - **The Quick start ran into `AssertionError`** as written (`this pack is not anchored`): the line
   `pack.anchor_pack("pack.json", "pack.ledger.jsonl")` was missing. A test now executes the block from this file.
-- Tests: `tests/test_uso_reale_20261118.py` (25 tests: keys in every form, raw and DER signatures, the DSSE vector,
+- Tests: `tests/test_uso_reale_20261118.py` (30 tests: keys in every form, raw and DER signatures, the DSSE vector,
   generated mutations of envelopes and bundles — none may be refused without `error` —, a local TSA whose tokens carry
-  no certificate, an expired TSA certificate at genTime and now, a bundle given as text); the 25 fail on the tree
-  before these changes. `tests/test_real_github_20261118.py` downloads the real sample (opt-in:
+  no certificate, an expired TSA certificate at genTime and now, the same on a token whose signer is named by key
+  identifier, a bundle given as text); none of the 30 passes on the tree before these changes or on the 0.11.4 wheel. `tests/test_real_github_20261118.py` downloads the real sample (opt-in:
   `OMEGA_EVIDENCE_REAL_GITHUB=1`, `gh`, network).
 
 ### 0.12.0 — SD-JWT VC in ES256 with its `typ`; an RFC 3161 signer named by key identifier; current citations (17 November 2026)

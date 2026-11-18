@@ -44,6 +44,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import re
 from typing import Callable, Dict, List, Optional, Tuple
 
 OID_SIGNED_DATA = "1.2.840.113549.1.7.2"
@@ -348,6 +349,10 @@ def anchor(exe: str, facts: Dict, signer_der: bytes, ca_file: str, tmp: str, tim
              "-untrusted", up] + when + [sp], capture_output=True, timeout=timeout)
     if p.returncode != 0:
         lines = [ln for ln in (p.stderr or b"").decode("utf-8", "replace").splitlines() if ln.strip()]
+        # "error 10 at 0 depth lookup: certificate has expired" says why; the line after it only "verification failed"
+        named = [m.group(1) for m in (re.match(r"error \d+ at \d+ depth lookup: *(.+)", ln.strip()) for ln in lines) if m]
+        if named:
+            return named[-1].strip()[:160]
         return lines[-1].strip()[:160] if lines else "openssl verify refused the signer certificate"
     return None
 

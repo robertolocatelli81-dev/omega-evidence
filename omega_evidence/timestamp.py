@@ -84,17 +84,24 @@ def _gen_time_from_text(text: str) -> Optional[int]:
 
 def gen_time_of(tsr_b64: str, timeout: int = 15) -> Optional[int]:
     """The genTime a token CLAIMS (whole seconds since the epoch), read with openssl; None without openssl or for bytes
-    that are not a granted reply. A claim, not a verified time: verify() proves it with a trust anchor."""
+    that are not a granted reply; for a token whose signer is named by subjectKeyIdentifier, which openssl ts does not
+    print, read from the TSTInfo itself (0.12.0). A claim, not a verified time: verify() proves it with a trust anchor."""
     exe = shutil.which("openssl")
     if not exe or not isinstance(tsr_b64, str) or not tsr_b64:
         return None
     d = tempfile.mkdtemp()
     try:
         p = os.path.join(d, "t.tsr")
+        raw = base64.b64decode(tsr_b64)
         with open(p, "wb") as f:
-            f.write(base64.b64decode(tsr_b64))
+            f.write(raw)
         r = _run_openssl([exe, "ts", "-reply", "-in", p, "-text"], capture_output=True, text=True, timeout=timeout)
-        return _gen_time_from_text(r.stdout or "") if r.returncode == 0 else None
+        g = _gen_time_from_text(r.stdout or "") if r.returncode == 0 else None
+        if g is None:   # 0.12.0: a signer named by subjectKeyIdentifier, which openssl ts does not print
+            facts = _tsa_keyid.read_reply(raw)
+            if facts is not None and facts["granted"]:
+                g = _gen_time_of_der(facts["tst_info"])
+        return g
     except (ValueError, binascii.Error):
         return None
     finally:

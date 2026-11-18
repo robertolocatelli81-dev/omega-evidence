@@ -217,6 +217,17 @@ class TestDsseEcdsa(unittest.TestCase):
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
         self.assertIs(dsse.from_dsse(env, public_key=spki)["verified"], True)
 
+    def test_embedded_key_that_is_not_the_key_given(self):
+        """a signature that names another key in publicKeyB64 than the one the caller gives is not counted, even when
+        it verifies with the caller's key (so since before 0.12.0; no test held the line)"""
+        ident, other = Identity("t", seed=bytes(range(32))), Identity("o", seed=bytes(range(1, 33)))
+        env = dsse.to_dsse({"pack_sha3": "00" * 32}, ident)
+        self.assertIs(dsse.from_dsse(env, public_key_b64=ident.public_key_b64)["verified"], True)
+        env["signatures"][0]["publicKeyB64"] = other.public_key_b64
+        r = dsse.from_dsse(env, public_key_b64=ident.public_key_b64)
+        self.assertIs(r["verified"], False)
+        self.assertIn("is not the key given", r["error"])
+
 
 class TestWithoutCryptography(unittest.TestCase):
     def test_ecdsa_key_without_cryptography_is_named(self):
@@ -376,6 +387,65 @@ class TestTimestampUntrustedAndGenTime(LocalTsa):
         self.assertIn("-certfile", seen[0])
 
 
+@unittest.skipUnless(EXE, "openssl absent: the local TSA cannot be built")
+class TestKeyIdentifiedSignerUntrustedAndTime(unittest.TestCase):
+    """the same two parameters on a token whose SignerInfo names the signer by subjectKeyIdentifier (_tsa_keyid, real
+    openssl): the lab of tests/test_tsa_signer_key_id_20261117.py"""
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import test_tsa_signer_key_id_20261117 as K
+        cls.K = K
+        cls.td = tempfile.mkdtemp(prefix="uso_reale_ski_")
+        cls.lab = K.Lab(cls.td, "lab")
+        ias = cls.lab.tsr()
+        cls.gen_time = T.gen_time_of(base64.b64encode(ias).decode())   # read by openssl from the reply it can print
+        cls.tst = cls.lab.tstinfo(ias)
+        cls.with_cert = base64.b64encode(K.reply(cls.lab.resign(cls.tst))).decode()
+        j = cls.lab.j
+        K._run(EXE, "cms", "-sign", "-binary", "-nodetach", "-econtent_type", K.OID_TSTINFO, "-keyid", "-cades",
+               "-md", "sha256", "-nosmimecap", "-nocerts", "-signer", j("tsa.crt"), "-inkey", j("tsa.key"),
+               "-in", j("tst_in.der"), "-outform", "DER", "-out", j("nocert.der"))
+        with open(j("nocert.der"), "rb") as f:
+            cls.no_cert = base64.b64encode(K.reply(f.read())).decode()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.td, ignore_errors=True)
+
+    def test_instant(self):
+        ca = self.lab.j("ca.crt")
+        r = T.verify(self.with_cert, self.K.DIGEST, ca_file=ca)
+        self.assertEqual((r["verified"], r["signer_named_by"], r["validation_time"]),
+                         (True, "subjectKeyIdentifier", "now"), r)
+        r = T.verify(self.with_cert, self.K.DIGEST, ca_file=ca, at_time=4102444800)   # 2100-01-01: all expired
+        self.assertIs(r["verified"], False, r)
+        self.assertIn("expired", r["reason"])
+        self.assertEqual((r["validation_time"], r["validated_at"]), ("at_time", "2100-01-01T00:00:00Z"))
+        r = T.verify(self.with_cert, self.K.DIGEST, ca_file=ca, at_gen_time=True)
+        self.assertEqual((r["verified"], r["validation_time"]), (True, "gen_time"), r)
+        self.assertIsInstance(self.gen_time, int)
+        self.assertEqual(r["validated_at"], dt.datetime.fromtimestamp(self.gen_time, dt.timezone.utc)
+                         .strftime("%Y-%m-%dT%H:%M:%SZ"))
+        # the same TSTInfo re-signed: gen_time_of reads it though openssl ts cannot print this token (None until now)
+        self.assertEqual(T.gen_time_of(self.with_cert), self.gen_time)
+        self.assertEqual(T.gen_time_of(self.no_cert), self.gen_time)
+
+    def test_untrusted(self):
+        ca, leaf = self.lab.j("ca.crt"), self.lab.j("tsa.crt")
+        r = T.verify(self.no_cert, self.K.DIGEST, ca_file=ca)
+        self.assertIs(r["verified"], False)
+        self.assertIn("no TSA signer certificate", r["reason"])
+        r = T.verify(self.no_cert, self.K.DIGEST, ca_file=ca, untrusted=leaf)
+        self.assertEqual((r["verified"], r["signer_named_by"]), (True, "subjectKeyIdentifier"), r)
+        r = T.verify(self.no_cert, self.K.DIGEST, ca_file=ca, untrusted=ca)   # a certificate, but not the signer
+        self.assertIs(r["verified"], False)
+        self.assertIn("no certificate given is its signer", r["reason"])
+        r = T.verify(self.no_cert, "11" * 32, ca_file=ca, untrusted=leaf)
+        self.assertIs(r["verified"], False)
+        self.assertIn("message imprint differs", r["reason"])
+
+
 class TestSigstoreBundle(LocalTsa):
     @classmethod
     def setUpClass(cls):
@@ -429,6 +499,45 @@ class TestSigstoreBundle(LocalTsa):
             r = sigstore.verify_bundle(self.msg, artifact=art, **self.kw)
             self.assertIs(r["verified"], False)
             self.assertTrue(r["error"])
+            self.assertIs(r["checks"]["artifact"], False)
+        r = sigstore.verify_bundle(self.msg, artifact_sha256="0" * 64, **self.kw)
+        self.assertEqual((r["verified"], r["checks"]["artifact"]), (False, False))
+        self.assertIn("differs from the bundle's messageDigest", r["error"])
+
+    def test_signing_time_outside_the_certificate(self):
+        """a token that verifies, taken when the leaf certificate was no longer valid: the signature and the token are
+        good, the bundle is not"""
+        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        old = (x509.CertificateBuilder().subject_name(_name("signer")).issuer_name(_name("signer"))
+               .public_key(self.k.public_key()).serial_number(77)
+               .not_valid_before(now - dt.timedelta(hours=2)).not_valid_after(now - dt.timedelta(hours=1))
+               .sign(self.k, hashes.SHA256()))
+        b = copy.deepcopy(self.bundle)
+        b["verificationMaterial"]["certificate"]["rawBytes"] = base64.b64encode(
+            old.public_bytes(serialization.Encoding.DER)).decode()
+        r = sigstore.verify_bundle(b, **self.kw)
+        self.assertEqual(r["checks"], {"signature": True, "rfc3161[0]": True, "signing_time_in_certificate": False})
+        self.assertIs(r["verified"], False)
+        self.assertIn("outside the leaf certificate's validity", r["error"])
+
+    def test_tsa_certificate_expired_since(self):
+        """the TSA certificate has expired since the token was made: verified at the token's genTime (the default
+        here, Sigstore Client Spec 4.2.1), refused with tsa_at_gen_time=False, which checks the chain now"""
+        exp = self._tsa("tsa_gone", 3)
+        sig = base64.b64decode(self.bundle["dsseEnvelope"]["signatures"][0]["sig"])
+        b = copy.deepcopy(self.bundle)
+        b["verificationMaterial"]["timestampVerificationData"]["rfc3161Timestamps"] = [
+            {"signedTimestamp": self._token("tsa_gone", hashlib.sha256(sig).hexdigest())}]
+        while time.time() < exp + 1.5:
+            time.sleep(0.2)
+        kw = dict(tsa_ca_file=self._p("root.pem"), tsa_untrusted=self._p("tsa_gone.untrusted.pem"))
+        r = sigstore.verify_bundle(b, **kw)
+        self.assertIs(r["verified"], True, r["error"])
+        self.assertEqual(r["timestamps"][0]["validation_time"], "gen_time")
+        r = sigstore.verify_bundle(b, tsa_at_gen_time=False, **kw)
+        self.assertIs(r["verified"], False)
+        self.assertIs(r["checks"]["rfc3161[0]"], False)
+        self.assertIn("expired", r["error"])
 
     def test_tampered_and_partial(self):
         b = copy.deepcopy(self.bundle)
