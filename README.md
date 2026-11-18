@@ -41,7 +41,7 @@ the index links carry `#sha256=` fragments, so pip verifies every download.
 | `attestation` | PII-free attestation primitive — salted per-record digests, **no linkability** |
 | `verifier` | One offline verifier with **graduated authenticity** |
 | `interop.dsse` | A pack as a DSSE envelope over an in-toto Statement v1 (Ed25519), and the check of DSSE envelopes made by others: Ed25519 or ECDSA P-256 / SHA-256, with a public key or an X.509 certificate the caller gives (0.12.0) |
-| `interop.sigstore` | Reads a sigstore bundle v0.1–v0.3 (GitHub artifact attestations are such bundles) and checks offline the signature, the artifact digest and the RFC 3161 tokens; what it does not check — the chain to Fulcio, the identity, Rekor — is listed in every result (0.12.0) |
+| `interop.sigstore` | Reads a sigstore bundle v0.1–v0.3 (GitHub artifact attestations are such bundles) and checks offline the signature, the artifact digest and the RFC 3161 tokens; what it does not check — the chain to Fulcio, the identity, Rekor, the validity window a trusted root gives each TSA — is listed in every result (0.12.0) |
 | `interop.sdjwt` | SD-JWT (RFC 9901) issue / verify, SD-JWT VC issuer JWS in EdDSA or ES256, Key Binding JWT |
 | `interop.aat` | Export/verify **Agent Audit Trail** chains (draft-sharif-agent-audit-trail-**04**): JCS hash chain, record phases, §7 detail fields, ES256 / ML-DSA-65 / hybrid signatures resolved by RFC 7638 thumbprint, Merkle epochs (RFC 6962), tombstones, session close, JSONL/CSV |
 
@@ -350,8 +350,9 @@ The trust registry is TOFU: it proves a key was decided to be trusted and
 prevents silent key-swap, not the legal identity of the holder.
 Material signed by others: `interop.dsse` and `interop.sigstore` check a signature with the key the caller gives or
 the certificate the bundle carries, and RFC 3161 tokens against the caller's anchors. They do not build the
-certificate's chain to Fulcio or to GitHub's CA, do not read the identity in it and do not verify Rekor entries; every
-result of `verify_bundle` lists this under `not_verified`. For those, use `gh attestation verify`, `cosign` or a
+certificate's chain to Fulcio or to GitHub's CA, do not read the identity in it, do not verify Rekor entries and do not
+apply the `validFor` window a trusted root gives each timestamp authority; every result of `verify_bundle` lists this
+under `not_verified`. For those, use `gh attestation verify`, `cosign` or a
 sigstore client with the trusted root.
 
 ## Standards
@@ -470,15 +471,22 @@ when the test runs and are not in this repository. Before = the 0.11.4 wheel fro
   `application/vnd.dev.sigstore.bundle.v0.3+json` and `…bundle+json;version=0.1|0.2|0.3` — and checks offline: the
   signature (DSSE, exactly one as the proto requires, or a message signature) with the key of the leaf certificate;
   the artifact or its SHA-256, when given, against the statement's subjects or the signed digest; each RFC 3161 token
-  over the SHA-256 of the signature; and that a verified token's genTime falls inside the leaf certificate's validity.
+  over the SHA-256 of the signature; and that a verified token's genTime, read to the whole second (a fraction is
+  dropped), falls inside the leaf certificate's validity.
   **It does not verify** the certificate's chain to Fulcio or to GitHub's CA, the identity in the certificate (SAN,
-  issuer, workflow), the Rekor entries (they are read and returned with `verified: None`) or revocation, and for a
+  issuer, workflow), the Rekor entries (they are read and returned with `verified: None`), revocation, or the
+  `validFor` window the trusted root gives each timestamp authority (sigstore_trustroot.proto: clients "MUST check
+  timestamps against *both* the `valid_for` time range *and* the entire certificate chain"; here only the TSA
+  certificates the caller gives are used), and for a
   bundle with no RFC 3161 token (8 of the 25) the time of signing: `not_verified` lists these in every result. So
   `verified: True` is "signed with the key in this bundle, over this artifact, at this time", not "sigstore verified":
   a bundle with a self-made certificate passes. The reader is closed: a field the proto does not define, a field given
   under both its names, two members of a oneof, a media type outside the four, a cosign bundle of the older format
-  (`base64Signature`), and in a bundle given as text a member named twice, are each an `error`. Versions 0.1 and 0.2
-  are exercised by the tests with bundles built there; all 25 real ones are 0.3.
+  (`base64Signature`), and in a bundle given as text a member named twice, are each an `error`. The four media types
+  are exercised by the tests with bundles built there; all 25 real ones are 0.3. Bytes are read as proto3 JSON reads
+  them (either base64 alphabet, padding optional) and the signature is checked over the same bytes the RFC 3161
+  imprint is checked over; a `publicKey` hint that is not the DSSE signature's `keyid` is refused (the proto: "MUST be
+  exactly the same"), and so is a caller `public_key` that is not the key of the bundle's certificate.
 - **The sentence "verifiable by the wider supply-chain ecosystem (cosign, slsa-verifier, in-toto)"** in the docstring of
   `interop.dsse` is about envelopes written here, and what was measured is this: an envelope written by `to_dsse` is
   verified by securesystemslib 1.6.0, the in-toto project's DSSE implementation, and refused when altered. It was not
@@ -1227,6 +1235,7 @@ python3 tests/test_sdjwt_es256_typ_20261117.py      # SD-JWT VC: ES256 bound to 
 python3 tests/test_sdjwt_kb_20261117.py             # SD-JWT+KB: Key Binding JWT, RFC 9901 §7.3 (needs cryptography)
 python3 tests/test_nist_acvp_vectors_20261117.py    # ML-DSA-65 vectors: every NIST case against NIST's verdict, closed reader
 python3 tests/test_uso_reale_20261118.py           # DSSE in ECDSA P-256, RFC 3161 tokens without certificate, sigstore bundles, the Quick start
+python3 tests/test_nemesis_20261118.py             # the same, review of 18/11/2026: unpadded base64, key hint, caller key, valid_for, media types
 OMEGA_EVIDENCE_REAL_GITHUB=1 python3 tests/test_real_github_20261118.py   # the same on 25 real bundles from GitHub (network, gh)
 python3 tests/fuzz_toolkit.py --iterations 3000     # seeded mutation fuzz of the verifier and the ledger (exit 1 on a violation)
 python3 tests/fuzz_toolkit.py --ablate signature    # positive control: the sabotaged verifier must make the fuzzer red (6 ablations)
@@ -1235,8 +1244,9 @@ python3 tests/bench_toolkit.py --json bench.json    # latencies, throughput, mem
 
 ## Releasing (maintainers)
 
-Distribution is the **GitHub Release** and the author's PEP 503 index (`https://robertolocatelli81-dev.github.io/pypi/`,
-sha256-pinned to the release assets); publication on PyPI was dropped by decision of the author on 15 September 2026.
+Distribution is the **GitHub Release**, the author's PEP 503 index (`https://robertolocatelli81-dev.github.io/pypi/`,
+sha256-pinned to the release assets) and, since 0.11.4 (uploaded 14 November 2026), PyPI; publication on PyPI had been
+dropped by decision of the author on 15 September 2026 and was resumed with Trusted Publishing.
 A release ships the wheel and sdist, a CycloneDX SBOM, a CRA evidence pack (ledger, pack, AWS KMS Ed25519 signature,
 trust store) and `SHA256SUMS`; `release-build.yml` rebuilds the distributions, checks their metadata and runs the tests
 on every published release; `pypi.yml` uploads the same wheel and sdist to PyPI, checked against `SHA256SUMS`, after a
@@ -1246,7 +1256,7 @@ human approval. Install:
 pip install omega-evidence
 ```
 
-CI (`ci.yml`) runs the test suite on every push and pull request across Python 3.9 / 3.11 / 3.13, with and without
+CI (`ci.yml`) runs the test suite on every push and pull request across Python 3.9 / 3.11 / 3.13 / 3.14, with and without
 `cryptography`, and the differential oracle with Go 1.27, JDK 27 and Node 24.
 
 ## Contact and citation

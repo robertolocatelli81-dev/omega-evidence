@@ -629,7 +629,7 @@ class TestSigstoreBundle(LocalTsa):
             r = sigstore.verify_bundle(b, artifact=b"artifact", **self.kw)
             if r["verified"] is not True:
                 self.assertTrue(isinstance(r["error"], str) and r["error"], r)
-            self.assertEqual(r["not_verified"][:4], list(sigstore.NOT_VERIFIED))
+            self.assertEqual(r["not_verified"][:len(sigstore.NOT_VERIFIED)], list(sigstore.NOT_VERIFIED))
 
     def test_bundle_as_text_is_closed(self):
         """a bundle given as JSON text: a member named twice (json.loads would keep the last, another parser the first),
@@ -659,8 +659,8 @@ class TestSigstoreBundle(LocalTsa):
         r = sigstore.verify_bundle(b, artifact=b"artifact")
         self.assertIs(r["verified"], True, r["error"])
         self.assertEqual(r["checks"], {"signature": True, "artifact": True})
-        self.assertEqual(len(r["not_verified"]), 5)
-        self.assertIn("time of signing", r["not_verified"][4])
+        self.assertEqual(len(r["not_verified"]), len(sigstore.NOT_VERIFIED) + 1)
+        self.assertIn("time of signing", r["not_verified"][-1])
         r = sigstore.verify_bundle(self.bundle, artifact=b"artifact", **self.kw)
         self.assertEqual(r["not_verified"], list(sigstore.NOT_VERIFIED))
 

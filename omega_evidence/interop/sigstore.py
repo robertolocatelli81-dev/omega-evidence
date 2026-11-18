@@ -29,10 +29,13 @@ What is VERIFIED here, each reported in `checks`:
                   TSA anchors (`tsa_ca_file`, `tsa_untrusted`), at the token's genTime by default (sigstore's rule);
   * signing_time_in_certificate — a verified token's genTime inside the leaf certificate's validity (the proto: "a
                   verifier MUST verify that the signature was computed at the time the certificate was valid").
+                  genTime is read to the whole second: a fraction of a second is dropped, so a token made within
+                  the second after notAfter counts as inside.
 
 What is NOT verified here, and always listed in `not_verified`: the leaf certificate's chain to Fulcio or to GitHub's
 CA; the identity in the certificate (SAN, OIDC issuer, workflow, repository); the Rekor entries (inclusion proof,
-checkpoint signature, inclusion promise / SET, that the entry's body matches); revocation; and, for a bundle with no
+checkpoint signature, inclusion promise / SET, that the entry's body matches); revocation; the valid_for window a
+trusted root gives each timestamp authority (only the caller's TSA certificates are used); and, for a bundle with no
 RFC 3161 token, the time of signing (it would come from the log entry). So `verified: True` means
 "the signature, and the artifact and timestamps asked for, check out with the key in the bundle", NOT "sigstore
 verified": anyone can make a self-signed certificate and a bundle that pass these checks. For that, use
@@ -65,7 +68,10 @@ MEDIA_TYPES = {"application/vnd.dev.sigstore.bundle.v0.3+json": "0.3",
 NOT_VERIFIED = ("the leaf certificate's chain to Fulcio or to GitHub's CA (no trusted root is read here)",
                 "the identity in the certificate (SAN, OIDC issuer, workflow, repository)",
                 "the transparency log entries (Rekor inclusion proof, checkpoint, inclusion promise, entry body)",
-                "revocation of any certificate")
+                "revocation of any certificate",
+                "the validity window (valid_for) that a trusted root gives each timestamp authority: an RFC 3161 "
+                "token is checked against the caller's TSA certificates only (sigstore_trustroot.proto: clients "
+                "MUST check timestamps against both valid_for and the certificate chain)")
 _HASHES = {"SHA2_256": "sha256", "SHA2_384": "sha384", "SHA2_512": "sha512"}
 
 # the JSON names of each message read here (proto3 JSON: lowerCamelCase, the proto name also accepted)
@@ -251,7 +257,7 @@ def _parse(bundle: Any) -> Dict[str, Any]:
         for f in ("kind", "version"):
             if not isinstance(kv.get(f), str):
                 raise _Bad(f"kindVersion.{f} is not a string")
-        p["tlog"].append({"log_index": _int(e.get("logIndex"), "logIndex"),
+        p["tlog"].append({"log_index": _int(e.get("logIndex", 0), "logIndex"),   # proto3 JSON omits a 0
                           "log_id_hex": _bytes(lid.get("keyId"), "logId.keyId").hex(),
                           "kind": kv.get("kind"), "version": kv.get("version"),
                           "integrated_time": _int(e.get("integratedTime", 0), "integratedTime"),
@@ -264,9 +270,18 @@ def _parse(bundle: Any) -> Dict[str, Any]:
             raise _Bad("a DSSE envelope in a bundle MUST have exactly one signature (sigstore_bundle.proto)")
         sig = _obj(sigs[0], "Signature")
         p["content"] = "dsse"
-        p["envelope"] = {"payload": env.get("payload"), "payloadType": env.get("payloadType"),
-                         "signatures": [{"sig": sig.get("sig")}]}
         p["signature"] = _bytes(sig.get("sig"), "dsseEnvelope.signatures[0].sig")
+        payload = _bytes(env.get("payload"), "dsseEnvelope.payload")
+        # decoded once here, by the proto3 JSON rule (either alphabet, padding optional), and handed to interop.dsse in
+        # standard padded base64: the bytes the signature is checked over and those the RFC 3161 imprint is checked
+        # over are the same bytes
+        p["envelope"] = {"payload": base64.standard_b64encode(payload).decode("ascii"),
+                         "payloadType": env.get("payloadType"),
+                         "signatures": [{"sig": base64.standard_b64encode(p["signature"]).decode("ascii")}]}
+        keyid = sig.get("keyid")
+        if keyid is not None and not isinstance(keyid, str):
+            raise _Bad("dsseEnvelope.signatures[0].keyid is not a string")
+        p["keyid"] = keyid
     else:
         ms = _obj(b["messageSignature"], "MessageSignature")
         p["content"] = "message_signature"
@@ -281,6 +296,15 @@ def _parse(bundle: Any) -> Dict[str, Any]:
     return p
 
 
+def _key_id(key) -> bytes:
+    """the key of a dsse.load_public_key triple, as bytes that are equal exactly when the keys are"""
+    kind, k, _src = key
+    if kind == "ed25519":
+        return b"ed25519:" + base64.b64decode(k)
+    from cryptography.hazmat.primitives import serialization
+    return b"ecdsa:" + k.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+
+
 def verify_bundle(bundle: Any, artifact: Optional[bytes] = None, artifact_sha256: Optional[str] = None,
                   public_key=None, tsa_ca_file: Optional[str] = None, tsa_untrusted: Optional[str] = None,
                   tsa_at_gen_time: bool = True, timeout: int = 15) -> Dict[str, Any]:
@@ -292,6 +316,13 @@ def verify_bundle(bundle: Any, artifact: Optional[bytes] = None, artifact_sha256
     `public_key` replaces the bundle's certificate as the key (a `publicKey` hint bundle needs it)."""
     res: Dict[str, Any] = {"verified": False, "error": None, "checks": {}, "not_verified": list(NOT_VERIFIED),
                            "statement": None, "timestamps": [], "tlog_entries": [], "certificate": None}
+    if not isinstance(tsa_at_gen_time, bool):
+        res["error"] = "tsa_at_gen_time must be True or False"
+        return res
+    for name, v in (("tsa_ca_file", tsa_ca_file), ("tsa_untrusted", tsa_untrusted)):
+        if v is not None and (not isinstance(v, str) or not v):
+            res["error"] = f"{name} must be the path of a PEM file"
+            return res
     if artifact is not None and artifact_sha256 is not None:
         res["error"] = "give artifact or artifact_sha256, not both"
         return res
@@ -329,10 +360,23 @@ def verify_bundle(bundle: Any, artifact: Optional[bytes] = None, artifact_sha256
     else:
         try:
             key = dsse.load_public_key(key_arg)
+            if public_key is not None and p["leaf_der"] is not None and _key_id(key) != _key_id(
+                    dsse.load_public_key(_pem(p["leaf_der"]))):
+                # the certificate (and the signing time checked against it) would describe another key than the one
+                # the signature is checked with
+                raise ValueError("public_key is not the key of the bundle's certificate")
         except ValueError as e:
             res["checks"]["signature"] = None
             reasons.append(f"signature: {e}")
             key = None
+    if (key is not None and p["content"] == "dsse" and p["key_form"] == "publicKey"
+            and (p["key_hint"] or "") != (p.get("keyid") or "")):
+        # sigstore_bundle.proto: "the key hints MUST be exactly the same in the verification material and in the DSSE
+        # envelope"
+        res["checks"]["signature"] = None
+        reasons.append("signature: the publicKey hint of the verification material is not the keyid of the DSSE "
+                       "signature (they MUST be exactly the same)")
+        key = None
     sha_hex = (hashlib.sha256(artifact).hexdigest() if artifact is not None else artifact_sha256)
     if p["content"] == "dsse":
         r = dsse.from_dsse(p["envelope"], public_key=key_arg) if key is not None else None

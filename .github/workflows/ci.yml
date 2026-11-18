@@ -30,7 +30,7 @@ jobs:
         if: matrix.cryptography == 'yes'
         run: cd /tmp && python -I -c "from omega_evidence.pqbackends import mldsa; r = mldsa.try_load(); assert r['registered'], r; print(r['reason'])"
       - name: Run tests
-        run: python tests/test_toolkit.py && python tests/test_stamp_granted.py && python tests/test_readme_version.py && python tests/test_receipt_exit74.py TestPython TestPythonAAT && python tests/test_check_not_run_20261013.py && python tests/test_tsa_signer_key_id_20261117.py && python tests/test_sdjwt_es256_typ_20261117.py && python tests/test_sdjwt_kb_20261117.py && python tests/test_nist_acvp_vectors_20261117.py && python tests/test_rfc4998_validity_time_20261114.py && python tests/test_uso_reale_20261118.py
+        run: python tests/test_toolkit.py && python tests/test_stamp_granted.py && python tests/test_readme_version.py && python tests/test_receipt_exit74.py TestPython TestPythonAAT && python tests/test_check_not_run_20261013.py && python tests/test_tsa_signer_key_id_20261117.py && python tests/test_sdjwt_es256_typ_20261117.py && python tests/test_sdjwt_kb_20261117.py && python tests/test_nist_acvp_vectors_20261117.py && python tests/test_rfc4998_validity_time_20261114.py && python tests/test_uso_reale_20261118.py && python tests/test_nemesis_20261118.py
 
   fuzz-smoke:
     # Short, deterministic (fixed seed): the same 3 000 mutations on every push, plus the six positive controls
