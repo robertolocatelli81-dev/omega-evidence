@@ -1,0 +1,267 @@
+{
+ "description": "Real third-party sigstore bundles used by tests/test_real_github_20261118.py. Only identifiers, URLs and hashes: the bundles, tokens and artifacts are downloaded at test time and NOT committed (their projects' licences differ; GitHub attestation metadata has no licence stated). Sample: gtm/uso_reale_github_20261118 of the OMEGA workspace, pre-registered 2026-11-18 13:58 CET; the first attestation returned by the GitHub API for the subject digest of each repository's latest release.",
+ "measured_2026_11_18": {
+  "omega_evidence_0_11_4": {
+   "dsse_verified": "0/24",
+   "rfc3161_verified": "0/17"
+  },
+  "comparators": {
+   "ecdsa_p256_over_pae_with_bundle_certificate": "24/24",
+   "openssl_ts_verify_untrusted_attime_gentime": "17/17"
+  }
+ },
+ "attestations": [
+  {
+   "repo": "anomalyco/opencode",
+   "tag": "v1.19.6",
+   "license_spdx_github": "MIT",
+   "subject_asset": "latest-linux-arm64.yml",
+   "subject_digest": "sha256:cef86c579026903779a0ab9bcf1f01fc3a01c444e0386fe2b934249dc469c222",
+   "subject_size": 584,
+   "subject_url": "https://github.com/anomalyco/opencode/releases/download/v1.19.6/latest-linux-arm64.yml",
+   "api": "repos/anomalyco/opencode/attestations/sha256:cef86c579026903779a0ab9bcf1f01fc3a01c444e0386fe2b934249dc469c222"
+  },
+  {
+   "repo": "yt-dlp/yt-dlp",
+   "tag": "2026.10.26",
+   "license_spdx_github": "Unlicense",
+   "subject_asset": "SHA2-256SUMS",
+   "subject_digest": "sha256:0d7ec4303a02bcbe66154d478852cdf2e07688d39dc4597316e4424ac4e74356",
+   "subject_size": 1595,
+   "subject_url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/SHA2-256SUMS",
+   "api": "repos/yt-dlp/yt-dlp/attestations/sha256:0d7ec4303a02bcbe66154d478852cdf2e07688d39dc4597316e4424ac4e74356"
+  },
+  {
+   "repo": "clash-verge-rev/clash-verge-rev",
+   "tag": "v2.5.10",
+   "license_spdx_github": "GPL-3.0",
+   "subject_asset": "Clash.Verge-2.5.10-1.aarch64.rpm",
+   "subject_digest": "sha256:d5e430094ceef8d2bad065f761e5fb3b8f19d34e3d09cb62a8ffe0933191ecb9",
+   "subject_size": 99578034,
+   "subject_url": "https://github.com/clash-verge-rev/clash-verge-rev/releases/download/v2.5.10/Clash.Verge-2.5.10-1.aarch64.rpm",
+   "api": "repos/clash-verge-rev/clash-verge-rev/attestations/sha256:d5e430094ceef8d2bad065f761e5fb3b8f19d34e3d09cb62a8ffe0933191ecb9"
+  },
+  {
+   "repo": "Comfy-Org/ComfyUI",
+   "tag": "v0.45.0",
+   "license_spdx_github": "GPL-3.0",
+   "subject_asset": "ComfyUI_windows_portable_amd.7z",
+   "subject_digest": "sha256:636f41a1975ad40cf226868ae06a62f7f5bb157532cc10cf3475ff54547e063e",
+   "subject_size": 1688825308,
+   "subject_url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.45.0/ComfyUI_windows_portable_amd.7z",
+   "api": "repos/Comfy-Org/ComfyUI/attestations/sha256:636f41a1975ad40cf226868ae06a62f7f5bb157532cc10cf3475ff54547e063e"
+  },
+  {
+   "repo": "electron/electron",
+   "tag": "v45.3.4",
+   "license_spdx_github": "MIT",
+   "subject_asset": "chromedriver-v45.3.4-darwin-arm64.zip",
+   "subject_digest": "sha256:b31198ffad6db412682423599b3cb5aae0b49ae8d4abac839a45c83cc6185fa7",
+   "subject_size": 21189174,
+   "subject_url": "https://github.com/electron/electron/releases/download/v45.3.4/chromedriver-v45.3.4-darwin-arm64.zip",
+   "api": "repos/electron/electron/attestations/sha256:b31198ffad6db412682423599b3cb5aae0b49ae8d4abac839a45c83cc6185fa7"
+  },
+  {
+   "repo": "denoland/deno",
+   "tag": "v2.9.8",
+   "license_spdx_github": "MIT",
+   "subject_asset": "deno-aarch64-apple-darwin.from-2.9.7.bsdiff",
+   "subject_digest": "sha256:2b19cf4591f62cfe85f1176d0af1602879d07280c97c504fa387605c4ad0b144",
+   "subject_size": 6157420,
+   "subject_url": "https://github.com/denoland/deno/releases/download/v2.9.8/deno-aarch64-apple-darwin.from-2.9.7.bsdiff",
+   "api": "repos/denoland/deno/attestations/sha256:2b19cf4591f62cfe85f1176d0af1602879d07280c97c504fa387605c4ad0b144"
+  },
+  {
+   "repo": "tt-a1i/archify",
+   "tag": "v3.2.0",
+   "license_spdx_github": "Apache-2.0",
+   "subject_asset": "archify.zip",
+   "subject_digest": "sha256:70e210265c59f24dcbdf2a502ff671104b5454e7ee7d3554aecd86bad32384f5",
+   "subject_size": 5271959,
+   "subject_url": "https://github.com/tt-a1i/archify/releases/download/v3.2.0/archify.zip",
+   "api": "repos/tt-a1i/archify/attestations/sha256:70e210265c59f24dcbdf2a502ff671104b5454e7ee7d3554aecd86bad32384f5"
+  },
+  {
+   "repo": "astral-sh/uv",
+   "tag": "0.13.9",
+   "license_spdx_github": "Apache-2.0",
+   "subject_asset": "dist-manifest.json",
+   "subject_digest": "sha256:82814a2cc21dd3a830b126c51f78531afaa7a49de54fe70c51486083ff5f5924",
+   "subject_size": 46150,
+   "subject_url": "https://github.com/astral-sh/uv/releases/download/0.13.9/dist-manifest.json",
+   "api": "repos/astral-sh/uv/attestations/sha256:82814a2cc21dd3a830b126c51f78531afaa7a49de54fe70c51486083ff5f5924"
+  },
+  {
+   "repo": "syncthing/syncthing",
+   "tag": "v2.1.7",
+   "license_spdx_github": "MPL-2.0",
+   "subject_asset": "compat.json",
+   "subject_digest": "sha256:172e33009e6183aefe7aa902c1f33be62ed2ede8a16abafba536654743af1fa0",
+   "subject_size": 112,
+   "subject_url": "https://github.com/syncthing/syncthing/releases/download/v2.1.7/compat.json",
+   "api": "repos/syncthing/syncthing/attestations/sha256:172e33009e6183aefe7aa902c1f33be62ed2ede8a16abafba536654743af1fa0"
+  },
+  {
+   "repo": "colbymchenry/codegraph",
+   "tag": "v1.6.3",
+   "license_spdx_github": "MIT",
+   "subject_asset": "codegraph-darwin-arm64.tar.gz",
+   "subject_digest": "sha256:d40bc304d1de3d374d70b46b0e4095dd124a0c6b81010acd2f49b7b4fbde9483",
+   "subject_size": 59175820,
+   "subject_url": "https://github.com/colbymchenry/codegraph/releases/download/v1.6.3/codegraph-darwin-arm64.tar.gz",
+   "api": "repos/colbymchenry/codegraph/attestations/sha256:d40bc304d1de3d374d70b46b0e4095dd124a0c6b81010acd2f49b7b4fbde9483"
+  },
+  {
+   "repo": "tw93/Mole",
+   "tag": "V1.72.0",
+   "license_spdx_github": "GPL-3.0",
+   "subject_asset": "analyze-darwin-amd64",
+   "subject_digest": "sha256:9dbb06a90230282c6a0b7bcaf014f7a50ad2b4ae6204613932ae7500ec85e49a",
+   "subject_size": 4321408,
+   "subject_url": "https://github.com/tw93/Mole/releases/download/V1.72.0/analyze-darwin-amd64",
+   "api": "repos/tw93/Mole/attestations/sha256:9dbb06a90230282c6a0b7bcaf014f7a50ad2b4ae6204613932ae7500ec85e49a"
+  },
+  {
+   "repo": "Fission-AI/OpenSpec",
+   "tag": "v2.1.0",
+   "license_spdx_github": "MIT",
+   "subject_asset": "openspec-darwin-arm64.tar.gz",
+   "subject_digest": "sha256:f985131c8b565356a8f4995d53ce819d1b79bdad1242561534eb57754f6bae9b",
+   "subject_size": 31582738,
+   "subject_url": "https://github.com/Fission-AI/OpenSpec/releases/download/v2.1.0/openspec-darwin-arm64.tar.gz",
+   "api": "repos/Fission-AI/OpenSpec/attestations/sha256:f985131c8b565356a8f4995d53ce819d1b79bdad1242561534eb57754f6bae9b"
+  },
+  {
+   "repo": "nektos/act",
+   "tag": "v0.2.98",
+   "license_spdx_github": "MIT",
+   "subject_asset": "act_Darwin_arm64.tar.gz",
+   "subject_digest": "sha256:14477d7e076b12a885c54301beff2b524a905e4238a2b3ec9b3d1fd0efdc100f",
+   "subject_size": 7934852,
+   "subject_url": "https://github.com/nektos/act/releases/download/v0.2.98/act_Darwin_arm64.tar.gz",
+   "api": "repos/nektos/act/attestations/sha256:14477d7e076b12a885c54301beff2b524a905e4238a2b3ec9b3d1fd0efdc100f"
+  },
+  {
+   "repo": "mvanhorn/last30days-skill",
+   "tag": "v4.3.2",
+   "license_spdx_github": "MIT",
+   "subject_asset": "last30days-pp-mcp-darwin-amd64.mcpb",
+   "subject_digest": "sha256:7e7a15a4e60d4f671353c5a594b7c67a6284880288fcd73a367e4f2c3ab95ffb",
+   "subject_size": 6212717,
+   "subject_url": "https://github.com/mvanhorn/last30days-skill/releases/download/v4.3.2/last30days-pp-mcp-darwin-amd64.mcpb",
+   "api": "repos/mvanhorn/last30days-skill/attestations/sha256:7e7a15a4e60d4f671353c5a594b7c67a6284880288fcd73a367e4f2c3ab95ffb"
+  },
+  {
+   "repo": "prometheus/prometheus",
+   "tag": "v3.16.0",
+   "license_spdx_github": "Apache-2.0",
+   "subject_asset": "prometheus-3.16.0.aix-ppc64.tar.gz",
+   "subject_digest": "sha256:8ed2efee32c7cd2c166155bb6bb87c43df5f32023fdfe702094113d5d373d9a2",
+   "subject_size": 107324020,
+   "subject_url": "https://github.com/prometheus/prometheus/releases/download/v3.16.0/prometheus-3.16.0.aix-ppc64.tar.gz",
+   "api": "repos/prometheus/prometheus/attestations/sha256:8ed2efee32c7cd2c166155bb6bb87c43df5f32023fdfe702094113d5d373d9a2"
+  },
+  {
+   "repo": "marktext/marktext",
+   "tag": "v0.23.0",
+   "license_spdx_github": "MIT",
+   "subject_asset": "builder-debug.yml",
+   "subject_digest": "sha256:d637278f9d8428eace4839ae69a430d21e2e5dcf0d489b00bd221fbe7a724fe2",
+   "subject_size": 3152,
+   "subject_url": "https://github.com/marktext/marktext/releases/download/v0.23.0/builder-debug.yml",
+   "api": "repos/marktext/marktext/attestations/sha256:d637278f9d8428eace4839ae69a430d21e2e5dcf0d489b00bd221fbe7a724fe2"
+  },
+  {
+   "repo": "pocketbase/pocketbase",
+   "tag": "v0.40.6",
+   "license_spdx_github": "MIT",
+   "subject_asset": "checksums.txt",
+   "subject_digest": "sha256:5fb8bb01cc69a9bd883e3911cd432285e208be0feff5a95978d6b3094c25ef94",
+   "subject_size": 908,
+   "subject_url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.6/checksums.txt",
+   "api": "repos/pocketbase/pocketbase/attestations/sha256:5fb8bb01cc69a9bd883e3911cd432285e208be0feff5a95978d6b3094c25ef94"
+  },
+  {
+   "repo": "jamiepine/voicebox",
+   "tag": "v0.5.0",
+   "license_spdx_github": "MIT",
+   "subject_asset": "cuda-libs-cu128-v1.tar.gz",
+   "subject_digest": "sha256:df83ae5aa2e482af999152be5c84e5e305de15e9cea860af7dea75f18fafa663",
+   "subject_size": 2111927787,
+   "subject_url": "https://github.com/jamiepine/voicebox/releases/download/v0.5.0/cuda-libs-cu128-v1.tar.gz",
+   "api": "repos/jamiepine/voicebox/attestations/sha256:df83ae5aa2e482af999152be5c84e5e305de15e9cea860af7dea75f18fafa663"
+  },
+  {
+   "repo": "go-gitea/gitea",
+   "tag": "v28.4.0",
+   "license_spdx_github": "MIT",
+   "subject_asset": "gitea-28.4.0-darwin-amd64",
+   "subject_digest": "sha256:c9538783c9df22d3527ba53ce2a14646fe9cd9dfa579829c51a9cf147c1f03fd",
+   "subject_size": 123879744,
+   "subject_url": "https://github.com/go-gitea/gitea/releases/download/v28.4.0/gitea-28.4.0-darwin-amd64",
+   "api": "repos/go-gitea/gitea/attestations/sha256:c9538783c9df22d3527ba53ce2a14646fe9cd9dfa579829c51a9cf147c1f03fd"
+  },
+  {
+   "repo": "aaif-goose/goose",
+   "tag": "v1.60.1",
+   "license_spdx_github": "Apache-2.0",
+   "subject_asset": "download_cli.sh",
+   "subject_digest": "sha256:710f208cf0225ac330f71cc1540d36b10a6be7a850334b5ec4770fe96fbc57c4",
+   "subject_size": 17488,
+   "subject_url": "https://github.com/aaif-goose/goose/releases/download/v1.60.1/download_cli.sh",
+   "api": "repos/aaif-goose/goose/attestations/sha256:710f208cf0225ac330f71cc1540d36b10a6be7a850334b5ec4770fe96fbc57c4"
+  },
+  {
+   "repo": "TryGhost/Ghost",
+   "tag": "v6.78.0",
+   "license_spdx_github": "MIT",
+   "subject_asset": "ghost-6.78.0.tgz",
+   "subject_digest": "sha256:f29630f595e7ba0d472b3c4c541cead0a5ae404e57285dcd686fd12e7bdd8670",
+   "subject_size": 15144322,
+   "subject_url": "https://github.com/TryGhost/Ghost/releases/download/v6.78.0/ghost-6.78.0.tgz",
+   "api": "repos/TryGhost/Ghost/attestations/sha256:f29630f595e7ba0d472b3c4c541cead0a5ae404e57285dcd686fd12e7bdd8670"
+  },
+  {
+   "repo": "alibaba/open-code-review",
+   "tag": "v1.13.12",
+   "license_spdx_github": "Apache-2.0",
+   "subject_asset": "opencodereview-darwin-amd64",
+   "subject_digest": "sha256:e067e92e8fa7030f59490f9cec5b86f9c69dd8a13d252b979f4cd87b7f047696",
+   "subject_size": 63629824,
+   "subject_url": "https://github.com/alibaba/open-code-review/releases/download/v1.13.12/opencodereview-darwin-amd64",
+   "api": "repos/alibaba/open-code-review/attestations/sha256:e067e92e8fa7030f59490f9cec5b86f9c69dd8a13d252b979f4cd87b7f047696"
+  },
+  {
+   "repo": "herdrdev/herdr",
+   "tag": "v0.9.5",
+   "license_spdx_github": "Apache-2.0",
+   "subject_asset": "herdr-linux-aarch64",
+   "subject_digest": "sha256:17d7536f2da50859523680ef279dffcac8e4a235f4e46fe8da6c2ec44141897c",
+   "subject_size": 27900752,
+   "subject_url": "https://github.com/herdrdev/herdr/releases/download/v0.9.5/herdr-linux-aarch64",
+   "api": "repos/herdrdev/herdr/attestations/sha256:17d7536f2da50859523680ef279dffcac8e4a235f4e46fe8da6c2ec44141897c"
+  },
+  {
+   "repo": "astral-sh/ruff",
+   "tag": "0.17.5",
+   "license_spdx_github": "MIT",
+   "subject_asset": "dist-manifest.json",
+   "subject_digest": "sha256:76bf58254880112693a06cefdf1a92b536c464a2d4fe3cb5e04f6ec426d8cf2d",
+   "subject_size": 46289,
+   "subject_url": "https://github.com/astral-sh/ruff/releases/download/0.17.5/dist-manifest.json",
+   "api": "repos/astral-sh/ruff/attestations/sha256:76bf58254880112693a06cefdf1a92b536c464a2d4fe3cb5e04f6ec426d8cf2d"
+  }
+ ],
+ "message_signature_bundles": [
+  {
+   "repo": "go-gitea/gitea",
+   "tag": "v28.4.0",
+   "license_spdx_github": "MIT",
+   "bundle_url": "https://github.com/go-gitea/gitea/releases/download/v28.4.0/gitea-28.4.0-darwin-amd64.sha256.sigstore.json",
+   "bundle_digest": "sha256:fbdd23edbd85df93462da1e7d50b1679bbb2c205252ce9bec263d10b70a02a5b",
+   "artifact_url": "https://github.com/go-gitea/gitea/releases/download/v28.4.0/gitea-28.4.0-darwin-amd64.sha256",
+   "artifact_digest": "sha256:75bdd1f561e4d8fdd38c6012675f625bf60a6d790918e06df5f68493fff34331",
+   "artifact_size": 92
+  }
+ ]
+}

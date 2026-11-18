@@ -37,9 +37,12 @@ the index links carry `#sha256=` fragments, so pip verifies every download.
 | `pack` | Self-describing evidence pack — a **mandatory `honest_scope`** stating what it does *not* prove; a recomputable `pack_sha3` |
 | `signing` | Ed25519 producer identity and signatures (bound to the payload) |
 | `trust` | TOFU trust registry with explicit rotation and revocation |
-| `timestamp` | RFC 3161 trusted timestamping; a token whose signer is named by subjectKeyIdentifier is verified too (0.12.0). It never calls a token qualified (see Standards) |
+| `timestamp` | RFC 3161 trusted timestamping; a token whose signer is named by subjectKeyIdentifier is verified too, and so is a token that does not carry its TSA certificate when the caller gives it (`untrusted=`), now, at an instant or at the token's own genTime (0.12.0). A refused token says why. It never calls a token qualified (see Standards) |
 | `attestation` | PII-free attestation primitive — salted per-record digests, **no linkability** |
 | `verifier` | One offline verifier with **graduated authenticity** |
+| `interop.dsse` | A pack as a DSSE envelope over an in-toto Statement v1 (Ed25519), and the check of DSSE envelopes made by others: Ed25519 or ECDSA P-256 / SHA-256, with a public key or an X.509 certificate the caller gives (0.12.0) |
+| `interop.sigstore` | Reads a sigstore bundle v0.1–v0.3 (GitHub artifact attestations are such bundles) and checks offline the signature, the artifact digest and the RFC 3161 tokens; what it does not check — the chain to Fulcio, the identity, Rekor — is listed in every result (0.12.0) |
+| `interop.sdjwt` | SD-JWT (RFC 9901) issue / verify, SD-JWT VC issuer JWS in EdDSA or ES256, Key Binding JWT |
 | `interop.aat` | Export/verify **Agent Audit Trail** chains (draft-sharif-agent-audit-trail-**04**): JCS hash chain, record phases, §7 detail fields, ES256 / ML-DSA-65 / hybrid signatures resolved by RFC 7638 thumbprint, Merkle epochs (RFC 6962), tombstones, session close, JSONL/CSV |
 
 ## Graduated authenticity
@@ -78,19 +81,34 @@ ident = signing.Identity("acme-compliance")
 pack.sign_pack("pack.json", ident)
 pack.stamp_pack("pack.json", "http://tsa.izenpe.com")
 
-# 4. trust the producer's key, then verify — reaches trusted-signed
+# 4. record THIS pack's pack_sha3 in the ledger: the anchored tier binds the pack, not just "a ledger beside it"
+pack.anchor_pack("pack.json", "pack.ledger.jsonl")
+
+# 5. trust the producer's key, then verify — reaches trusted-signed
 trust.TrustRegistry("trust.jsonl").trust("acme-compliance", ident.public_key_b64)
 result = verify_pack("pack.json", trust_store="trust.jsonl")
 assert result["valid"]
 ```
 
-## Honest scope
+A GitHub artifact attestation (a sigstore bundle), checked offline:
 
-This toolkit produces **firm-side, verifiable evidence** and open standards. It
-is **not** a conformity-assessment body, not a notified body, not a QTSP, not a
-CA/PKI, not the official CSIRT/ENISA or TRACES channel, and not legal advice.
-The trust registry is TOFU: it proves a key was decided to be trusted and
-prevents silent key-swap, not the legal identity of the holder.
+```python
+import json
+from omega_evidence.interop import sigstore
+
+# gh api repos/OWNER/REPO/attestations/sha256:DIGEST > attestation.json
+with open("attestation.json", encoding="utf-8") as f:
+    bundle = json.load(f)["attestations"][0]["bundle"]
+r = sigstore.verify_bundle(bundle, artifact_sha256="DIGEST",          # or artifact=<the file's bytes>
+                           tsa_ca_file="tsa_roots.pem",               # the TSA root(s) you trust
+                           tsa_untrusted="tsa_untrusted.pem")         # the TSA leaf and intermediates
+print(r["verified"], r["checks"], r["error"])
+print(r["not_verified"])   # the chain to Fulcio / GitHub's CA, the identity, Rekor: NOT checked here
+```
+
+The TSA certificates are in the trusted root (`gh attestation trusted-root`, `timestampAuthorities`);
+`tools/real_github_check.py` splits them into the two files. On 18 November 2026 this verified 25 of 25 real bundles
+of 24 public repositories and refused the 25 altered copies (0.12.0 section below).
 
 ## Agent Audit Trail interop (draft -04, 2026-09-19)
 
@@ -323,9 +341,25 @@ python -m omega_evidence pack.json --trust-store trust.jsonl --require-pq
 python -m omega_evidence pack.json --require-signed     # 0.10.0: a missing or unverifiable producer signature is FAIL (the four CLIs)
 ```
 
+## What this toolkit is not
+
+This toolkit produces **firm-side, verifiable evidence** and open standards. It
+is **not** a conformity-assessment body, not a notified body, not a QTSP, not a
+CA/PKI, not the official CSIRT/ENISA or TRACES channel, and not legal advice.
+The trust registry is TOFU: it proves a key was decided to be trusted and
+prevents silent key-swap, not the legal identity of the holder.
+Material signed by others: `interop.dsse` and `interop.sigstore` check a signature with the key the caller gives or
+the certificate the bundle carries, and RFC 3161 tokens against the caller's anchors. They do not build the
+certificate's chain to Fulcio or to GitHub's CA, do not read the identity in it and do not verify Rekor entries; every
+result of `verify_bundle` lists this under `not_verified`. For those, use `gh attestation verify`, `cosign` or a
+sigstore client with the trusted root.
+
 ## Standards
 
-RFC 3161 (timestamping, optional `openssl`); RFC 4998 / eIDAS LTA renewal *semantics*
+RFC 3161 (timestamping, optional `openssl`; the TSA certificate chain is checked now unless the caller names an
+instant or asks for the token's genTime, and the result says which); DSSE v1.0.2 and in-toto Statement v1
+(`interop.dsse`); sigstore bundle, protobuf-specs v0.5.2 (`interop.sigstore`: signature, artifact and RFC 3161
+tokens only — not the Fulcio chain, the identity or Rekor); RFC 4998 / eIDAS LTA renewal *semantics*
 (`preservation`: long-term evidence records renewed across hash and timestamp aging, verifiable
 offline, tested — not the RFC 4998 ASN.1 wire format); Ed25519 with an optional post-quantum
 co-signature — since 0.7.0 **ML-DSA-65 (FIPS 204)** built in through `cryptography` ≥ 48, SLH-DSA (FIPS 205)
@@ -391,6 +425,75 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 `drop_pq=True`. Without `cryptography` ≥ 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0; the backend is
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
+
+### 0.12.0 — attestations and timestamps made by others: ECDSA P-256 in DSSE, sigstore bundles, RFC 3161 tokens without their certificate (18 November 2026)
+
+Measured on 18 November 2026 on real material of 24 public GitHub repositories (the latest release of each): 24 GitHub
+artifact attestations — sigstore bundles v0.3 with a DSSE envelope signed in ECDSA P-256, 16 release attestations and 8
+SLSA v1 provenances — and 1 message-signature bundle, carrying 17 RFC 3161 tokens (16 of GitHub's TSA, 1 of Sigstore's).
+`tests/fixtures/real_github_20261118.json` names each one (repository, tag, digest, API path); the bundles are downloaded
+when the test runs and are not in this repository. Before = the 0.11.4 wheel from PyPI, after = this tree, same files,
+`tools/real_github_check.py measure`:
+
+| | 0.11.4 | 0.12.0 |
+|---|---|---|
+| DSSE envelope verified with the key of the bundle's certificate | 0 / 24 (`verified: False`, `error: None`) | 24 / 24 |
+| the same envelope with one character of the payload changed | `verified: False`, `error: None` — the answer given to the valid one | refused 24 / 24, each with `error` |
+| RFC 3161 token verified against the TSA roots | 0 / 17, no reason | 17 / 17 at the token's genTime; 16 / 17 now (the 17th: `certificate has expired`, GitHub TSA certificate ended 13 November 2026) |
+| the same tokens against another digest | 0 / 17 | 0 / 17 |
+| bundle read and checked (`interop.sigstore.verify_bundle`) | no such function | 25 / 25; altered copy refused 25 / 25; another artifact digest refused 25 / 25 |
+
+- **`interop.dsse.from_dsse` verifies ECDSA P-256 with SHA-256**, besides Ed25519, with the key the caller gives:
+  `public_key=` (PEM or DER, a SubjectPublicKeyInfo or an X.509 certificate) or `public_key_b64=` (raw Ed25519 as
+  before, or base64 DER). The signature is read as ASN.1 DER, strictly (re-encoded byte for byte), which is what
+  sigstore and GitHub write (24 of 24), or as the raw concatenation r||s when it is exactly 64 bytes, which is the
+  encoding of the ECDSA test vector in DSSE v1.0.2 protocol.md (that vector is a test here). **Every answer that is
+  not `verified: True` now carries `error`**: no key, a key that is not Ed25519 or P-256 (RSA, P-384, …), a key that
+  needs `cryptography` where it is absent, a signature that does not verify. A certificate is used for its key only:
+  `key_source` says so. Fields DSSE does not define are ignored as envelope.md says ("Consumers MUST ignore
+  unrecognized fields") and named in `unrecognized_fields`.
+- **`timestamp.verify(..., untrusted=, at_gen_time=)`**. `untrusted` is a PEM file of certificates that are not
+  anchors (`openssl ts -verify -untrusted`): the tokens of GitHub's and Sigstore's TSA do not carry the TSA
+  certificate, so without it no verifier can check them. `at_gen_time=True` checks the chain at the genTime the token
+  states (`-attime`), the rule of the Sigstore Client Spec §4.2.1 for these tokens (the TSA chain is verified "using
+  the signed timestamp as the 'current time'"; sigstore/architecture-docs, client-spec.md, read 18 November 2026);
+  the default stays **now**, and `at_time=` an
+  instant of the caller (RFC 4998 §5.3). The result names the rule and the instant (`validation_time`: `now`,
+  `at_time` or `gen_time`; `validated_at`) and, for a refused token, `reason` — among them "the token carries no TSA
+  signer certificate and no certificate given as untrusted is it", "certificate has expired", "message imprint differs
+  from the expected digest". Revocation is not checked at any instant: at genTime, a TSA key compromised after the
+  fact could still date a token inside its certificate's validity; that is the price of the rule and the reason it is
+  not the default.
+- **`interop.sigstore.verify_bundle`** (new) reads a sigstore bundle — protobuf-specs v0.5.2, media types
+  `application/vnd.dev.sigstore.bundle.v0.3+json` and `…bundle+json;version=0.1|0.2|0.3` — and checks offline: the
+  signature (DSSE, exactly one as the proto requires, or a message signature) with the key of the leaf certificate;
+  the artifact or its SHA-256, when given, against the statement's subjects or the signed digest; each RFC 3161 token
+  over the SHA-256 of the signature; and that a verified token's genTime falls inside the leaf certificate's validity.
+  **It does not verify** the certificate's chain to Fulcio or to GitHub's CA, the identity in the certificate (SAN,
+  issuer, workflow), the Rekor entries (they are read and returned with `verified: None`) or revocation, and for a
+  bundle with no RFC 3161 token (8 of the 25) the time of signing: `not_verified` lists these in every result. So
+  `verified: True` is "signed with the key in this bundle, over this artifact, at this time", not "sigstore verified":
+  a bundle with a self-made certificate passes. The reader is closed: a field the proto does not define, a field given
+  under both its names, two members of a oneof, a media type outside the four, a cosign bundle of the older format
+  (`base64Signature`), and in a bundle given as text a member named twice, are each an `error`. Versions 0.1 and 0.2
+  are exercised by the tests with bundles built there; all 25 real ones are 0.3.
+- **The sentence "verifiable by the wider supply-chain ecosystem (cosign, slsa-verifier, in-toto)"** in the docstring of
+  `interop.dsse` is about envelopes written here, and what was measured is this: an envelope written by `to_dsse` is
+  verified by securesystemslib 1.6.0, the in-toto project's DSSE implementation, and refused when altered. It was not
+  run through cosign or slsa-verifier. The docstring now says each direction.
+- **SD-JWT: a `...` key that conveys no digest, and an `_sd_alg` below the top level, are named in the result**
+  (`reserved_names_in_clear`). RFC 9901 §4.1 item 7 says the payload "MUST NOT contain the claims _sd or ... except
+  for the purpose of conveying digests" and §4.1.1 that `_sd_alg` "MUST NOT be used in any object nested within the
+  payload": both bind the issuer. The verifier's steps (§7.1, step 3.b) define an embedded digest and name no
+  rejection for the rest, so such a credential still verifies, as before; until 0.11.4 nothing in the result said the
+  names were there.
+- **The Quick start ran into `AssertionError`** as written (`this pack is not anchored`): the line
+  `pack.anchor_pack("pack.json", "pack.ledger.jsonl")` was missing. A test now executes the block from this file.
+- Tests: `tests/test_uso_reale_20261118.py` (25 tests: keys in every form, raw and DER signatures, the DSSE vector,
+  generated mutations of envelopes and bundles — none may be refused without `error` —, a local TSA whose tokens carry
+  no certificate, an expired TSA certificate at genTime and now, a bundle given as text); the 25 fail on the tree
+  before these changes. `tests/test_real_github_20261118.py` downloads the real sample (opt-in:
+  `OMEGA_EVIDENCE_REAL_GITHUB=1`, `gh`, network).
 
 ### 0.12.0 — SD-JWT VC in ES256 with its `typ`; an RFC 3161 signer named by key identifier; current citations (17 November 2026)
 
@@ -1121,6 +1224,8 @@ python3 tests/test_tsa_signer_key_id_20261117.py    # RFC 3161: a signer named b
 python3 tests/test_sdjwt_es256_typ_20261117.py      # SD-JWT VC: ES256 bound to P-256 and typ dc+sd-jwt (needs cryptography)
 python3 tests/test_sdjwt_kb_20261117.py             # SD-JWT+KB: Key Binding JWT, RFC 9901 §7.3 (needs cryptography)
 python3 tests/test_nist_acvp_vectors_20261117.py    # ML-DSA-65 vectors: every NIST case against NIST's verdict, closed reader
+python3 tests/test_uso_reale_20261118.py           # DSSE in ECDSA P-256, RFC 3161 tokens without certificate, sigstore bundles, the Quick start
+OMEGA_EVIDENCE_REAL_GITHUB=1 python3 tests/test_real_github_20261118.py   # the same on 25 real bundles from GitHub (network, gh)
 python3 tests/fuzz_toolkit.py --iterations 3000     # seeded mutation fuzz of the verifier and the ledger (exit 1 on a violation)
 python3 tests/fuzz_toolkit.py --ablate signature    # positive control: the sabotaged verifier must make the fuzzer red (6 ablations)
 python3 tests/bench_toolkit.py --json bench.json    # latencies, throughput, memory, the 1 000 000-entry run (see below)

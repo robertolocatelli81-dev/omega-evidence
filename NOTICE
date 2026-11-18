@@ -37,6 +37,17 @@ Third-party material included in this repository:
   NIST-developed software is expressly provided "AS IS." NIST MAKES NO WARRANTY OF ANY KIND, EXPRESS, IMPLIED, IN FACT, OR ARISING BY OPERATION OF LAW, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND DATA ACCURACY. NIST NEITHER REPRESENTS NOR WARRANTS THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, OR THAT ANY DEFECTS WILL BE CORRECTED. NIST DOES NOT WARRANT OR MAKE ANY REPRESENTATIONS REGARDING THE USE OF THE SOFTWARE OR THE RESULTS THEREOF, INCLUDING BUT NOT LIMITED TO THE CORRECTNESS, ACCURACY, RELIABILITY, OR USEFULNESS OF THE SOFTWARE.
 
   You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
+- tests/test_uso_reale_20261118.py: the ECDSA P-256 test vector of the DSSE specification
+  (https://github.com/secure-systems-lab/dsse, protocol.md at tag v1.0.2, section "Test
+  Vectors": public key coordinates, payload, payload type and signature), Apache-2.0,
+  copied on 18 November 2026. omega_evidence/interop/sigstore.py reads the field names
+  of the sigstore bundle as defined in https://github.com/sigstore/protobuf-specs
+  (protos/sigstore_bundle.proto, sigstore_common.proto, sigstore_rekor.proto at tag
+  v0.5.2, Apache-2.0); no file of that project is included.
+- tests/fixtures/real_github_20261118.json: names, tags, digests and URLs of release
+  assets and attestations of 24 public GitHub repositories, read from the GitHub API on
+  18 November 2026. No attestation, token or artifact of those projects is included:
+  the opt-in test downloads them when it runs.
 - tests: test vectors and examples copied from IETF RFCs (Copyright (c) IETF Trust and
   the persons identified as the document authors; BCP 78 and the IETF Trust's Legal
   Provisions): RFC 8032 §7.1 (Ed25519), RFC 7517 Appendix A.1 (an EC public key),

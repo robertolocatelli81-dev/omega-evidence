@@ -23,14 +23,15 @@ by one, as cryptovalid-opencore does in its SPEC §11 step 7 (same author; porte
   (0) the reply, read strictly as DER: status granted (0) or grantedWithMods (1), one token, eContentType id-ct-TSTInfo,
       the messageImprint's hash algorithm in a closed list with its digest length;
   (1) `openssl cms -verify -noverify`: the CMS signature and the messageDigest attribute, with the certificate the
-      SignerInfo names, looked up among the token's certificates (as `ts -verify` here, which is given no -untrusted);
+      SignerInfo names, looked up among the token's certificates and the caller's `untrusted` ones (0.12.0);
   (2) the ESS signingCertificate (RFC 2634 §5.4) or signingCertificateV2 (RFC 5035) attribute: each one present checked,
       at least one present, exactly one ESSCertID whose certHash is the hash of the signer certificate and whose
       issuerSerial, when present, names its issuer and serial number;
   (3) the TSTInfo `tsa` field, when present: the signer's subject or one of its subjectAltName;
   (4) `openssl verify -purpose timestampsign -CAfile <ca_file> -no-CApath -no-CAstore -untrusted <token certificates>`
       on the signer certificate: extended key usage timeStamping (present, critical, the only one), the chain to the
-      caller's trust anchors and the validity now, as `openssl ts -verify -CAfile` builds it in `timestamp.verify`.
+      caller's trust anchors and the validity now or at the caller's instant (`-attime`, 0.12.0), as `openssl ts
+      -verify -CAfile` builds it in `timestamp.verify`.
 
 Names (the tsa field, the ESS issuerSerial) are compared as OpenSSL's X509_NAME_cmp compares them: each string value in
 UTF-8, white space trimmed and folded, ASCII letters lowercased; RDNs in order, the attributes of an RDN in any order.
@@ -313,14 +314,19 @@ def _first_pem_der(pem: bytes) -> Optional[bytes]:
 
 
 def signer(exe: str, facts: Dict, tmp: str, timeout: int, run: Callable,
-           write: Callable[[str, bytes], None]) -> Optional[bytes]:
+           write: Callable[[str, bytes], None], untrusted_pem: bytes = b"") -> Optional[bytes]:
     """step (1): the signer certificate's DER when `openssl cms -verify -noverify` accepts the token's signature, else
     None. `run` is the caller's subprocess.run for openssl (it raises when openssl cannot be run here); `write` writes
-    a temporary file."""
+    a temporary file. `untrusted_pem` (0.12.0): more certificates among which the signer is looked up (`-certfile`)."""
     tp, sp = os.path.join(tmp, "ski_token.der"), os.path.join(tmp, "ski_signer.pem")
     write(tp, facts["token_der"])
+    extra = []
+    if untrusted_pem:
+        cf = os.path.join(tmp, "ski_certfile.pem")
+        write(cf, untrusted_pem)
+        extra = ["-certfile", cf]
     p = run([exe, "cms", "-verify", "-noverify", "-binary", "-inform", "DER", "-in", tp, "-signer", sp,
-             "-out", os.devnull], capture_output=True, timeout=timeout)
+             "-out", os.devnull] + extra, capture_output=True, timeout=timeout)
     if p.returncode == 0 and os.path.exists(sp):
         with open(sp, "rb") as f:
             return _first_pem_der(f.read())
@@ -328,7 +334,7 @@ def signer(exe: str, facts: Dict, tmp: str, timeout: int, run: Callable,
 
 
 def anchor(exe: str, facts: Dict, signer_der: bytes, ca_file: str, tmp: str, timeout: int, run: Callable,
-           write: Callable[[str, bytes], None]) -> Optional[str]:
+           write: Callable[[str, bytes], None], untrusted_pem: bytes = b"", at_time: Optional[int] = None) -> Optional[str]:
     """steps (2)-(4) for the signer certificate of step (1): None when the token is established under `ca_file`, else
     why not."""
     why = _attributes_and_tsa(facts, signer_der)
@@ -336,9 +342,10 @@ def anchor(exe: str, facts: Dict, signer_der: bytes, ca_file: str, tmp: str, tim
         return why
     sp, up = os.path.join(tmp, "ski_signer2.pem"), os.path.join(tmp, "ski_untrusted.pem")
     write(sp, _pem(signer_der))
-    write(up, b"".join(_pem(c) for c in facts["certificates"]))
+    write(up, b"".join(_pem(c) for c in facts["certificates"]) + untrusted_pem)
+    when = [] if at_time is None else ["-attime", str(at_time)]
     p = run([exe, "verify", "-purpose", "timestampsign", "-CAfile", ca_file, "-no-CApath", "-no-CAstore",
-             "-untrusted", up, sp], capture_output=True, timeout=timeout)
+             "-untrusted", up] + when + [sp], capture_output=True, timeout=timeout)
     if p.returncode != 0:
         lines = [ln for ln in (p.stderr or b"").decode("utf-8", "replace").splitlines() if ln.strip()]
         return lines[-1].strip()[:160] if lines else "openssl verify refused the signer certificate"
@@ -346,10 +353,17 @@ def anchor(exe: str, facts: Dict, signer_der: bytes, ca_file: str, tmp: str, tim
 
 
 def check(exe: str, facts: Dict, ca_file: str, tmp: str, timeout: int, run: Callable,
-          write: Callable[[str, bytes], None]) -> Dict:
-    """steps (1)-(4) on the facts of read_reply(): {"signature_ok", "anchor_ok", "why"}"""
-    signer_der = signer(exe, facts, tmp, timeout, run, write)
+          write: Callable[[str, bytes], None], untrusted_pem: bytes = b"", at_time: Optional[int] = None) -> Dict:
+    """steps (1)-(4) on the facts of read_reply(): {"signature_ok", "anchor_ok", "why"}. `untrusted_pem` (0.12.0): the
+    caller's certificates that are not trust anchors, searched for the signer and used to build the chain; `at_time`:
+    the instant of step (4) (`openssl verify -attime`), now when None."""
+    if not facts["certificates"] and not untrusted_pem:
+        return {"signature_ok": False, "anchor_ok": False,
+                "why": "the token carries no TSA signer certificate and no certificate was given as untrusted: pass the "
+                       "TSA's certificates with untrusted= (as openssl ts -verify -untrusted)"}
+    signer_der = signer(exe, facts, tmp, timeout, run, write, untrusted_pem)
     if signer_der is None:
-        return {"signature_ok": False, "anchor_ok": False, "why": "openssl cms -verify refused the token's signature"}
-    why = anchor(exe, facts, signer_der, ca_file, tmp, timeout, run, write)
+        return {"signature_ok": False, "anchor_ok": False,
+                "why": "openssl cms -verify refused the token's signature, or no certificate given is its signer"}
+    why = anchor(exe, facts, signer_der, ca_file, tmp, timeout, run, write, untrusted_pem, at_time)
     return {"signature_ok": True, "anchor_ok": why is None, "why": why}

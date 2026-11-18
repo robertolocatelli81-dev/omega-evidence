@@ -280,8 +280,32 @@ def _fetch_crls(urls, timeout: int):
     return out
 
 
+_NO_SIGNER = ("the token carries no TSA signer certificate and no certificate given as untrusted is it: pass the TSA's "
+              "certificates with untrusted= (as openssl ts -verify -untrusted)")
+_POLICIES = {"now": "now", "at_time": "the caller's at_time",
+             "gen_time": "the token's own genTime (Sigstore Client Spec 4.2.1: the TSA chain is verified with the signed "
+                         "timestamp as the current time; revocation is not checked, so a TSA key compromised later "
+                         "could date a token inside its certificate's validity)"}
+
+
+def _iso(t: int) -> str:
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _gen_time_of_der(tst) -> Optional[int]:
+    """genTime of a TSTInfo read by _tsa_keyid (a GeneralizedTime YYYYMMDDHHMMSS[.f]Z, RFC 3161 section 2.4.2)"""
+    try:
+        m = re.fullmatch(rb"(\d{4})(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)(?:\.\d*[1-9])?Z", tst[4][1])
+        if not m:
+            return None
+        return calendar.timegm(datetime.datetime(*(int(x) for x in m.groups())).timetuple())
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
 def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
-           ca_file: Optional[str] = None, at_time: Optional[int] = None) -> Dict:
+           ca_file: Optional[str] = None, at_time: Optional[int] = None, untrusted: Optional[str] = None,
+           at_gen_time: bool = False) -> Dict:
     """CRYPTOGRAPHICALLY verify an RFC 3161 token against a TRUST ANCHOR.
 
     `ca_file` = PEM of the TSA's trusted root/chain. A token whose SignerInfo names its signer by subjectKeyIdentifier
@@ -294,13 +318,29 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
     openssl absent → {verified: None}. openssl present but not started here, no answer within `timeout`, or no
     temporary file → CheckNotRun is raised (0.11.4): neither verified nor a failed check.
 
+    `untrusted` (0.12.0) = PEM file of certificates that are NOT trust anchors but may build the chain or be the signer
+    (`openssl ts -verify -untrusted`): a token that does not carry its TSA certificate — the RFC 3161 tokens of sigstore
+    bundles, GitHub's and Sigstore's TSA, measured 18/11/2026 — cannot be verified without it. Such a token checked
+    without the certificate is `verified: False` with that `reason`, never a bare False.
+
     `at_time` (whole seconds since the epoch) checks the TSA certificate chain at that instant (`openssl ts -verify
     -attime`) instead of now: RFC 4998 section 5.3 step 2, "Each Archive Timestamp MUST be valid relative to the time
     of the following Archive Timestamp"; only the last one is checked at the time of verification. Anything but a
-    int from 0 to 253402300799 (9999-12-31T23:59:59Z) is refused with ValueError. The result names the instant (`validated_at`) and, when openssl
-    refuses the token, its reason (`reason`, the last informative field of its last error line). Revocation is not checked at either instant."""
+    int from 0 to 253402300799 (9999-12-31T23:59:59Z) is refused with ValueError. `at_gen_time=True` (0.12.0) checks it
+    at the genTime the token itself claims (Sigstore Client Spec 4.2.1, for its TSA timestamps); a token whose genTime
+    cannot be read is `verified: False` with its reason. Both together is ValueError. The result names the instant
+    (`validated_at`) and the rule (`validation_time`: "now", "at_time" or "gen_time") and, when the token is refused,
+    its reason (`reason`; for openssl, the last informative field of its last error line). Revocation is not checked at
+    any instant."""
     if at_time is not None and (isinstance(at_time, bool) or not isinstance(at_time, int) or not 0 <= at_time <= 253402300799):
         raise ValueError("at_time must be an int of seconds since the epoch, 0 to 9999-12-31T23:59:59Z, not %r" % (at_time,))
+    if not isinstance(at_gen_time, bool):
+        raise ValueError("at_gen_time must be True or False, not %r" % (at_gen_time,))
+    if at_gen_time and at_time is not None:
+        raise ValueError("at_time and at_gen_time=True name two instants: give one")
+    if untrusted is not None and (not isinstance(untrusted, str) or not untrusted):
+        raise ValueError("untrusted must be the path of a PEM file, not %r" % (untrusted,))
+    policy = "gen_time" if at_gen_time else ("now" if at_time is None else "at_time")
     exe = shutil.which("openssl")
     # what the caller holds: a token string, or none at all (absent, empty or not a string) — never claimed otherwise
     tok = "token recorded" if isinstance(tsr_b64, str) and tsr_b64 else "no token recorded (tsr_b64 missing, empty or not a string)"
@@ -310,7 +350,18 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
         return {"verified": None, "note": f"no TSA trust anchor (ca_file) — {tok}, not decoded or "
                                           "verified; supply the TSA roots to verify"}
     if not os.path.exists(ca_file):
-        return {"verified": False, "note": f"ca_file not found: {ca_file}"}
+        return {"verified": False, "note": f"ca_file not found: {ca_file}", "reason": "ca_file not found"}
+    untrusted_pem = b""
+    if untrusted is not None:
+        try:
+            with open(untrusted, "rb") as f:
+                untrusted_pem = f.read()
+        except OSError as e:
+            return {"verified": False, "note": f"untrusted not readable: {untrusted}",
+                    "reason": f"untrusted file not readable: {type(e).__name__}"}
+        if b"-----BEGIN CERTIFICATE-----" not in untrusted_pem:
+            return {"verified": False, "note": f"untrusted holds no PEM certificate: {untrusted}",
+                    "reason": "untrusted file holds no PEM certificate"}
     try:
         d = tempfile.mkdtemp()   # gettempdir() probes each candidate by writing a file there
     except OSError as e:
@@ -318,39 +369,55 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
     try:
         tsr = os.path.join(d, "t.tsr")
         raw = base64.b64decode(tsr_b64)   # a token that is not base64 is the input's fault: verified False, as before
-        try:
-            with open(tsr, "wb") as f:
-                f.write(raw)
-        except OSError as e:
-            raise _not_run("cannot write a temporary file for openssl", e) from e
+
+        def _write(path, data):
+            try:
+                with open(path, "wb") as fw:
+                    fw.write(data)
+            except OSError as e:
+                raise _not_run("cannot write a temporary file for openssl", e) from e
+        _write(tsr, raw)
         facts = _tsa_keyid.read_reply(raw)
+        when = at_time
+        if at_gen_time:
+            when = _gen_time_of_der(facts["tst_info"]) if facts is not None else gen_time_of(tsr_b64, timeout)
+            if when is None or not 0 <= when <= 253402300799:
+                return {"verified": False, "crypto_verified": False, "validation_time": policy,
+                        "reason": "at_gen_time: the token's genTime could not be read"}
+        stamp_out = {"validation_time": policy, "validated_at": "now" if when is None else _iso(when)}
+        if at_gen_time:
+            stamp_out["validation_time_rule"] = _POLICIES["gen_time"]
         if facts is not None:   # 0.12.0: a signer named by subjectKeyIdentifier, which openssl ts cannot read
-            def _write(path, data):
-                try:
-                    with open(path, "wb") as fw:
-                        fw.write(data)
-                except OSError as e:
-                    raise _not_run("cannot write a temporary file for openssl", e) from e
-            k = _tsa_keyid.check(exe, facts, ca_file, d, timeout, _run_openssl, _write)
+            k = _tsa_keyid.check(exe, facts, ca_file, d, timeout, _run_openssl, _write,
+                                 untrusted_pem=untrusted_pem, at_time=when)
             imprint_ok = facts["imprint_hex"] == expected_digest_hex.lower()
             crypto_ok = k["signature_ok"] and k["anchor_ok"]
             out = {"verified": bool(crypto_ok and facts["granted"] and imprint_ok), "crypto_verified": crypto_ok,
                    "granted": facts["granted"], "imprint_ok": imprint_ok, "signer_named_by": "subjectKeyIdentifier"}
+            out.update(stamp_out)
             if k["why"]:
                 out["note"] = k["why"]
+                out["reason"] = k["why"]
+            elif not facts["granted"]:
+                out["reason"] = "the TSA did not grant the request"
+            elif not imprint_ok:
+                out["reason"] = "message imprint differs from the expected digest"
             return out
         cmd = [exe, "ts", "-verify", "-in", tsr, "-digest", expected_digest_hex.lower(), "-CAfile", ca_file]
-        if at_time is not None:
-            cmd += ["-attime", str(at_time)]
+        if untrusted is not None:
+            up = os.path.join(d, "untrusted.pem")
+            _write(up, untrusted_pem)
+            cmd += ["-untrusted", up]
+        if when is not None:
+            cmd += ["-attime", str(when)]
         vr = _run_openssl(cmd, capture_output=True, text=True, timeout=timeout)
         vtext = (vr.stdout or "") + (vr.stderr or "")
         crypto_ok = vr.returncode == 0 and "Verification: OK" in vtext
         granted, imprint_hex = _reply_facts(exe, tsr, timeout, run=_run_openssl)
         imprint_ok = imprint_hex == expected_digest_hex.lower()
         out = {"verified": bool(crypto_ok and granted and imprint_ok),
-               "crypto_verified": crypto_ok, "granted": granted, "imprint_ok": imprint_ok,
-               "validated_at": "now" if at_time is None else
-               datetime.datetime.fromtimestamp(at_time, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+               "crypto_verified": crypto_ok, "granted": granted, "imprint_ok": imprint_ok}
+        out.update(stamp_out)
         if not crypto_ok:
             errs = [ln.strip() for ln in vtext.splitlines() if "error" in ln.lower()]
             # the last field of the last error line that is not empty, a source file or a line number: an OpenSSL 3
@@ -358,10 +425,17 @@ def verify(tsr_b64: str, expected_digest_hex: str, timeout: int = 15,
             fields = [x.strip() for x in (errs[-1].split(":") if errs else [])]
             fields = [x for x in fields if x and not x.isdigit() and not x.endswith(".c")]
             out["reason"] = (fields[-1] if fields else "openssl ts -verify did not print OK")[:160]
+            if "signer certificate not found" in vtext:
+                out["reason"] = _NO_SIGNER
+        elif not granted:
+            out["reason"] = "the TSA did not grant the request"
+        elif not imprint_ok:
+            out["reason"] = "message imprint differs from the expected digest"
         return out
     except CheckNotRun:
         raise
     except Exception as e:  # noqa: BLE001
-        return {"verified": False, "note": f"{type(e).__name__}: {str(e)[:80]}"}
+        return {"verified": False, "note": f"{type(e).__name__}: {str(e)[:80]}",
+                "reason": f"token not read: {type(e).__name__}"}
     finally:
         shutil.rmtree(d, ignore_errors=True)

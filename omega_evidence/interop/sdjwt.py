@@ -290,7 +290,9 @@ def verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float] = None,
     `expected_nonce` (with require_key_binding=True both are required arguments, ValueError otherwise; when Key Binding
     is required by `cnf` and they were not given, the presentation is rejected with that reason), `sd_hash` is the sha-256 of the SD-JWT part as
     presented (§4.3.1), `exp`/`nbf` hold when present (step 5.h). Not required and a KB-JWT given → rejected (declared:
-    a KB-JWT is never accepted unchecked). The result carries `key_binding`: "verified" or "not_required".
+    a KB-JWT is never accepted unchecked). The result carries `key_binding`: "verified" or "not_required", and
+    `reserved_names_in_clear` ({name: count}; 0.12.0) when the payload holds a `...` key that conveys no digest or an
+    `_sd_alg` below the top level — RFC 9901 §4.1 item 7 and §4.1.1 forbid them to the issuer, §7.1 names no rejection.
     Left to the caller or not implemented: that the key belongs to the Issuer (step 2.c), which is the caller's choice
     of `issuer_public_key_b64` (HAIP 1.0 §6.1.1 resolves it from the x5c chain, not implemented here); `aud` and which
     validity claims of the credential are required (step 6, §9.7); the SD-JWT VC claims `vct` and `status`. Stricter than §7.1, and declared: the same Disclosure presented twice
@@ -405,12 +407,22 @@ def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expect
             raise _Reject("Disclosure salt is not a string (§4.2.1)")
         return content
 
+    reserved: list = []
+
     def _process(node: Any) -> Any:
         if isinstance(node, dict):
             if "_sd" in node and not (isinstance(node["_sd"], list) and all(isinstance(x, str) for x in node["_sd"])):
                 raise _Reject("_sd is not an array of strings")
             out = {}
             for k, v in node.items():      # a loop, not a comprehension: on Python < 3.12 a comprehension is a call of its
+                # RFC 9901 §4.1 item 7 forbids the ISSUER a `...` claim that conveys no digest, and §4.1.1 a nested
+                # `_sd_alg`; the VERIFIER's steps (§7.1 step 3.b) only define what an embedded digest is — an `_sd`
+                # array of strings, or an array element that is an object with the one key `...` referring to a string
+                # — and name no rejection for another `...` key or a nested `_sd_alg`: they stay in the processed
+                # payload as the steps leave them (step 3.f removes the top-level `_sd_alg` only). Kept so, and since
+                # 0.12.0 named in the result (`reserved_names_in_clear`) instead of passing unremarked.
+                if k == "..." or (k == "_sd_alg" and node is not body):
+                    reserved.append(k)
                 if k != "_sd":             # own, two frames per level, and 498 object levels (inside the 512 bound) raised
                     out[k] = _process(v)   # RecursionError on 3.9/3.11 while 3.13/3.14 verified them (0.11.1 review)
             for dg in node.get("_sd", []):
@@ -471,9 +483,12 @@ def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expect
     top_sd = body.get("_sd", [])
     disclosed = {k: v for k, v in processed.items() if k not in body}
     plain = {k: v for k, v in body.items() if k not in ("_sd", "_sd_alg")}
-    return {"verified": True, "header": header, "plain_claims": plain, "disclosed_claims": disclosed,
-            "undisclosed_digests": sorted(set(top_sd) - used), "processed_payload": processed,
-            "key_binding": "verified" if required else "not_required"}
+    out = {"verified": True, "header": header, "plain_claims": plain, "disclosed_claims": disclosed,
+           "undisclosed_digests": sorted(set(top_sd) - used), "processed_payload": processed,
+           "key_binding": "verified" if required else "not_required"}
+    if reserved:   # only when there is one: the result of every other SD-JWT is what it was
+        out["reserved_names_in_clear"] = {k: reserved.count(k) for k in sorted(set(reserved))}
+    return out
 
 
 def _check_kb(kb_jwt: str, processed: Dict[str, Any], sd_part: str, t: float, kbp: Dict[str, Any]) -> None:
