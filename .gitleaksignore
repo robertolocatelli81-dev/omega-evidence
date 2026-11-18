@@ -5,3 +5,7 @@
 verifiers/differential_oracle.py:generic-api-key:280
 # the same public point, same line moved to 282 by the 0.11.x oracle cases (directory scan, no commit; reviewed 12/10/2026)
 verifiers/differential_oracle.py:generic-api-key:282
+# gitleaks false positive, reviewed 19/11/2026: the SHA-256 of the PUBLIC release-signing key (SIGNING.md §1, also in
+# every -trust.json asset) — a fingerprint of a public key, not a secret.
+dd21566c0455e9cd4fdafef6d9f3a9d19dbbf0f7:SIGNING.md:generic-api-key:13
+SIGNING.md:generic-api-key:13
