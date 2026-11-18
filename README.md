@@ -18,7 +18,7 @@ but do not derive from, this toolkit.
 
 ```bash
 # from PyPI (since 0.11.4, uploaded from the GitHub Release by Trusted Publishing, PEP 740 attestations)
-pip install omega-evidence
+pip install omega-evidence==0.12.0
 
 # or straight from the tagged source
 pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.12.0
@@ -426,6 +426,8 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 `drop_pq=True`. Without `cryptography` ≥ 48 (ML-DSA on the OpenSSL 3.5 wheels since 48.0.0; the backend is
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
+
+0.12.0 was released on 19 November 2026; its changes are the three 0.12.0 sections below (18, 17 and 14 November).
 
 ### 0.12.0 — attestations and timestamps made by others: ECDSA P-256 in DSSE, sigstore bundles, RFC 3161 tokens without their certificate (18 November 2026)
 
