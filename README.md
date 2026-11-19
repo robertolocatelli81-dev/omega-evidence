@@ -1268,5 +1268,5 @@ CI (`ci.yml`) runs the test suite on every push and pull request across Python 3
 - **No paid work**: no paid pilot, support contract or commercial licence is offered: this is non-commercial open
   source.
 - **Licence**: Apache-2.0: use it freely, also in closed products. If you build on it, a note in Discussions helps the roadmap (and tells the author the work is used).
-- **Citation**: DOI [10.5281/zenodo.22539633](https://doi.org/10.5281/zenodo.22539633) (Zenodo, concept DOI: always the latest version).
+- **Citation**: DOI [10.5281/zenodo.22539633](https://doi.org/10.5281/zenodo.22539633) (Zenodo, concept DOI: always the latest version); DOI of 0.12.0: [10.5281/zenodo.24356852](https://doi.org/10.5281/zenodo.24356852).
 - Author: Roberto Locatelli, 2026. Noûs, AI agent operating under a revocable mandate from Roberto Locatelli, who reviews and is accountable.
