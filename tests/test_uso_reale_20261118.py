@@ -139,7 +139,7 @@ class TestDsseEcdsa(unittest.TestCase):
             self.assertIn("does not verify", r["error"])
 
     def test_no_key_is_an_error_not_a_bare_false(self):
-        r = dsse.from_dsse(self.env)
+        r = dsse.from_dsse(self.env, allow_embedded_key=True)
         self.assertIs(r["verified"], False)
         self.assertIn("no verification key", r["error"])
 
@@ -208,11 +208,11 @@ class TestDsseEcdsa(unittest.TestCase):
 
     def test_ed25519_unchanged(self):
         ident = Identity("t", seed=bytes(range(32)))
-        env = dsse.to_dsse({"pack_sha3": "00" * 32}, ident)
-        r = dsse.from_dsse(env)
+        env = dsse.to_dsse({"kind": "x", "n": 1}, ident)
+        r = dsse.from_dsse(env, allow_embedded_key=True)
         self.assertIs(r["verified"], True)
         self.assertIn("envelope publicKeyB64", r["key_source"])
-        self.assertIs(dsse.from_dsse(_tamper(env))["verified"], False)
+        self.assertIs(dsse.from_dsse(_tamper(env), allow_embedded_key=True)["verified"], False)
         spki = ed25519.Ed25519PublicKey.from_public_bytes(base64.b64decode(ident.public_key_b64)).public_bytes(
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
         self.assertIs(dsse.from_dsse(env, public_key=spki)["verified"], True)
@@ -221,7 +221,7 @@ class TestDsseEcdsa(unittest.TestCase):
         """a signature that names another key in publicKeyB64 than the one the caller gives is not counted, even when
         it verifies with the caller's key (so since before 0.12.0; no test held the line)"""
         ident, other = Identity("t", seed=bytes(range(32))), Identity("o", seed=bytes(range(1, 33)))
-        env = dsse.to_dsse({"pack_sha3": "00" * 32}, ident)
+        env = dsse.to_dsse({"kind": "x", "n": 1}, ident)
         self.assertIs(dsse.from_dsse(env, public_key_b64=ident.public_key_b64)["verified"], True)
         env["signatures"][0]["publicKeyB64"] = other.public_key_b64
         r = dsse.from_dsse(env, public_key_b64=ident.public_key_b64)
@@ -240,7 +240,7 @@ class TestWithoutCryptography(unittest.TestCase):
 
     def test_ed25519_spki_without_cryptography(self):
         ident = Identity("t", seed=bytes(range(32)))
-        env = dsse.to_dsse({"pack_sha3": "00" * 32}, ident)
+        env = dsse.to_dsse({"kind": "x", "n": 1}, ident)
         spki = dsse._ED25519_SPKI_PREFIX + base64.b64decode(ident.public_key_b64)
         with mock.patch.object(dsse, "_crypto", lambda: None):
             self.assertIs(dsse.from_dsse(env, public_key=spki)["verified"], True)

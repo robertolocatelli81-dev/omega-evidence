@@ -45,6 +45,10 @@ NODE = shutil.which("node")
 JS = os.path.join(ROOT, "verifiers", "js", "oeverify.mjs")
 
 
+# a real pack: build_statement recomputes pack_sha3 from the body since Decision 3 (a declared digest over no body is refused)
+_PK = P.build_pack("x", {"amount": "1"}, SCOPE)
+
+
 def _tmp(test):
     d = tempfile.mkdtemp(prefix="oe-banchi-")
     test.addCleanup(shutil.rmtree, d, ignore_errors=True)
@@ -311,7 +315,7 @@ class TestDsseStatement(unittest.TestCase):
         return dsse.from_dsse(self._env(payload), public_key_b64=self.i.public_key_b64)
 
     def test_own_statement_verifies_as_before(self):   # control, passes on 6176841 too
-        pk = {"kind": "x", "pack_sha3": "0" * 64}
+        pk = _PK
         r = dsse.from_dsse(dsse.to_dsse(pk, self.i), public_key_b64=self.i.public_key_b64)
         self.assertIs(r["verified"], True)
         self.assertEqual(r["pack"], pk)
@@ -319,42 +323,48 @@ class TestDsseStatement(unittest.TestCase):
     def test_type_other_than_statement_v1_is_refused(self):
         """fails on 6176841: verified True for every one of these"""
         for t in ("https://in-toto.io/Statement/v0.1", "https://in-toto.io/Statement/v1 ", "x", "", None, 1, ["x"]):
-            st = dsse.build_statement({"kind": "x", "pack_sha3": "0" * 64}); st["_type"] = t
+            st = dsse.build_statement(_PK); st["_type"] = t
             r = self._from(json.dumps(st).encode())
             with self.subTest(t=t):
                 self.assertIs(r["verified"], False)
                 self.assertIn("_type", r["error"])
-        st = dsse.build_statement({"kind": "x", "pack_sha3": "0" * 64}); del st["_type"]
+        st = dsse.build_statement(_PK); del st["_type"]
         self.assertIs(self._from(json.dumps(st).encode())["verified"], False)
 
-    def test_what_the_docstring_says_is_not_read(self):   # holds on 6176841 too: the limit from_dsse states
+    def test_subject_and_predicate_type_are_read(self):
+        """fails on 404b60b (it held the limit then stated): a statement that is only {"_type"}, a subject that is not an
+        array of objects with a digest, a predicateType that is not a non-empty string are refused (Decision 3); an OMEGA
+        predicate that is not an object is not handed back as `pack`"""
         st = {"_type": dsse.STATEMENT_TYPE}
-        r = self._from(json.dumps(st).encode())
+        self.assertIs(self._from(json.dumps(st).encode())["verified"], False)
+        ok = dict(st, subject=[{"name": "a", "digest": {"sha256": "00" * 32}}], predicateType="https://example.org/t")
+        self.assertIs(self._from(json.dumps(ok).encode())["verified"], True)                    # control
+        for more in ({"subject": 7}, {"subject": [{"name": "no digest"}]}, {"subject": [{"digest": {}}]}, {"subject": [7]},
+                     {"predicateType": 7}, {"predicateType": ""}, {"predicateType": None}):
+            self.assertIs(self._from(json.dumps(dict(ok, **more)).encode())["verified"], False, more)
+        r = self._from(json.dumps(dict(ok, predicateType=dsse.PREDICATE_TYPE, predicate=7)).encode())
         self.assertEqual((r["verified"], r["pack"]), (True, None))
-        for more in ({"subject": 7}, {"subject": [{"name": "no digest"}]}, {"predicateType": 7}):
-            self.assertIs(self._from(json.dumps(dict(st, **more)).encode())["verified"], True, more)
-        r = self._from(json.dumps(dict(st, predicateType=dsse.PREDICATE_TYPE, predicate=7)).encode())
-        self.assertEqual((r["verified"], r["pack"]), (True, 7))
 
     def test_pack_only_for_the_omega_predicate_type(self):
         """fails on 6176841: the predicate of an SLSA provenance came back as `pack`"""
         for pt in ("https://slsa.dev/provenance/v1", dsse.PREDICATE_TYPE + "x", None):
-            st = dsse.build_statement({"kind": "x", "pack_sha3": "0" * 64})
+            st = dsse.build_statement(_PK)
             if pt is None:
                 del st["predicateType"]
             else:
                 st["predicateType"] = pt
             r = self._from(json.dumps(st).encode())
             with self.subTest(pt=pt):
-                self.assertIs(r["verified"], True)
+                self.assertIs(r["verified"], pt is not None)   # a missing predicateType is refused (Decision 3)
                 self.assertIsNone(r["pack"])
-                self.assertEqual(r["statement"]["predicate"], {"kind": "x", "pack_sha3": "0" * 64})
+                if pt is not None:
+                    self.assertEqual(r["statement"]["predicate"], _PK)
 
     def test_generated_duplicate_member_names_are_refused_at_every_level(self):
         """fails on 6176841: the last member won and the envelope verified. A member repeated at the top, in the predicate,
         in a subject and in a digest, with the same or another value: refused with the reason."""
         rng = random.Random(3)
-        base = json.dumps(dsse.build_statement({"kind": "x", "pack_sha3": "0" * 64}), separators=(",", ":"))
+        base = json.dumps(dsse.build_statement(_PK), separators=(",", ":"))
         anchors = ['{"_type":', '"predicate":{', '"subject":[{', '"digest":{']
         for n in range(80):
             a = rng.choice(anchors)

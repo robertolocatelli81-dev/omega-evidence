@@ -461,8 +461,8 @@ Each was reproduced on 0.12.0 and on 0.13.0 before it was fixed; `tests/test_ban
   rule `pq_cosign` already applied. The same in `preservation`: `build_evidence_record` and `renew_hash_tree` took the
   declared field of each pack file, and `verify_evidence_record(record, pack_paths=…)` reported `data-objects-bound`
   PASS for a pack file carrying another body under the recorded digest; the three now recompute it (`ValueError`, and
-  `data-objects-bound` FAIL). Not changed: `interop.dsse.build_statement` (`to_dsse`) still writes the `pack_sha3` a
-  dict declares as the subject's `sha3_256`, beside the `sha256` it computes from the dict.
+  `data-objects-bound` FAIL). `interop.dsse.build_statement` (`to_dsse`), which wrote the `pack_sha3` a dict declares
+  as the subject's `sha3_256`, recomputes it too (next section, Decision 3).
 - **The trust store replay took a `trust` line that changes a trusted key.** `trust()` refuses another key for a trusted
   signer, but a line appended to the store with that key replaced it on reload, in the Python registry and in the Go,
   Java and Node verifiers (trusted-signer PASS for the new key); a `trust` line without `pq_pubkey` dropped the pinned
@@ -474,8 +474,8 @@ Each was reproduced on 0.12.0 and on 0.13.0 before it was fixed; `tests/test_ban
   `https://in-toto.io/Statement/v1` (in-toto attestation `docs/validation.md`: "Reject if `statement.type` !=
   `https://in-toto.io/Statement/v1`"), or a member name twice in one object, is now `verified: False` with the reason;
   `pack` is the predicate only when `predicateType` is OMEGA's, else `None` (the statement is returned as before).
-  Not read: the other members the Statement v1 specification requires (`subject`, `predicateType`) and the shape of
-  `predicate` — a payload that is only `{"_type": …}` is `verified: True` with `pack: None`.
+  The other members the Statement v1 specification requires (`subject`, `predicateType`) are read too since the next
+  section (Decision 3).
 - **`preservation.verify_evidence_record` read any `time_source` as `asserted`.** A value other than `rfc3161` or
   `asserted`, or none, was an asserted SKIP and the record `valid: true`; it is now a FAIL (`time[i]-source`). No
   release of this toolkit has written another value.
@@ -507,6 +507,16 @@ Each was measured on 404b60b (the branch before these changes) and reproduced be
   (`tsr-vm-crls-int`, `tsr-vm-crls-list-of-int`); the 5 cases whose token was `"AA=="` (not a DER SEQUENCE: they would
   FAIL on the token) now carry one DER SEQUENCE so that the layer they test still decides; 43 cases are new (17 token
   forms, 26 materials; the 36 FAIL cases also compare the FAIL text, one in the four): 0 disagreements over 257.
+- **`interop.dsse.from_dsse` needs the caller's key; `identity_verified` in every result.** DSSE (secure-systems-lab/dsse
+  `protocol.md`, v1.0.2, read 20/11/2026) verifies against the verifier's acceptable keys, and an envelope's `keyid`
+  "MUST NOT be used for security decisions"; `publicKeyB64`, which `to_dsse` writes, is a key the envelope carries.
+  Measured on 404b60b: `from_dsse(to_dsse(pack, anyone))` with no key was `verified: True`. Now, with no key given, the
+  envelope is `verified: False` with the reason; `allow_embedded_key=True` asks for the old check explicitly (integrity
+  under the carried key); `identity_verified` is true only when a signature verified with the caller's key. Also:
+  `subject` must be an array of objects each carrying a `digest`, `predicateType` a non-empty string (in-toto
+  `spec/v1/statement.md`), `pack` is None for a predicate that is not an object, and `build_statement` recomputes the
+  subject's `sha3_256` from the body (`ValueError` when a declared `pack_sha3` differs). API change: the test calls that
+  relied on the carried key now pass `allow_embedded_key=True`; fixtures with a declared digest over no body are real packs.
 
 0.13.0 was released on 20 November 2026; its changes are the two 0.13.0 sections below (both of 20 November).
 

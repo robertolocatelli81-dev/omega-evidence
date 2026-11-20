@@ -7,6 +7,8 @@
      registry given did not require a signature (no sidecar, or an unknown algorithm: exit 0).
 (D2) The timestamp sidecar: any `tsr_b64` (text, or none) was a SKIP "token recorded", and `validation_material` was
      read as found (`cert_count: "lots"` printed as a count). Now the token's form and a closed material, FAIL.
+(D3) `interop.dsse.from_dsse` verified an envelope with the key the envelope itself carries (`verified: True` for anyone's
+     envelope), read neither `subject` nor `predicateType`, and `build_statement` wrote a declared `pack_sha3` as read.
 """
 import base64
 import hashlib
@@ -282,6 +284,49 @@ class D2TimestampSidecarForm(unittest.TestCase):
             tgt["unexpected"] = 1
             self.assertNotEqual(V._vm_problem(bad), "", path)
         self.assertEqual(n, len(good) * len(others))
+
+
+class D3DsseKeyOfTheCaller(unittest.TestCase):
+    def setUp(self):
+        from omega_evidence.interop import dsse
+        self.dsse = dsse
+        self.ident = Identity("producer")
+        self.pk = P.build_pack("x", {"amount": "10"}, SCOPE)
+        self.env = dsse.to_dsse(self.pk, self.ident)
+
+    def test_no_caller_key_is_not_verified(self):
+        """fails on 404b60b: verified True with the envelope's own publicKeyB64, no key given"""
+        r = self.dsse.from_dsse(self.env)
+        self.assertEqual((r["verified"], r["identity_verified"]), (False, False))
+        self.assertIn("not one the caller trusts", r["error"])
+
+    def test_embedded_key_only_when_asked_and_never_identity(self):
+        r = self.dsse.from_dsse(self.env, allow_embedded_key=True)
+        self.assertEqual((r["verified"], r["identity_verified"], r["pack"]), (True, False, self.pk))
+        self.assertIn("integrity, not identity", r["key_source"])
+        r = self.dsse.from_dsse(self.env, public_key_b64=self.ident.public_key_b64)
+        self.assertEqual((r["verified"], r["identity_verified"]), (True, True))
+        other = Identity("other")
+        r = self.dsse.from_dsse(self.env, public_key_b64=other.public_key_b64)
+        self.assertEqual((r["verified"], r["identity_verified"]), (False, False))
+
+    def test_identity_verified_is_in_every_result(self):
+        for env in (self.env, {}, [], dict(self.env, payloadType="x"), dict(self.env, signatures=[])):
+            for kw in ({}, {"allow_embedded_key": True}, {"public_key_b64": self.ident.public_key_b64}):
+                r = self.dsse.from_dsse(env, **kw)
+                self.assertIn(r["identity_verified"], (True, False))
+                self.assertTrue(r["identity_verified"] is False or (r["verified"] is True and "public_key_b64" in kw))
+
+    def test_build_statement_recomputes_the_digest(self):
+        """fails on 404b60b: a pack_sha3 naming another body was written into the signed subject"""
+        other = P.build_pack("x", {"amount": "999"}, SCOPE)
+        forged = dict(self.pk, pack_sha3=other["pack_sha3"])
+        with self.assertRaises(ValueError):
+            self.dsse.build_statement(forged)
+        with self.assertRaises(ValueError):
+            self.dsse.to_dsse(forged, self.ident)
+        st = self.dsse.build_statement(self.pk)
+        self.assertEqual(st["subject"][0]["digest"]["sha3_256"], self.pk["pack_sha3"])
 
 
 if __name__ == "__main__":

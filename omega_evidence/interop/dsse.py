@@ -99,11 +99,22 @@ def build_statement(pack: Dict[str, Any], subject_name: Optional[str] = None) ->
     pack by BOTH sha256 (of the canonical pack) and its native sha3_256."""
     canon = canonical_json(pack)
     name = subject_name or pack.get("kind", "omega-evidence-pack")
+    # the sha3_256 of the subject is recomputed from the body, as sign_pack does: a declared pack_sha3 that is not the
+    # digest of the body is a ValueError (until 0.13.0 the declared field was written as read, so the signed subject could
+    # name another pack's digest beside the sha256 of this one — measured 20/11/2026). A dict that declares no pack_sha3
+    # keeps the digest of the whole dict, as before.
+    if "pack_sha3" in pack:
+        digest = sha3({k: v for k, v in pack.items() if k != "pack_sha3"})
+        if pack["pack_sha3"] != digest:
+            raise ValueError("build_statement: the declared pack_sha3 is not the digest of the pack body (stale or "
+                             "tampered); nothing was signed")
+    else:
+        digest = sha3(pack)
     return {
         "_type": STATEMENT_TYPE,
         "subject": [{"name": name, "digest": {
             "sha256": sha256_bytes(canon),         # what cosign/slsa-verifier match on
-            "sha3_256": pack.get("pack_sha3") or sha3(pack)}}],
+            "sha3_256": digest}}],
         "predicateType": PREDICATE_TYPE,
         "predicate": pack,
     }
@@ -237,24 +248,30 @@ def _ecdsa_verify(key, sig: bytes, message: bytes) -> bool:
 
 
 def from_dsse(envelope: Dict[str, Any],
-              public_key_b64: Optional[str] = None, public_key=None) -> Dict[str, Any]:
-    """Verify a DSSE envelope and return {verified, error, key_source, payload_type, statement, pack}.
+              public_key_b64: Optional[str] = None, public_key=None,
+              allow_embedded_key: bool = False) -> Dict[str, Any]:
+    """Verify a DSSE envelope and return {verified, identity_verified, error, key_source, payload_type, statement, pack}.
 
     The signature is checked over PAE with the CALLER's key — `public_key` (PEM/DER SPKI or X.509 certificate; 0.12.0)
-    or `public_key_b64` (raw Ed25519 as before, or base64 DER) — Ed25519 or ECDSA P-256/SHA-256. Without a caller key,
-    a signature carrying `publicKeyB64` (as `to_dsse` writes) is checked with that embedded key: integrity, not identity
-    (trust the key through the OMEGA trust registry). `verified` is True only when one signature verifies; every other
+    or `public_key_b64` (raw Ed25519 as before, or base64 DER) — Ed25519 or ECDSA P-256/SHA-256. DSSE (protocol.md,
+    secure-systems-lab/dsse v1.0.2) verifies against the verifier's own acceptable keys, and the `keyid` an envelope
+    carries "MUST NOT be used for security decisions"; the `publicKeyB64` that `to_dsse` writes is a key the envelope
+    carries, so without a caller key the envelope is NOT verified (Unreleased; until 0.13.0 it was verified with that
+    key, `verified: True` for an envelope anyone can make). `allow_embedded_key=True` asks for that check explicitly:
+    integrity under the carried key, never identity. `identity_verified` is in every result: True only when a signature
+    verified with the caller's key. `verified` is True only when one signature verifies; every other
     answer carries `error` with the reason: no key, an unsupported key, a key that needs `cryptography` where it is not
     installed, or no signature that verifies (0.12.0; until 0.11.4 an ECDSA envelope — valid or tampered — gave
     `verified: False` with no error). The `_type` of the payload is Statement v1 or the envelope is refused: a `_type`
     other than `https://in-toto.io/Statement/v1` (in-toto docs/validation.md) or a member name twice in one object is
     `verified: False` with the reason; `pack` is the predicate only when `predicateType` is OMEGA's (PREDICATE_TYPE),
-    else None — `statement` carries the rest (20/11/2026; until 0.13.0 none of the three was read). NOT read: the
-    other members in-toto spec/v1/statement.md requires (`subject`, an array whose elements each carry `digest`;
-    `predicateType`, a string) and the shape of `predicate` — a payload that is only `{"_type": …}` is `verified:
-    True` with `pack: None`, and with OMEGA's predicateType a predicate that is not an object comes back as `pack`."""
+    else None — `statement` carries the rest (20/11/2026; until 0.13.0 none of the three was read). The other members
+    in-toto spec/v1/statement.md requires are read too (Unreleased): a `subject` that is not an array of objects each
+    carrying a `digest`, or a `predicateType` that is not a non-empty string, is `verified: False`; `pack` is None when
+    the predicate is not an object."""
     def _fail(why):   # a malformed envelope is a verdict, never a traceback (audit V2 #5, 30/09/2026)
-        return {"verified": False, "error": why, "payload_type": None, "statement": None, "pack": None}
+        return {"verified": False, "identity_verified": False, "error": why, "payload_type": None, "statement": None,
+                "pack": None}
     if not isinstance(envelope, dict):
         return _fail("envelope is not a JSON object")
     if "payloadType" not in envelope:   # envelope.md: payload and payloadType «are REQUIRED and MUST be set, even if empty» (NEMESIS V2 Q5)
@@ -293,6 +310,11 @@ def from_dsse(envelope: Dict[str, Any],
             continue
         embedded = s.get("publicKeyB64")
         if caller_key is None and key_error is None:
+            if embedded and not allow_embedded_key:
+                reasons.append(f"signature {n}: no key given; its publicKeyB64 is a key the envelope carries, not one the "
+                               "caller trusts (pass public_key / public_key_b64, or allow_embedded_key=True for integrity "
+                               "only)")
+                continue
             if not embedded:
                 reasons.append(f"signature {n}: no verification key (no publicKeyB64 in the envelope and no public_key "
                            "given; a sigstore bundle's key is its certificate: interop.sigstore.verify_bundle)")
@@ -343,11 +365,24 @@ def from_dsse(envelope: Dict[str, Any],
         # (20/11/2026: any _type, or none, was read as a Statement v1)
         return dict(_fail(f"statement _type is not {STATEMENT_TYPE}: {str(statement.get('_type'))[:80]!r}"),
                     payload_type=payload_type)
+    # in-toto attestation spec/v1/statement.md: `subject` «array of ResourceDescriptor objects, required», «Each element
+    # MUST have digest set»; `predicateType` «string (TypeURI), required» (measured on 404b60b: a payload that was only
+    # {"_type": …} was verified true). An empty subject array is not refused here: matching a subject needs the artifact
+    # (docs/validation.md, matchedSubjects), which this function is not given.
+    subject = statement.get("subject")
+    if (not isinstance(subject, list)
+            or not all(isinstance(x, dict) and isinstance(x.get("digest"), dict) and x["digest"] for x in subject)):
+        return dict(_fail("statement subject is not an array of objects that each carry a digest"),
+                    payload_type=payload_type)
+    if not isinstance(statement.get("predicateType"), str) or not statement["predicateType"]:
+        return dict(_fail("statement predicateType is not a non-empty string"), payload_type=payload_type)
     # `pack` is the predicate only when the predicateType is OMEGA's (20/11/2026: the predicate of any attestation — an
-    # SLSA provenance, a statement of another kind — was handed back as `pack`); the statement is returned as before
+    # SLSA provenance, a statement of another kind — was handed back as `pack`) and the predicate is an object
     pack = statement.get("predicate") if statement.get("predicateType") == PREDICATE_TYPE else None
-    out = {"verified": verified, "payload_type": payload_type, "key_source": key_source,
-           "statement": statement, "pack": pack}
+    if not isinstance(pack, dict):
+        pack = None
+    out = {"verified": verified, "identity_verified": bool(verified and caller_key is not None),
+           "payload_type": payload_type, "key_source": key_source, "statement": statement, "pack": pack}
     if unrecognized:
         out["unrecognized_fields"] = unrecognized[:50]
     if not verified:

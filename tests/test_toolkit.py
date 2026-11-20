@@ -607,7 +607,7 @@ class TestDSSEInterop(unittest.TestCase):
         st = dsse.build_statement(pk)
         self.assertEqual(st["_type"], "https://in-toto.io/Statement/v1")
         self.assertEqual(set(st["subject"][0]["digest"]), {"sha256", "sha3_256"})
-        r = dsse.from_dsse(env)
+        r = dsse.from_dsse(env, allow_embedded_key=True)
         self.assertTrue(r["verified"])
         self.assertEqual(r["pack"], pk)
 
@@ -617,7 +617,7 @@ class TestDSSEInterop(unittest.TestCase):
         st = json.loads(base64.b64decode(env["payload"]))
         st["predicate"]["payload"] = "TAMPERED"
         env["payload"] = base64.b64encode(json.dumps(st).encode()).decode()
-        self.assertFalse(dsse.from_dsse(env)["verified"])
+        self.assertFalse(dsse.from_dsse(env, allow_embedded_key=True)["verified"])
 
     def test_wrong_key_fails(self):
         pk = pack.build_pack("demo_pack", {"payload": "x"}, "ref; NOT a conformity assessment")
@@ -2853,7 +2853,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         # pack payloads with numeric claims held no '+' or '/' (measured: 0/300; '?' or '>' in a claim does produce them). For #2 a
         # hand-signed envelope with raw UTF-8 in its JSON statement does; its signature needs one too (285/300 do).
         for n in range(500):
-            body = json.dumps({"_type": dsse.STATEMENT_TYPE, "predicate": {"n": n, "t": "\u00ff\u00fe\u00fb" * 8}}, ensure_ascii=False).encode()
+            body = json.dumps({"_type": dsse.STATEMENT_TYPE, "subject": [{"name": "x", "digest": {"sha256": "00" * 32}}], "predicateType": "https://example.org/t", "predicate": {"n": n, "t": "\u00ff\u00fe\u00fb" * 8}}, ensure_ascii=False).encode()
             sig = cls.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))
             env = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
                    "signatures": [{"keyid": "k", "publicKeyB64": cls.pk, "sig": sig}]}
@@ -2867,35 +2867,35 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         return json.loads(json.dumps(self.env))
 
     def test_dsse_whitespace_rejected(self):          # #1
-        self.assertTrue(dsse.from_dsse(self._env())["verified"])                      # control
+        self.assertTrue(dsse.from_dsse(self._env(), allow_embedded_key=True)["verified"])                      # control
         e = self._env(); s = e["signatures"][0]; s["sig"] = s["sig"][:8] + " \n " + s["sig"][8:]
-        self.assertFalse(dsse.from_dsse(e)["verified"])
+        self.assertFalse(dsse.from_dsse(e, allow_embedded_key=True)["verified"])
         e = self._env(); e["payload"] = e["payload"][:8] + " \n " + e["payload"][8:]
-        self.assertFalse(dsse.from_dsse(e)["verified"])
+        self.assertFalse(dsse.from_dsse(e, allow_embedded_key=True)["verified"])
 
     def test_dsse_url_safe_accepted(self):            # #2 — DSSE v1.0.0: verifiers MUST accept either
         u = lambda x: x.replace("+", "-").replace("/", "_")
         e = self._env(); e["payload"] = u(e["payload"])
-        self.assertTrue(dsse.from_dsse(e)["verified"])
+        self.assertTrue(dsse.from_dsse(e, allow_embedded_key=True)["verified"])
         e = self._env(); e["signatures"][0]["sig"] = u(e["signatures"][0]["sig"])
-        self.assertTrue(dsse.from_dsse(e)["verified"])
+        self.assertTrue(dsse.from_dsse(e, allow_embedded_key=True)["verified"])
 
     def test_dsse_malformed_is_a_verdict(self):       # #5
         for fn in (lambda e: e.pop("payload"), lambda e: e.update(payloadType=5),
                    lambda e: e.update(payload=base64.b64encode(b"ciao").decode()),
                    lambda e: e.update(payload="A"), lambda e: e.update(signatures=[5]), lambda e: e.update(payload=None)):
             e = self._env(); fn(e)
-            self.assertFalse(dsse.from_dsse(e)["verified"])
-        self.assertFalse(dsse.from_dsse([])["verified"])
+            self.assertFalse(dsse.from_dsse(e, allow_embedded_key=True)["verified"])
+        self.assertFalse(dsse.from_dsse([], allow_embedded_key=True)["verified"])
         e = self._env(); e["payloadType"] = 5                  # M07 / K13: a type that is not a string has its own message
-        self.assertEqual(dsse.from_dsse(e)["error"], "payloadType must be a string and signatures a list")
+        self.assertEqual(dsse.from_dsse(e, allow_embedded_key=True)["error"], "payloadType must be a string and signatures a list")
         for not_an_object in (5, None, "x", [1]):           # D3 / M06: the envelope must be an object, with its own message
-            self.assertEqual(dsse.from_dsse(not_an_object)["error"], "envelope is not a JSON object")
+            self.assertEqual(dsse.from_dsse(not_an_object, allow_embedded_key=True)["error"], "envelope is not a JSON object")
         # a correctly SIGNED envelope whose statement is JSON but not an object: a verdict, not a crash (mutant D6)
         body = b"[1,2]"
         e = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
              "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
-        r = dsse.from_dsse(e)
+        r = dsse.from_dsse(e, allow_embedded_key=True)
         self.assertFalse(r["verified"])        # DSSE: «Reject if the parsing fails», even with a right signature (NEMESIS P1)
         self.assertIsNone(r["pack"])
         self.assertIn("error", r)
@@ -2904,10 +2904,10 @@ class TestAuditV2MalformedInput(unittest.TestCase):
                           (b"[" * 600 + b"]" * 600, "nesting exceeds 512")):   # 600 levels parse on every Python: only the bound refuses
             e = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
                  "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
-            r = dsse.from_dsse(e)
+            r = dsse.from_dsse(e, allow_embedded_key=True)
             self.assertFalse(r["verified"]); self.assertEqual(r["error"], "payload could not be parsed as UTF-8 JSON: " + why)
         e = self._env(); e["signatures"] = None                                        # M08
-        self.assertFalse(dsse.from_dsse(e)["verified"])
+        self.assertFalse(dsse.from_dsse(e, allow_embedded_key=True)["verified"])
 
     def test_dsse_excess_padding_rejected_on_every_python(self):   # NEMESIS V2 P2
         e0 = self._env()
@@ -2918,15 +2918,15 @@ class TestAuditV2MalformedInput(unittest.TestCase):
             body += b" "
         e = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
              "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
-        self.assertTrue(dsse.from_dsse(e)["verified"])                                 # control
+        self.assertTrue(dsse.from_dsse(e, allow_embedded_key=True)["verified"])                                 # control
         for pad in ("=", "==", "==="):
             e2 = json.loads(json.dumps(e)); e2["payload"] += pad
-            self.assertFalse(dsse.from_dsse(e2)["verified"], pad)
+            self.assertFalse(dsse.from_dsse(e2, allow_embedded_key=True)["verified"], pad)
         # mixed alphabets that decode to the SAME bytes if accepted: a payload holding both '+' and '/', only '+' turned
         # into '-' (one alphabet per string: DSSE says standard *or* URL-safe; the Go reference rejects mixed alphabets, the
         # Python reference accepts them; NEMESIS V2 P2 / mutant N03)
         for n in range(2000):
-            body = json.dumps({"_type": dsse.STATEMENT_TYPE, "n": n, "t": "\u00fb\u00ef\u00be\u00ff" * 6}, ensure_ascii=False).encode()
+            body = json.dumps({"_type": dsse.STATEMENT_TYPE, "subject": [{"name": "x", "digest": {"sha256": "00" * 32}}], "predicateType": "https://example.org/t", "n": n, "t": "\u00fb\u00ef\u00be\u00ff" * 6}, ensure_ascii=False).encode()
             b64 = base64.b64encode(body).decode()
             if "+" in b64 and "/" in b64:
                 break
@@ -2934,13 +2934,13 @@ class TestAuditV2MalformedInput(unittest.TestCase):
             self.fail("no payload with both '+' and '/'")
         e = {"payload": b64, "payloadType": dsse.PAYLOAD_TYPE,
              "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
-        self.assertTrue(dsse.from_dsse(e)["verified"])                                 # control
+        self.assertTrue(dsse.from_dsse(e, allow_embedded_key=True)["verified"])                                 # control
         e["payload"] = b64.replace("+", "-")
-        self.assertFalse(dsse.from_dsse(e)["verified"])
+        self.assertFalse(dsse.from_dsse(e, allow_embedded_key=True)["verified"])
 
     def test_dsse_excess_padding_in_fours(self):   # NEMESIS V2 giro 2 Q1: '=' in multiples of 4 keep len % 4 == 0
         for n in range(2000):
-            body = json.dumps({"_type": dsse.STATEMENT_TYPE, "n": n, "t": "\u00fb\u00ef\u00be\u00ff" * 6}, ensure_ascii=False).encode()
+            body = json.dumps({"_type": dsse.STATEMENT_TYPE, "subject": [{"name": "x", "digest": {"sha256": "00" * 32}}], "predicateType": "https://example.org/t", "n": n, "t": "\u00fb\u00ef\u00be\u00ff" * 6}, ensure_ascii=False).encode()
             body += b" " * (-len(body) % 3); b64 = base64.b64encode(body).decode()
             if "+" in b64 and "/" in b64:
                 break
@@ -2948,30 +2948,30 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         u = lambda x: x.replace("+", "-").replace("/", "_")
         for enc, sg in ((b64, sig), (u(b64), u(sig))):
             e = {"payload": enc, "payloadType": dsse.PAYLOAD_TYPE, "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": sg}]}
-            self.assertTrue(dsse.from_dsse(e)["verified"])                             # control, std and URL-safe
+            self.assertTrue(dsse.from_dsse(e, allow_embedded_key=True)["verified"])                             # control, std and URL-safe
             for pad in ("====", "========"):
                 e2 = json.loads(json.dumps(e)); e2["payload"] += pad
-                self.assertFalse(dsse.from_dsse(e2)["verified"], (enc[:6], pad))
+                self.assertFalse(dsse.from_dsse(e2, allow_embedded_key=True)["verified"], (enc[:6], pad))
             e2 = json.loads(json.dumps(e)); e2["signatures"][0]["sig"] = sg + "===="
-            self.assertFalse(dsse.from_dsse(e2)["verified"])
+            self.assertFalse(dsse.from_dsse(e2, allow_embedded_key=True)["verified"])
 
     def test_dsse_payload_type_required_and_json_constants(self):   # NEMESIS V2 giro 2 Q5, Q4
-        body = b'{"_type":"https://in-toto.io/Statement/v1","predicate":{}}'
+        body = b'{"_type":"https://in-toto.io/Statement/v1","subject":[{"digest":{"sha256":"00"}}],"predicateType":"t","predicate":{}}'
         e = {"payload": base64.b64encode(body).decode(), "signatures": [{"keyid": "k", "publicKeyB64": self.pk,
                                                                           "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
-        self.assertTrue(dsse.from_dsse(dict(e, payloadType=dsse.PAYLOAD_TYPE))["verified"])   # control
-        self.assertEqual(dsse.from_dsse(e)["error"], "payloadType missing")                    # absent (envelope.md)
+        self.assertTrue(dsse.from_dsse(dict(e, payloadType=dsse.PAYLOAD_TYPE), allow_embedded_key=True)["verified"])   # control
+        self.assertEqual(dsse.from_dsse(e, allow_embedded_key=True)["error"], "payloadType missing")                    # absent (envelope.md)
         for other in ("", "text/plain"):   # protocol.md: «Reject if PAYLOAD_TYPE is not a supported type» (signed over that type)
             e2 = dict(e, payloadType=other); e2["signatures"] = [dict(e["signatures"][0], sig=self.i.sign(dsse.pae(other, body)))]
-            r = dsse.from_dsse(e2)
+            r = dsse.from_dsse(e2, allow_embedded_key=True)
             self.assertFalse(r["verified"]); self.assertTrue(r["error"].startswith("payloadType not supported"))
         e3 = dict(e, payloadType=dsse.PAYLOAD_TYPE); e3.pop("signatures")                       # X04: signatures REQUIRED
-        self.assertEqual(dsse.from_dsse(e3)["error"], "signatures missing")
+        self.assertEqual(dsse.from_dsse(e3, allow_embedded_key=True)["error"], "signatures missing")
         for c in (b"NaN", b"Infinity", b"-Infinity"):
             body = b'{"_type":"https://in-toto.io/Statement/v1","n":' + c + b'}'
             e = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
                  "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
-            self.assertFalse(dsse.from_dsse(e)["verified"], c)
+            self.assertFalse(dsse.from_dsse(e, allow_embedded_key=True)["verified"], c)
 
     def test_sdjwt_rfc9901_section_7_1(self):   # NEMESIS V2 giro 2 Q3: every MUST of §7.1 rejects the whole SD-JWT
         sk = self.i
@@ -3033,9 +3033,9 @@ class TestAuditV2MalformedInput(unittest.TestCase):
     def test_dsse_multi_signature_first_undecodable(self):   # M11: a bad first signature must not hide a good second one
         e = self._env(); good = e["signatures"][0]
         e["signatures"] = [dict(good, sig="!!!!"), good]
-        self.assertTrue(dsse.from_dsse(e)["verified"])
+        self.assertTrue(dsse.from_dsse(e, allow_embedded_key=True)["verified"])
         e["signatures"] = [5, good]                           # K09: an entry that is not an object is skipped, not fatal
-        self.assertTrue(dsse.from_dsse(e)["verified"])
+        self.assertTrue(dsse.from_dsse(e, allow_embedded_key=True)["verified"])
 
     def test_sdjwt_strict_base64url(self):            # #3
         t = sdjwt.issue({"n": "x"}, self.i); j, r = t.split("~", 1); h, p, s = j.split(".")
