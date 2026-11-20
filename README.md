@@ -454,6 +454,26 @@ ends): 5 of the 6 fail on the previous commit, 3 by behaviour and 2 because they
 14 of 15 mutants on the changed lines killed; the 15th (no session recorder computed when there is only one) is
 equivalent: the value is read only when there are at least two.
 
+**`chip_registry.apply_signed_update` applied bytes it had not verified.** It verified the update pack from its path
+(`verify_pack`) and then read the pack again from the same path, with `loads_bounded` instead of the verifier's strict
+profile, and the signature sidecar a third time for `signer_id`. Measured on 0.12.0: a pack put in place of the
+verified one between the two reads — nobody's signature, a sidecar naming another signer — was applied, its class
+became known and `signer_id` was the forged name. Who can do it: whoever can write the directory the update is read
+from while it is applied (`fetch_signed_update_online` writes its download to a directory of its own and was not
+exposed). Now the pack and the files the verifier reads beside it (signature, timestamp and ledger sidecars) are each
+read once with `ledger.read_input` into a directory only this user can enter; the verifier judges that copy, and the
+classes, `pack_sha3` and `signer_id` come from the same bytes, parsed with `loads_strict`. A file beside the pack
+that is there but is not readable is a refusal (`update not read: ...`), as it is a FAIL for the verifier;
+`chip_classes` that is not a JSON object is a refusal (`chip_classes is not a JSON object`; on 0.12.0 an
+`AttributeError`).
+8 tests (the replacement at the instant `verify_pack` returns; 200 generated rounds replacing the pack, the sidecar or
+both before, during — after the n-th read — or after the verification; each file opened once; six values of
+`chip_classes` that are not an object; a failing or unreadable timestamp, ledger or signature sidecar, for a pack
+named `.json` and not; a pack that is valid but only anchored, or signed with no trust registry named, and a signed
+pack of another kind; `signer_id` that is not a string): 6 of the 8 fail on the previous commit — 3 on the defect, 1 on
+the `AttributeError`, 1 only on the wording of a refusal that was a refusal there too, 1 because it calls a function
+that was not there. 16 of 16 mutants on the changed lines killed.
+
 ### Unreleased — an AAT chain carrying an integer outside ±(2^53−1) verifies with a warning that names it (20 November 2026)
 
 `aat.verify_chain` and `aat.verify_epochs` read foreign chains the ES6 way: an integer outside ±(2^53−1) is hashed as

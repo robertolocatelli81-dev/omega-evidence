@@ -4,6 +4,8 @@
     in a chain whose records each name their own recording_component (4000 records: 4.13 s, 0.29 s with one recorder).
     The `aat` CLI read its input files with open().read(): a FIFO in place of the chain blocked it, a file of any size
     was read whole.
+(2) `chip_registry.apply_signed_update` verified the update pack from its path and then read it again from the same
+    path (and the signature sidecar a third time): a pack replaced between the two reads was applied unverified.
 
 Positive control: on c4953ac (the commit before these fixes) the tests marked "fails on c4953ac" in their docstring fail.
 """
@@ -20,7 +22,7 @@ from unittest import mock
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, ROOT)
 
-from omega_evidence import ledger  # noqa: E402
+from omega_evidence import chip_registry, ledger, pack, signing, trust  # noqa: E402
 from omega_evidence.interop import aat  # noqa: E402
 
 SECOND = "a second recording component in one session"
@@ -179,6 +181,228 @@ class TestAatCliReadsBoundedRegularFiles(unittest.TestCase):
             self.assertEqual(outs[0], outs[1])
             self.assertEqual(outs[0], outs[2])
             self.assertEqual(aat._text_of(b"a\r\n\r\nb\rc\n"), "a\n\nb\nc\n")
+
+
+class TestChipRegistryAppliesTheBytesItVerified(unittest.TestCase):
+    FUTURE = "nvidia-rubin-cc"
+
+    def _update(self, tmp, classes, name="update.json"):
+        ident = signing.Identity("curator")
+        up = os.path.join(tmp, name)
+        chip_registry.publish_signed_update(up, classes, ident)
+        store = os.path.join(tmp, "trust.jsonl")
+        trust.TrustRegistry(store).trust(ident.name, ident.public_key_b64)
+        return up, store, ident
+
+    @staticmethod
+    def _evil(path):
+        """an update nobody signed, self-consistent, with a sidecar naming another signer"""
+        pk = chip_registry.build_pack(chip_registry.UPDATE_KIND, {"chip_classes": {"evil-chip": "attacker-service"}},
+                                      "a mapping, NOT a statement about any chip")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(pk, f)
+        side = path[:-5] + ".sig.json" if path.endswith(".json") else path + ".sig.json"
+        with open(side, "w", encoding="utf-8") as f:
+            json.dump({"signer_id": "forged"}, f)
+
+    def test_a_pack_replaced_after_verification_is_not_what_gets_applied(self):
+        """fails on c4953ac: the pack put in place after verify_pack returned was applied (evil-chip known, signer
+        "forged" recorded). The replacement is made at the instant the old code was open to it: when verify_pack
+        returns."""
+        with tempfile.TemporaryDirectory() as tmp:
+            up, store, ident = self._update(tmp, {self.FUTURE: "nvidia-nras"})
+            real = chip_registry.verify_pack
+
+            def verify_then_replace(path, **kw):
+                v = real(path, **kw)
+                self._evil(up)
+                return v
+            reg = chip_registry.ChipRegistry()
+            with mock.patch.object(chip_registry, "verify_pack", verify_then_replace):
+                r = reg.apply_signed_update(up, store)
+            self.assertFalse(reg.is_known("evil-chip"), r)
+            self.assertTrue(r["applied"])
+            self.assertEqual((r["added"], r["signer_id"]), ([self.FUTURE], ident.name))
+            self.assertEqual(reg.service_for(self.FUTURE), "nvidia-nras")
+            self.assertEqual(reg.sources()[0]["signer_id"], ident.name)
+            # and the replaced file itself, verified on its own, is refused
+            r2 = chip_registry.ChipRegistry().apply_signed_update(up, store)
+            self.assertEqual((r2["applied"], r2["reason"]), (False, "update is not trusted-signed"))
+
+    def test_generated_replacements_at_every_read_never_apply_an_unverified_class(self):
+        """fails on c4953ac. 200 rounds: the pack, the sidecar or both are replaced before, during (after the n-th
+        read_input of the verification) or after it; whatever is applied was signed by the trusted curator."""
+        rng = random.Random(20261120)
+        applied = refused = 0
+        for case in range(200):
+            with tempfile.TemporaryDirectory() as tmp:
+                up, store, ident = self._update(tmp, {self.FUTURE: "nvidia-nras"})
+                when, n_read, what = rng.choice(["before", "read", "after"]), rng.randint(1, 4), rng.choice(["pack", "side", "both"])
+                side = up[:-5] + ".sig.json"
+                good = {}
+                for p in (up, side):
+                    with open(p, "rb") as f:
+                        good[p] = f.read()
+
+                def replace():
+                    self._evil(up)
+                    for p, keep in ((up, what == "side"), (side, what == "pack")):
+                        if keep:
+                            with open(p, "wb") as f:
+                                f.write(good[p])
+                reads = []
+                real_read, real_verify = ledger.read_input, chip_registry.verify_pack
+
+                def counting_read(path, *a, **k):
+                    data = real_read(path, *a, **k)
+                    reads.append(path)
+                    if when == "read" and len(reads) == n_read:
+                        replace()
+                    return data
+
+                def verify(path, **kw):
+                    v = real_verify(path, **kw)
+                    if when == "after":
+                        replace()
+                    return v
+                if when == "before":
+                    replace()
+                reg = chip_registry.ChipRegistry()
+                with mock.patch.object(chip_registry, "verify_pack", verify), \
+                        mock.patch.object(ledger, "read_input", counting_read), \
+                        mock.patch("omega_evidence.verifier.read_input", counting_read), \
+                        mock.patch.object(chip_registry, "read_input", counting_read, create=True):
+                    r = reg.apply_signed_update(up, store)
+                ctx = (case, when, n_read, what, r)
+                self.assertFalse(reg.is_known("evil-chip"), ctx)
+                if r["applied"]:
+                    applied += 1
+                    self.assertEqual((r["added"], r["signer_id"]), ([self.FUTURE], ident.name), ctx)
+                    self.assertEqual(reg.sources()[0]["signer_id"], ident.name, ctx)
+                else:
+                    refused += 1
+                    self.assertFalse(reg.is_known(self.FUTURE), ctx)
+                    self.assertEqual(reg.sources(), [], ctx)
+        self.assertGreater(applied, 30)
+        self.assertGreater(refused, 30)
+
+    def test_the_pack_and_each_sidecar_are_read_once(self):
+        """fails on c4953ac: the pack was read twice and the signature sidecar twice"""
+        with tempfile.TemporaryDirectory() as tmp:
+            up, store, _ = self._update(tmp, {self.FUTURE: "nvidia-nras"})
+            opened = []
+            real_open = os.open
+
+            def counting_open(path, *a, **k):
+                opened.append(os.fspath(path))
+                return real_open(path, *a, **k)
+            import builtins
+            real_bopen = builtins.open
+
+            def counting_bopen(path, *a, **k):
+                if isinstance(path, (str, bytes, os.PathLike)):
+                    opened.append(os.fspath(path))
+                return real_bopen(path, *a, **k)
+            with mock.patch.object(os, "open", counting_open), mock.patch.object(builtins, "open", counting_bopen):
+                r = chip_registry.ChipRegistry().apply_signed_update(up, store)
+            self.assertTrue(r["applied"])
+            self.assertEqual(opened.count(up), 1)
+            self.assertEqual(opened.count(up[:-5] + ".sig.json"), 1)
+
+    def test_chip_classes_that_is_not_an_object_is_refused(self):
+        """fails on c4953ac: AttributeError (a list, a string, a number, null, true)"""
+        for bad in ([], ["x"], "x", 1, None, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                ident = signing.Identity("curator")
+                up = os.path.join(tmp, "update.json")
+                pk = chip_registry.build_pack(chip_registry.UPDATE_KIND, {"chip_classes": bad}, "a mapping, NOT more")
+                chip_registry.write_pack(up, pk)
+                chip_registry.sign_pack(up, ident)
+                store = os.path.join(tmp, "trust.jsonl")
+                trust.TrustRegistry(store).trust(ident.name, ident.public_key_b64)
+                reg = chip_registry.ChipRegistry()
+                r = reg.apply_signed_update(up, store)
+                self.assertEqual((r["applied"], r["reason"]), (False, "chip_classes is not a JSON object"), bad)
+                self.assertEqual(reg.sources(), [])
+
+    def test_a_failing_file_beside_the_pack_still_refuses_the_update(self):
+        """The copy that is verified holds every file the verifier reads beside the pack: a timestamp sidecar for
+        another digest, a ledger that does not record the pack, a sidecar that is there but is not a regular file."""
+        def tsr(stem):
+            with open(stem + ".tsr.json", "w") as f:
+                json.dump({"digest_sha256": "0" * 64, "tsa": "x", "tsr_b64": "AA=="}, f)
+
+        def led(stem):
+            ledger.Ledger(stem + ".ledger.jsonl").append({"anchored_pack_sha3": "0" * 64, "anchored_utc": "2026-11-20T00:00:00+00:00"})
+
+        def directory(suffix):
+            return lambda stem: os.mkdir(stem + suffix)
+        for name in ("update.json", "update.pack"):
+            for what, put, reason in (("tsr", tsr, "update is not trusted-signed"), ("ledger", led, "update is not trusted-signed"),
+                                      ("tsr-dir", directory(".tsr.json"), "update not read"),
+                                      ("ledger-dir", directory(".ledger.jsonl"), "update not read"),
+                                      ("sig-dir", None, "update not read")):
+                with tempfile.TemporaryDirectory() as tmp:
+                    up, store, _ = self._update(tmp, {self.FUTURE: "nvidia-nras"}, name)
+                    stem = up[:-5] if up.endswith(".json") else up
+                    if put is None:
+                        os.remove(stem + ".sig.json")
+                        os.mkdir(stem + ".sig.json")
+                    else:
+                        put(stem)
+                    reg = chip_registry.ChipRegistry()
+                    r = reg.apply_signed_update(up, store)
+                    self.assertFalse(r["applied"], (name, what, r))
+                    self.assertTrue(r["reason"].startswith(reason), (name, what, r))
+                    self.assertFalse(reg.is_known(self.FUTURE))
+
+    def test_a_pack_not_named_json_and_a_missing_pack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            up, store, ident = self._update(tmp, {self.FUTURE: "nvidia-nras"}, "update.pack")
+            reg = chip_registry.ChipRegistry()
+            r = reg.apply_signed_update(up, store)
+            self.assertEqual((r["applied"], r["added"], r["signer_id"]), (True, [self.FUTURE], ident.name))
+            r = reg.apply_signed_update(os.path.join(tmp, "absent.json"), store)
+            self.assertEqual((r["applied"], r["reason"]), (False, "update is not trusted-signed"))
+
+    def test_valid_but_unsigned_and_signed_but_of_another_kind_are_refused(self):
+        """The two gates before anything is applied (unchanged lines, held here): a pack that is intact but carries no
+        signature, and a pack signed by the trusted curator whose kind is not the registry update's."""
+        with tempfile.TemporaryDirectory() as tmp:
+            up, store, ident = self._update(tmp, {self.FUTURE: "nvidia-nras"})
+            os.remove(up[:-5] + ".sig.json")
+            reg = chip_registry.ChipRegistry()
+            r = reg.apply_signed_update(up, store)
+            self.assertEqual((r["applied"], r["reason"]), (False, "update is not trusted-signed"))
+            self.assertFalse(reg.is_known(self.FUTURE))
+            # valid for the verifier, yet not trusted-signed: anchored in a ledger without a signature, and signed by
+            # anybody when no trust registry is named (measured 20/11/2026: both are valid=True, authenticity PASS)
+            pack.anchor_pack(up, up[:-5] + ".ledger.jsonl")
+            r = reg.apply_signed_update(up, store)
+            self.assertEqual((r["applied"], r["reason"]), (False, "update is not trusted-signed"), r)
+            self.assertIn("anchored", r["authenticity"])
+            anybody = os.path.join(tmp, "anybody.json")
+            chip_registry.publish_signed_update(anybody, {self.FUTURE: "x"}, signing.Identity("anybody"))
+            for no_store in ("", None):
+                r = reg.apply_signed_update(anybody, no_store)
+                self.assertEqual((r["applied"], r["reason"]), (False, "update is not trusted-signed"), r)
+                self.assertIn("identity not checked", r["authenticity"])
+            self.assertFalse(reg.is_known(self.FUTURE))
+            other = os.path.join(tmp, "other.json")
+            chip_registry.write_pack(other, chip_registry.build_pack("something_else", {"chip_classes": {self.FUTURE: "x"}},
+                                                                     "a mapping, NOT more"))
+            chip_registry.sign_pack(other, ident)
+            r = reg.apply_signed_update(other, store)
+            self.assertEqual((r["applied"], r["reason"]), (False, "wrong kind: something_else"))
+            self.assertFalse(reg.is_known(self.FUTURE))
+            self.assertEqual(reg.sources(), [])
+
+    def test_signer_id_is_a_string_of_an_object_or_empty(self):
+        f = chip_registry.ChipRegistry._signer_in
+        self.assertEqual(f(b' {"signer_id": "curator"}\n'), "curator")
+        for bad in (b"", b"[1]", b'"x"', b'{"signer_id": 5}', b'{"signer_id": ["a"]}', b'{"signer_id": null}', b"{}",
+                    b'{"signer_id": "a", "signer_id": "b"}', b"\xff\xfe", b'{"signer_id": 1.5}'):
+            self.assertEqual(f(bad), "", bad)
 
 
 if __name__ == "__main__":

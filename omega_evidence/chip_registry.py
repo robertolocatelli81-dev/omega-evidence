@@ -54,7 +54,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .ledger import loads_bounded
+from .ledger import loads_bounded, loads_strict, read_input
 from .pack import build_pack, sign_pack, write_pack
 from .signing import Identity
 from .verifier import verify_pack
@@ -119,19 +119,48 @@ class ChipRegistry:
     def apply_signed_update(self, pack_path: str, trust_store: str) -> Dict[str, Any]:
         """Extend the registry from a trusted-signed update pack. Applies ONLY if
         the pack verifies as trusted-signed against `trust_store`; otherwise the
-        registry is left untouched (fail-closed)."""
-        v = verify_pack(pack_path, trust_store=trust_store)
+        registry is left untouched (fail-closed).
+
+        The bytes applied are the bytes verified. The pack and the files the verifier reads beside it (the signature,
+        timestamp and ledger sidecars) are each read ONCE with `ledger.read_input` (a regular file, at most 64 MiB,
+        opened without blocking) into a directory only this user can enter; `verify_pack` judges that copy, and the
+        classes, the `pack_sha3` and the `signer_id` recorded come from the same bytes, parsed with the verifier's
+        strict profile (`loads_strict`). A file beside the pack that is there but cannot be read is a refusal, as it
+        is a FAIL for the verifier. Until 0.12.0 the pack was verified from its path and then read again from the same
+        path, with `loads_bounded` (duplicate keys and floats accepted), and the sidecar a third time for `signer_id`:
+        a pack replaced between the two reads was applied without ever having been verified (measured 20/11/2026,
+        tests/test_sentry_20261120.py). `chip_classes` that is not a JSON object is a refusal, not a traceback."""
+        def refused(reason: str, authenticity: Optional[str] = None) -> Dict[str, Any]:
+            out = {"applied": False, "reason": reason, "added": [], "rejected": []}
+            if authenticity is not None:
+                out["authenticity"] = authenticity
+            return out
+        stem = pack_path[:-5] if pack_path.endswith(".json") else pack_path
+        try:
+            with tempfile.TemporaryDirectory() as tmp:   # mode 0700: nobody else replaces what is verified here
+                read: Dict[str, bytes] = {}
+                for name, src in (("update.json", pack_path), ("update.sig.json", stem + ".sig.json"),
+                                  ("update.tsr.json", stem + ".tsr.json"), ("update.ledger.jsonl", stem + ".ledger.jsonl")):
+                    try:
+                        read[name] = read_input(src)
+                    except FileNotFoundError:
+                        continue                         # absent: absent in the copy too (the pack: pack-json FAIL)
+                    with open(os.path.join(tmp, name), "wb") as f:
+                        f.write(read[name])
+                v = verify_pack(os.path.join(tmp, "update.json"), trust_store=trust_store)
+        except OSError as e:   # there but not readable (a FIFO, a directory, beyond the bound), or no temporary file
+            return refused(f"update not read: {type(e).__name__}: {str(e)[:120]}")
         auth = next((ly for ly in v["layers"] if ly["layer"] == "authenticity"), {})
         if not v["valid"] or "trusted-signed" not in auth.get("detail", ""):
-            return {"applied": False, "reason": "update is not trusted-signed",
-                    "authenticity": auth.get("detail", ""), "added": [], "rejected": []}
-        with open(pack_path, encoding="utf-8") as fp:
-            pack = loads_bounded(fp.read())
+            return refused("update is not trusted-signed", auth.get("detail", ""))
+        pack = loads_strict(read["update.json"].decode("utf-8").strip(" \t\r\n"))   # as the verifier parsed them
         if pack.get("kind") != UPDATE_KIND:
-            return {"applied": False, "reason": f"wrong kind: {pack.get('kind')}",
-                    "added": [], "rejected": []}
-        added, rejected = self._merge(pack.get("chip_classes", {}))
-        signer = self._signer_of(pack_path)
+            return refused(f"wrong kind: {pack.get('kind')}")
+        classes = pack.get("chip_classes", {})
+        if not isinstance(classes, dict):
+            return refused("chip_classes is not a JSON object")
+        added, rejected = self._merge(classes)
+        signer = self._signer_in(read.get("update.sig.json", b""))
         self._sources.append({"signer_id": signer, "pack_sha3": pack.get("pack_sha3", ""),
                               "kind": pack["kind"], "added": added, "rejected": rejected,
                               "applied_utc": _now()})
@@ -150,13 +179,14 @@ class ChipRegistry:
         return added, rejected
 
     @staticmethod
-    def _signer_of(pack_path: str) -> str:
-        side = pack_path[:-5] + ".sig.json" if pack_path.endswith(".json") else pack_path + ".sig.json"
+    def _signer_in(sig_bytes: bytes) -> str:
+        """`signer_id` of the signature sidecar whose bytes were verified ("" when it is not a string)."""
         try:
-            with open(side, encoding="utf-8") as fs:
-                return loads_bounded(fs.read()).get("signer_id", "")
-        except (OSError, ValueError):
+            side = loads_strict(sig_bytes.decode("utf-8").strip(" \t\r\n"))
+        except ValueError:
             return ""
+        got = side.get("signer_id", "") if isinstance(side, dict) else ""
+        return got if isinstance(got, str) else ""
 
     def fetch_signed_update_online(self, pack_url: str, trust_store: str,
                                    timeout: float = 10.0) -> Dict[str, Any]:
