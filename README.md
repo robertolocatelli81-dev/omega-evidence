@@ -18,10 +18,10 @@ but do not derive from, this toolkit.
 
 ```bash
 # from PyPI (since 0.11.4, uploaded from the GitHub Release by Trusted Publishing, PEP 740 attestations)
-pip install omega-evidence==0.12.0
+pip install omega-evidence==0.13.0
 
 # or straight from the tagged source
-pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.12.0
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.13.0
 ```
 
 Release artifacts (`.whl` / `.tar.gz`) are attached to each
@@ -427,9 +427,11 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
+0.13.0 was released on 20 November 2026; its changes are the two 0.13.0 sections below (both of 20 November).
+
 0.12.0 was released on 19 November 2026; its changes are the three 0.12.0 sections below (18, 17 and 14 November).
 
-### Unreleased — three defects found on 0.12.0 by a security review tool, each reproduced before it was fixed, and the same redirect class in four more fetchers (20 November 2026)
+### 0.13.0 — three defects found on 0.12.0 by a security review tool, each reproduced before it was fixed, and the same redirect class in four more fetchers (20 November 2026)
 
 Found on 20 November 2026 by running a security review tool on 0.12.0, not by an outside report. The same tool, run on
 a copy of 0.12.0 with a known defect put back (the weak-key check of Ed25519 reduced to a length check), did not find
@@ -555,7 +557,7 @@ pack of another kind; `signer_id` that is not a string): 6 of the 8 fail on 0.12
 the `AttributeError`, 1 only on the wording of a refusal that was a refusal there too, 1 because it calls a function
 that was not there. 16 of 16 mutants on the changed lines killed.
 
-### Unreleased — an AAT chain carrying an integer outside ±(2^53−1) verifies with a warning that names it (20 November 2026)
+### 0.13.0 — an AAT chain carrying an integer outside ±(2^53−1) verifies with a warning that names it (20 November 2026)
 
 `aat.verify_chain` and `aat.verify_epochs` read foreign chains the ES6 way: an integer outside ±(2^53−1) is hashed as
 the nearest double, so 2^53 and 2^53+1 give the same JCS bytes. RFC 8785 §3.1 requires JCS input adapted to I-JSON,
