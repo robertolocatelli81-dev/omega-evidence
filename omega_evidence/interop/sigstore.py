@@ -27,6 +27,8 @@ What is VERIFIED here, each reported in `checks`:
                   among its subjects; a message signature must carry that digest and verify over it;
   * rfc3161[i]  — each RFC 3161 token, over the SHA-256 of the signature bytes, with timestamp.verify and the caller's
                   TSA anchors (`tsa_ca_file`, `tsa_untrusted`), at the token's genTime by default (sigstore's rule);
+                  with `tsa_ca_file` given and no token in the bundle, the check `rfc3161` is made and is False
+                  (Unreleased: the caller asked for a verified time and there is none);
   * signing_time_in_certificate — a verified token's genTime inside the leaf certificate's validity (the proto: "a
                   verifier MUST verify that the signature was computed at the time the certificate was valid").
                   genTime is read to the whole second: a fraction of a second is dropped, so a token made within
@@ -458,6 +460,11 @@ def verify_bundle(bundle: Any, artifact: Optional[bytes] = None, artifact_sha256
             gen_times.append(g)
         elif v.get("verified") is not True:
             reasons.append(f"{name}: {v.get('reason') or v.get('note') or 'not verified'}")
+    if tsa_ca_file and not p["tokens"]:
+        # Unreleased (Decision 5): a TSA trust anchor given asks for a verified time; a bundle with no RFC 3161 token has
+        # none to verify, so the check is made and is False (until 0.13.0 it was not made, and verified was True)
+        res["checks"]["rfc3161"] = False
+        reasons.append("rfc3161: tsa_ca_file given but the bundle carries no RFC 3161 token: no time to verify")
     if gen_times and cert is not None and cert.get("read"):
         inside = all(cert["not_before"] <= g <= cert["not_after"] for g in gen_times)
         res["checks"]["signing_time_in_certificate"] = inside

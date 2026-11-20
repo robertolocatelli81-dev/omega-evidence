@@ -86,8 +86,10 @@ class TestKeyBinding(unittest.TestCase):
         self.assertIs(r["verified"], False); self.assertIn("no KB-JWT", r["error"])
         r = self.v(self.sd(), require_key_binding=False)               # the verifier's declared policy
         self.assertEqual((r["verified"], r["key_binding"]), (True, "not_required"))
-        r = self.v(self.kb(self.sd(cnf=False)))                       # a KB-JWT nobody asked for
+        r = sdjwt.verify(self.kb(self.sd(cnf=False)), self.ipub, now=NOW)   # a KB-JWT nobody asked for (no aud/nonce)
         self.assertIs(r["verified"], False); self.assertIn("not accepted unchecked", r["error"])
+        r = self.v(self.kb(self.sd(cnf=False)))   # aud/nonce given ask for Key Binding (Unreleased, Decision 5): no cnf.jwk
+        self.assertIs(r["verified"], False); self.assertIn("cnf.jwk", r["error"])
         r = self.v(self.kb(self.sd(cnf=False)), require_key_binding=True)   # required, no cnf.jwk: no holder key
         self.assertIs(r["verified"], False); self.assertIn("cnf.jwk", r["error"])
         r = sdjwt.verify(self.kb(self.sd()), self.ipub, now=NOW)     # cnf, nothing to check aud/nonce against
@@ -164,8 +166,11 @@ class TestKeyBinding(unittest.TestCase):
             self.assertIs(r["verified"], False, name); self.assertIn("§2.2.2.3", r["error"], name)
             jws = tok.split("~")[0]                                     # the same token, that Disclosure withheld:
             kept = [d for d in tok.split("~")[1:] if d and dec(d)[1] != name]
-            r = self.v(jws + "~" + "".join(d + "~" for d in kept))      # invisible to any verifier (declared in README)
+            withheld = jws + "~" + "".join(d + "~" for d in kept)
+            r = sdjwt.verify(withheld, self.ipub, now=NOW)              # invisible to a verifier with no policy (README)
             self.assertIs(r["verified"], True, (name, r))
+            if name == "cnf":   # a caller that gives aud/nonce asks for Key Binding (Unreleased, Decision 5): refused
+                self.assertIs(self.v(withheld)["verified"], False)
         nested = E.token(self.issuer, E.H, plain={"iss": "https://issuer.example", "vct": "urn:eudi:pid:1",
                                                   "cnf": {"_sd": ["x" * 43]}})
         r = self.v(nested)
@@ -183,7 +188,7 @@ class TestKeyBinding(unittest.TestCase):
         d = sdjwt._disclosure("salt-n", "exp", NOW - 1)                 # "exp" as the name of a nested claim: not the JWT's
         tok = E.token(self.issuer, E.H, plain={"iss": "https://issuer.example", "vct": "urn:eudi:pid:1",
                                                "card": {"_sd": [sdjwt._digest(d)]}}) + d + "~"
-        r = self.v(tok)
+        r = sdjwt.verify(tok, self.ipub, now=NOW)   # no aud/nonce: they would ask for Key Binding (Unreleased, Decision 5)
         self.assertIs(r["verified"], True, r); self.assertEqual(r["plain_claims"]["card"], {"_sd": [sdjwt._digest(d)]})
         other = {"alg": "ES256", "typ": "example+sd-jwt"}               # another SD-JWT type: RFC 9901 alone, allowed
         tok = E.token(self.issuer, other, claims={"given_name": "Ada", "exp": NOW + 3600})

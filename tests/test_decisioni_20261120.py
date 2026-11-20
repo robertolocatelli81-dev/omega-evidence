@@ -11,6 +11,8 @@
      envelope), read neither `subject` nor `predicateType`, and `build_statement` wrote a declared `pack_sha3` as read.
 (D4) `preservation`: an `asserted` time beside `tsa_ca_file` was a SKIP and the record valid; the Merkle root had no
      domain separation and duplicated an odd node. Now FAIL, and record version 2 with the RFC 6962 Merkle Tree Hash.
+(D5) `sigstore.verify_bundle(tsa_ca_file=...)` on a bundle with no token, and `sdjwt.verify(expected_aud / expected_nonce)`
+     on a credential without `cnf`, verified true without the proof the argument asks for.
 """
 import base64
 import hashlib
@@ -416,6 +418,57 @@ class D4PreservationRecord(unittest.TestCase):
                 h = PR._hnew(alg)
                 h.update(bytes.fromhex(leaves[0]) + bytes.fromhex(leaves[1]))
                 self.assertNotEqual(PR._root(leaves[:2], alg, 2), PR._root([h.hexdigest()], alg, 2))
+
+
+class D5ArgumentsThatAskForAProof(unittest.TestCase):
+    def test_sdjwt_aud_or_nonce_given_requires_key_binding(self):
+        """fails on 404b60b: verified True, key_binding "not_required" with expected_aud and expected_nonce, no cnf"""
+        from omega_evidence.interop import sdjwt
+        ident = Identity("issuer")
+        t = sdjwt.issue({"given_name": "A"}, ident, {"iss": "https://i.example", "vct": "x"})
+        self.assertEqual(sdjwt.verify(t, ident.public_key_b64)["key_binding"], "not_required")      # control
+        for kw in ({"expected_aud": "https://v.example", "expected_nonce": "n"}, {"expected_aud": "https://v.example"},
+                   {"expected_nonce": "n"}):
+            r = sdjwt.verify(t, ident.public_key_b64, **kw)
+            self.assertIs(r["verified"], False, kw)
+            self.assertIn("Key Binding is required", r["error"])
+        r = sdjwt.verify(t, ident.public_key_b64, expected_aud="https://v.example", expected_nonce="n",
+                         require_key_binding=False)
+        self.assertEqual((r["verified"], r["key_binding"]), (True, "not_required"))   # an explicit policy still wins
+
+    def test_sigstore_trust_anchor_and_no_token(self):
+        """fails on 404b60b: verified True, checks without rfc3161, though tsa_ca_file was given"""
+        try:
+            from cryptography import x509
+        except ImportError:
+            self.skipTest("cryptography not installed")
+        import datetime as dt
+        import hashlib as H
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from omega_evidence.interop import dsse, sigstore
+        k = ec.generate_private_key(ec.SECP256R1())
+        n = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "t")])
+        now = dt.datetime.now(dt.timezone.utc)
+        cert = (x509.CertificateBuilder().subject_name(n).issuer_name(n).public_key(k.public_key()).serial_number(1)
+                .not_valid_before(now - dt.timedelta(days=1)).not_valid_after(now + dt.timedelta(days=1)).sign(k, hashes.SHA256()))
+        st = {"_type": dsse.STATEMENT_TYPE, "predicateType": "x", "predicate": {},
+              "subject": [{"name": "a", "digest": {"sha256": H.sha256(b"artifact").hexdigest()}}]}
+        payload = json.dumps(st).encode()
+        sig = k.sign(dsse.pae(dsse.PAYLOAD_TYPE, payload), ec.ECDSA(hashes.SHA256()))
+        b = {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+             "verificationMaterial": {"certificate": {"rawBytes": base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode()}},
+             "dsseEnvelope": {"payload": base64.b64encode(payload).decode(), "payloadType": dsse.PAYLOAD_TYPE,
+                              "signatures": [{"sig": base64.b64encode(sig).decode()}]}}
+        self.assertIs(sigstore.verify_bundle(b, artifact=b"artifact")["verified"], True)              # control
+        d = _tmp(self)
+        ca = os.path.join(d, "tsa.pem")
+        with open(ca, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        r = sigstore.verify_bundle(b, artifact=b"artifact", tsa_ca_file=ca)
+        self.assertEqual((r["verified"], r["checks"].get("rfc3161")), (False, False))
+        self.assertIn("no RFC 3161 token", r["error"])
 
 
 if __name__ == "__main__":

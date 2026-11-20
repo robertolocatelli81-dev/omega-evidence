@@ -398,7 +398,8 @@ and `nonce` given by the caller, `sd_hash`), required whenever the credential ca
 unless the caller's policy says otherwise. The claims SD-JWT VC -27 §2.2.2.3 keeps out of Disclosures (`iss`, `nbf`,
 `exp`, `cnf`, `vct`, `vct#integrity`, `aka_vcts`, `status`, and their subclaims) are refused in a presented Disclosure,
 and `issue()` does not write one; a Disclosure the holder withholds is invisible to any verifier, so with a credential
-from an issuer that put `cnf` or `exp` in one, only `require_key_binding=True` makes Key Binding certain.
+from an issuer that put `cnf` or `exp` in one, only `require_key_binding=True`, or `expected_aud` / `expected_nonce`
+given (Unreleased), makes Key Binding certain.
 Not covered: the issuer's key resolution from the `x5c` chain that HAIP
 1.0 §6.1.1 mandates (the caller supplies the issuer key), the SD-JWT VC claims `vct` and `status`, and eIDAS
 qualification. So this is not a complete EUDI / HAIP verifier. PII-free by design
@@ -525,6 +526,12 @@ Each was measured on 404b60b (the branch before these changes) and reproduced be
   root[H(l1 ‖ l2)]. Records without `record_version` (every record written up to 0.13.0) verify as before and keep their
   version through renewals; any other `record_version` is a FAIL (`record-version`). Rule in the module docstring
   (RECORD FORMAT).
+- **`interop.sigstore.verify_bundle(tsa_ca_file=…)` with no token, and `interop.sdjwt.verify(expected_aud=…,
+  expected_nonce=…)` without `cnf`.** Measured on 404b60b: both `verified: True` (`checks` without `rfc3161`;
+  `key_binding: "not_required"`). Now the check `rfc3161` is made and is False, and an `expected_aud` or
+  `expected_nonce` given with `require_key_binding=None` requires Key Binding (RFC 9901 §7.3 step 1, Proposed Standard,
+  November 2025, not updated as of 20/11/2026: the decision is the verifier's policy and "MUST NOT be based on whether
+  or not a Key Binding JWT is provided"; an explicit `require_key_binding=False` still wins).
 
 0.13.0 was released on 20 November 2026; its changes are the two 0.13.0 sections below (both of 20 November).
 

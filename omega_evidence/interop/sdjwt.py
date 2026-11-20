@@ -281,7 +281,9 @@ def verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float] = None,
     A malformed token is a verdict, never a traceback.
     Key Binding (RFC 9901 §4.3, §7.3; 0.12.0): `require_key_binding` is the verifier's policy (§7.3 step 1: never decided
     by whether a KB-JWT came). None, the default, means: required when the processed payload carries `cnf` (OpenID4VC
-    HAIP 1.0 §6.1.1.1: a credential with holder binding is presented with a KB-JWT), not required otherwise; with the
+    HAIP 1.0 §6.1.1.1: a credential with holder binding is presented with a KB-JWT) or when the caller gives
+    `expected_aud` or `expected_nonce` (Unreleased: the caller's policy asks for a check they only make sense in), not
+    required otherwise; with the
     SD-JWT VC `typ`, a presented Disclosure of a claim SD-JWT VC -27 §2.2.2.3 keeps in clear (SD_JWT_VC_IN_CLEAR: cnf,
     exp, nbf, ...) or of one of their subclaims is a reject, and one the holder withholds cannot be seen here. Required
     and absent → rejected (step 2). Required: the holder key is `cnf.jwk` (RFC 7800 §3.2; P-256 or Ed25519, bound to the
@@ -469,7 +471,11 @@ def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expect
                 raise _Reject(f"{claim} is not a finite number")   # 1e400 parses to inf: a token that would never expire
             if bad(v):
                 raise _Reject(f"{claim} check failed (step 6)")
-    required = ("cnf" in processed) if kbp["required"] is None else kbp["required"]   # §7.3 step 1, HAIP §6.1.1.1
+    # §7.3 step 1 (the verifier's policy, never whether a KB-JWT came), HAIP §6.1.1.1. Unreleased (Decision 5): with
+    # require_key_binding=None, an expected_aud or expected_nonce given is the caller's policy asking for Key Binding, so
+    # it is required (until 0.13.0 both were ignored on a credential without cnf: verified True, "not_required")
+    asked = kbp["aud"] is not None or kbp["nonce"] is not None
+    required = ("cnf" in processed or asked) if kbp["required"] is None else kbp["required"]
     if not required and kb_jwt is not None:
         raise _Reject("a KB-JWT was presented but Key Binding is not required by this call: it is not accepted unchecked")
     if required and kb_jwt is None:
@@ -477,8 +483,9 @@ def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expect
                       "HAIP 1.0 §6.1.1.1 when the credential carries cnf)")
     if required:
         if kbp["aud"] is None or kbp["nonce"] is None:
-            raise _Reject("Key Binding is required (the credential carries cnf) and the caller gave no expected_aud and "
-                          "expected_nonce to check it against (RFC 9901 §7.3 step 5.f)")
+            raise _Reject("Key Binding is required (the credential carries cnf, or the caller gave one of expected_aud "
+                          "and expected_nonce) and the caller gave no expected_aud and expected_nonce to check it against "
+                          "(RFC 9901 §7.3 step 5.f)")
         _check_kb(kb_jwt, processed, sdjwt, t, kbp)
     top_sd = body.get("_sd", [])
     disclosed = {k: v for k, v in processed.items() if k not in body}
