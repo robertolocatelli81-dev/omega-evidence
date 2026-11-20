@@ -12,3 +12,6 @@ verifiers/differential_oracle.py:generic-api-key:320
 # every -trust.json asset) — a fingerprint of a public key, not a secret.
 dd21566c0455e9cd4fdafef6d9f3a9d19dbbf0f7:SIGNING.md:generic-api-key:13
 SIGNING.md:generic-api-key:13
+# the same public point, same line moved to 321 by the EXPECT_AUTH table of Decision 1 (directory scan, no commit;
+# reviewed 20/11/2026)
+verifiers/differential_oracle.py:generic-api-key:321
