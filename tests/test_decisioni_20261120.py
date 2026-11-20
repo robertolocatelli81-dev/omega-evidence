@@ -602,5 +602,17 @@ class TemporaryFilesAreRemoved(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(probe)), [])
 
 
+    def test_the_fuzzer_leaves_nothing_in_the_temporary_directory(self):
+        """fails on d5340a3: with --findings-dir (as CI runs it) or --ablate the corpus directory stayed (48 KB a run)"""
+        probe = self._fresh_tmp()
+        out = self._fresh_tmp()
+        env = dict(os.environ, TMPDIR=probe)
+        env.pop("PYTHONPATH", None)
+        for extra in (["--findings-dir", os.path.join(out, "f")], ["--ablate", "pack-sha3", "--findings-dir", os.path.join(out, "a")], []):
+            r = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "fuzz_toolkit.py"), "--seed", "20260928",
+                                "--iterations", "60"] + extra, capture_output=True, text=True, timeout=600, env=env, cwd=ROOT)
+            self.assertIn(r.returncode, (0, 1), r.stderr[-300:])
+            self.assertEqual(sorted(os.listdir(probe)), [], extra)
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

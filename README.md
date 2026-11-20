@@ -540,7 +540,9 @@ Each was measured on 404b60b (the branch before these changes) and reproduced be
 - **Temporary files.** Measured on 21/11/2026: a run of `verifiers/differential_oracle.py` that stopped on an
   exception left its cases, about 450 MB, in the temporary directory (the removal was the last line of `main`), and
   `tests/test_toolkit.py` left 5 directories and one file there on every run (284 KB). The oracle now removes its
-  directory in a `finally`, also on SIGTERM; the tests remove theirs (`addCleanup`). Tested with a private `TMPDIR`.
+  directory in a `finally`, also on SIGTERM; the tests remove theirs (`addCleanup`). `tests/fuzz_toolkit.py` left its
+  corpus directory (48 KB) on every run with `--findings-dir` (as CI runs it) or `--ablate`: now removed on every exit,
+  kept only when violations were found and no `--findings-dir` was given. Tested with a private `TMPDIR`.
 
 0.13.0 was released on 20 November 2026; its changes are the two 0.13.0 sections below (both of 20 November).
 

@@ -656,8 +656,20 @@ UNVERIFIED_PREFIX = "signature present, algorithm unsupported, not verified"
 
 
 def run(args):
-    r = random.Random(args.seed)
+    """The corpus directory is removed on every exit (21/11/2026: with --findings-dir, which CI passes, or with
+    --ablate, it was left in the temporary directory on every run, 48 KB each, measured: 75 of them in /tmp); it is
+    kept only when violations were found and no --findings-dir was given (the findings are then inside it)."""
     root = tempfile.mkdtemp(prefix="oe-fuzz-")
+    keep = []
+    try:
+        return _run(args, root, keep)
+    finally:
+        if not keep:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def _run(args, root, keep):
+    r = random.Random(args.seed)
     cases = build_corpus(root)
     _ORIGINAL["digest"] = json.loads(Path(cases["signed"]["pack"]).read_text(encoding="utf-8"))["pack_sha3"]
     originals = {(n, k): Path(p).read_bytes() for n, c in cases.items() for k, p in c["files"].items()}
@@ -776,8 +788,9 @@ def run(args):
               + ("the fuzzer SEES the disabled check" if ok else "NOT SEEN: the fuzzer is blind to this check"))
         return 0 if ok else 1
     print(f"fuzz: {stats['iterations']} iterations, {len(stats['violations'])} violations, seed {args.seed}, {elapsed:.1f} s")
-    if not stats["violations"] and not args.findings_dir:
-        shutil.rmtree(root, ignore_errors=True)
+    if stats["violations"] and not args.findings_dir:
+        keep.append(root)
+        print(f"findings kept in {root}")
     return 1 if stats["violations"] else 0
 
 
