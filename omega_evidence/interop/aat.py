@@ -322,7 +322,9 @@ def root_from_path(leaf: bytes, path: List[Dict[str, Any]]) -> bytes:
 
 
 # `$` would accept a trailing newline: every format check uses fullmatch semantics (\Z)
-_RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})\Z")
+# re.ASCII: RFC 3339 §5.6 DIGIT is %x30-39 (RFC 5234 B.1); without it \d took any Unicode decimal digit ("２０２６-…", "٢٠٢٦-…"),
+# which then failed to parse and was let through in silence where the comparison is skipped on ValueError (20/11/2026)
+_RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})\Z", re.ASCII)
 _URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:[^\s]+\Z")      # RFC 3986: no whitespace
 _HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
 _NONCE = re.compile(r"^[0-9a-f]{32,}\Z")
@@ -1035,7 +1037,8 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     independent session). WHO may delete: a tombstone's signer must be the agent (self-recorded) / the recorder
     (independent) or one of `tombstone_kids` (deleting authorities the relying party names); any other key in `keys` is a
     problem, and without an applicable authority a signed tombstone is accepted with a warning naming its signer. The kid a
-    signature is judged by is the thumbprint of the key that VERIFIED it (so the -03 fallback key is judged like any other). With `keys` (even empty) or `pubkey_pem`, every record must be signed.
+    signature is judged by is the thumbprint of the key that VERIFIED it (so the -03 fallback key is judged like any other). With `keys` (even empty) or `pubkey_pem`, every record must be signed;
+    with `agent_kid` or `recorder_kid` too, and with `tombstone_kids` every tombstone (20/11/2026: an unsigned chain was ok with a pin never compared).
     Returns {ok, records, problems, warnings, signatures_verified, hybrid_verified, tombstones, keys_rejected, draft, scope}."""
     problems: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
@@ -1324,6 +1327,12 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
                                                     "retained original signature (unverifiable — this module requires the deleting authority's) or a forgery"})
                 else:
                     problems.append({"i": i, "why": f"signature invalid: {why}"})
+        elif agent_kid is not None or recorder_kid is not None or (is_tomb and tombstone_kids is not None):
+            # 20/11/2026: a signer pinned by the caller and an unsigned record — the pin was never compared and the chain was ok
+            problems.append({"i": i, "why": "unsigned " + ("tombstone" if is_tomb else "record") + " while a signer was pinned ("
+                             + ", ".join(n for n, v in (("agent_kid", agent_kid), ("recorder_kid", recorder_kid),
+                                                        ("tombstone_kids", tombstone_kids if is_tomb else None)) if v is not None)
+                             + "): the pin cannot be checked on it"})
         elif require_signatures or keys_given:
             problems.append({"i": i, "why": ("tombstone without a signature of the deleting authority while the chain is verified with keys (§9.3 + review 2026-09-19)"
                                              if is_tomb else "unsigned record while signatures are required / a verification key was given "
