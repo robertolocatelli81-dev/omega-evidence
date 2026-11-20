@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .canonical import sha3
 from .signing import Identity
@@ -148,11 +148,19 @@ def pq_cosign(pack_path: str, signer) -> Dict[str, Any]:
 
 
 def stamp_pack(pack_path: str, tsa_url: str, capture_ltv: bool = False,
-               fetch_crl: bool = False) -> Dict[str, Any]:
+               fetch_crl: bool = False, ca_file: Optional[str] = None) -> Dict[str, Any]:
     """Timestamp the pack file bytes via an RFC 3161 TSA and write the sidecar.
     With `capture_ltv=True`, also embed LTV validation material (the TSA cert chain,
     and with `fetch_crl=True` the CRL bytes at stamping time) so the timestamp stays
-    validatable long after the certificates expire — RFC 4998 / eIDAS LTA spirit."""
+    validatable long after the certificates expire — RFC 4998 / eIDAS LTA spirit.
+
+    `ca_file` (PEM trust anchor of the TSA): with it the captured material says whether the token verifies against it
+    (`validation_material.token_verified`); `fetch_crl=True` downloads a CRL only then, and only those named by the
+    signer's chain (the rule is in the docstring of `timestamp`). Without `ca_file`, or with a token that does not
+    verify, no CRL is asked and `validation_material.crl_fetch.reason` says so. The material also names the transport
+    of the reply (`tsa_transport`: "http" or "https"): over plain http a reply that is not verified against a trust
+    anchor could have been written by anyone on the path."""
+    from urllib.parse import urlparse
     from .canonical import sha256_bytes
     from .timestamp import extract_validation_material, stamp
     data = Path(pack_path).read_bytes()
@@ -163,7 +171,8 @@ def stamp_pack(pack_path: str, tsa_url: str, capture_ltv: bool = False,
                 "stamped_utc": datetime.now(timezone.utc).isoformat(timespec="seconds")}
         if capture_ltv:
             side["validation_material"] = extract_validation_material(
-                r["tsr_b64"], fetch_crl=fetch_crl)
+                r["tsr_b64"], fetch_crl=fetch_crl, ca_file=ca_file, expected_digest_hex=digest)
+            side["validation_material"]["tsa_transport"] = urlparse(tsa_url).scheme.lower()
         _ts_sidecar(pack_path).write_text(json.dumps(side, ensure_ascii=False, indent=1),
                                           encoding="utf-8")
     return r

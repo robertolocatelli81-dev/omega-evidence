@@ -435,6 +435,72 @@ Found on 20 November 2026 by running a security review tool on 0.12.0, not by an
 a copy of 0.12.0 with a known defect put back (the weak-key check of Ed25519 reduced to a length check), did not find
 it: a point it does not raise is not shown to be sound. `tests/test_sentry_20261120.py` holds the tests of this section.
 
+**Capturing CRLs asked URLs named by certificates nobody had verified (server-side request forgery).**
+`timestamp.extract_validation_material(fetch_crl=True)`, reached by `pack.stamp_pack(capture_ltv=True,
+fetch_crl=True)`, gave the CRL distribution points of every certificate carried by the RFC 3161 reply to
+`urllib.request.urlopen` after checking only the scheme: redirects followed, no bound on bytes, the token never
+verified. Measured on 0.12.0 with a local TSA whose self-made certificate named
+`http://127.0.0.1:<port>/latest/meta-data/...`: the GET arrived at that loopback service and its answer was written to
+the `.tsr.json` sidecar under `crls_b64`. Who can do it: the TSA, or anyone on the path of a TSA asked over plain
+http. The rule now, written in the docstrings of `timestamp` and `_crl_fetch` before the code (closed by
+construction: what is not listed is not asked, and the reason is recorded):
+
+- no URL is asked unless the token verifies against a trust anchor given by the caller — new parameters `ca_file`
+  (both functions) and `expected_digest_hex`, `untrusted` (`extract_validation_material`). Without them, or when the
+  token does not verify or the check cannot be run, `crls_b64` is empty and `crl_fetch` is `{"fetched": false,
+  "reason": ...}`. **A caller of 0.12.0 that passed `fetch_crl=True` alone now gets no CRL until it passes `ca_file`**;
+- only the signer's chain names a URL: the signer certificate and each certificate that issued one already in the
+  chain (same name, signature accepted by `openssl verify -partial_chain`), each of which must itself verify under
+  `ca_file`. The other certificates of the token are still listed in `crl_distribution_points` and never asked;
+- a URL is asked only at a public address, judged as the address that is connected to: an IP literal in any form the
+  resolver reads (`127.1`, `2130706433`, `0x7f000001`, `0177.0.0.1`, fullwidth digits, IPv4-mapped and other IPv6
+  forms that carry an IPv4 address), a name by every address it resolves to; loopback, unspecified, link-local,
+  private, shared, site-local, multicast, reserved and whatever `ipaddress` does not call global are refused, and so
+  are `localhost`, a percent sign in the host, userinfo, a backslash, white space and every scheme but http and
+  https. The connection goes to the address that was judged (the name is not resolved again), without the proxies of
+  the environment; redirects are not followed; at most 8 MiB per CRL, 32 MiB and 16 URLs per capture, and `timeout`
+  seconds for a whole answer;
+- only a DER CertificateList is kept — RFC 5280 §4.2.1.13: "When the HTTP or FTP URI scheme is used, the URI MUST
+  point to a single DER encoded CRL as specified in [RFC2585]" (rfc-editor.org, read 20 November 2026; RFC 5280 is
+  not obsoleted) — recognised by its structure (§5.1); its signature and issuer are not checked: it is material for a
+  later validation, as before;
+- the captured material says whether the token was verified (`token_verified`: true, false, or null when no anchor
+  was given) and, from `stamp_pack`, the transport of the reply (`tsa_transport`); an unverified capture carries a
+  `note`. A TSA asked over plain http is not refused (public TSAs answer over http): what protects the reply is the
+  verification against the anchor, and without it nothing is asked.
+
+Reading the host as an address follows `cryptovalid_net.py` of cryptovalid-opencore (same author), written again here;
+unlike it, a redirect is never followed and a name is resolved once.
+Measured on four real tokens of public TSAs (DigiCert, Sectigo, FreeTSA, Apple; `ca_file` = this host's CA bundle): the
+DigiCert and Sectigo tokens verify and the three CRLs of each chain are downloaded, byte for byte the six that 0.12.0
+downloaded (same SHA-256); the FreeTSA and Apple tokens do not verify against that bundle and nothing is asked
+(0.12.0 downloaded their four URLs unverified).
+Declared limits: behind a proxy that is the only way out, no CRL is captured (the error is recorded); a server that
+answers a distribution point with a redirect or with a PEM CRL is recorded as an error; a token whose signer is named
+by subjectKeyIdentifier is not captured at all (`openssl ts` does not read it; unchanged); with https the server
+certificate is checked against the system's trust store. Not changed here, measured the same day: `timestamp.stamp`,
+`chip_registry.discover_online` and `chip_registry.fetch_signed_update_online` ask the URL their caller gives and
+follow a redirect from it to another host (a GET reached a second loopback server in each).
+14 tests, on a lab made with openssl when they run (a root, an intermediate and a TSA; beside them a self-made
+certificate, one issued by the root that is not an issuer of the signer, one issued by the root with the
+intermediate's name and another key, and a copy of the intermediate signed by another "root"), with local servers and
+no network: the real path through `stamp_pack` with a TSA nobody trusts (the measurement above) and with the caller's
+anchor; no anchor, another anchor, another digest, a check that cannot be run, an answer of `verify` that is not
+`True`; only the two distribution points of the signer's chain asked among six; a trusted chain naming ten URLs that
+are not public; 400 generated addresses of the refused ranges in more than 3 500 URL spellings, none connected to,
+and 780 spellings of public addresses that are (the control of the generator); more than 400 URLs outside the
+grammar; 300 generated answers of a resolver with one address that is not public among public ones; an answer that
+changes after the check; eleven statuses that are not 200 and a proxy in the environment; the byte bound and one
+byte less, an answer without end, one byte at a time; 300 changed or cut CRLs, a certificate, a PEM CRL; the caps
+per capture; TLS for the URL's name. On the previous commit all 14 fail: 1 on the defect itself (the GET arrived), 13
+because they use the parameters or the module that were not there. 82 mutants on the new and changed lines: 74 killed
+(67 at first, 7 more after tests were added for them); the other 8 give the same verdict on every input here —
+verification with another anchor is behind the same `if`; the issuer's name is compared again by openssl; with
+`-CAfile` OpenSSL 3.0 does not read its own store (tried with `SSL_CERT_FILE`); `urlsplit` lowercases the scheme;
+"not global" and the carried IPv4 address never decide alone on Python 3.9, 3.11 and 3.13 (300 000 random addresses);
+the read loop ends when the size to read reaches zero; a read of a whole chunk overshoots the bound by at most 64 KiB
+before the same refusal.
+
 **`aat.verify_chain` was quadratic in a chain whose records each name their own recorder.** The session's recorder
 (draft §5.2: one independent recorder; the genesis' `recording_component_id` when it is among the recorders, else the
 first in code point order) was chosen with a `min()` over all recorders for every record. Measured on this host with

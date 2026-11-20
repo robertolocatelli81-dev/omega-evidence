@@ -21,6 +21,23 @@ token the TSA declares qualified carries a non-critical qcStatements extension w
 esi4-qtstStatement-1 (Implementing Regulation (EU) 2025/1929, Annex, EN 319 422
 clause 9.1) and its TSA is on the EU Trusted List. This module checks neither and
 never calls a token qualified: judging qualification is left to the consumer.
+
+Capturing CRLs (`extract_validation_material(fetch_crl=True)`, `pack.stamp_pack(capture_ltv=True, fetch_crl=True)`) is
+the one place where this module asks a URL it did not get from its caller: a CRL distribution point is written by
+whoever made the certificate. The rule, closed by construction (20/11/2026; until 0.12.0 the distribution points of
+every certificate of a token nobody had verified were asked, see `_crl_fetch`):
+
+  (a) no URL is asked unless the token verifies (`verify`: signature, chain, imprint) against the trust anchor the
+      CALLER gives (`ca_file`) for the digest the caller gives; without them, or when it does not verify or the check
+      cannot be run, nothing is asked and `crl_fetch.reason` says why;
+  (b) only the certificates of the signer's chain name a URL: the signer certificate and, upwards, each certificate
+      carried by the token (or given as `untrusted`) that issued one already in the chain, and each of them must itself
+      verify under `ca_file`. Any other certificate the token carries is listed (`crl_distribution_points`) and never
+      asked;
+  (c) each URL is asked under the rule of `_crl_fetch` (public addresses only, judged as addresses; no redirect, no
+      proxy; a bound on bytes and time; only a DER CRL is kept); at most `_crl_fetch.CRL_MAX_URLS` URLs and
+      `_crl_fetch.CRL_TOTAL_MAX_BYTES` in all;
+  (d) what is refused is recorded per URL (`error`), never dropped in silence.
 """
 
 from __future__ import annotations
@@ -36,9 +53,9 @@ import subprocess  # nosec B404 - fixed-arg openssl calls, no shell
 import tempfile
 import urllib.request
 from urllib.parse import urlparse
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
-from . import _tsa_keyid
+from . import _crl_fetch, _tsa_keyid
 
 
 class CheckNotRun(OSError):
@@ -170,8 +187,13 @@ def stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
         shutil.rmtree(d, ignore_errors=True)
 
 
-def extract_validation_material(tsr_b64: str, fetch_crl: bool = False,
-                                timeout: int = 20) -> Dict:
+_UNVERIFIED_NOTE = ("read from a token that was not verified against a trust anchor: these are the certificates the "
+                    "reply carries, not proof of who issued it")
+
+
+def extract_validation_material(tsr_b64: str, fetch_crl: bool = False, timeout: int = 20,
+                                ca_file: Optional[str] = None, expected_digest_hex: Optional[str] = None,
+                                untrusted: Optional[str] = None) -> Dict:
     """Capture the material needed to validate the TSA signature in the FUTURE
     (LTV / RFC 4998 spirit): the TSA certificate chain embedded in the token, and
     — optionally, best-effort — the CRLs its CDP points to at stamping time, so the
@@ -179,7 +201,16 @@ def extract_validation_material(tsr_b64: str, fetch_crl: bool = False,
 
     Honest: this captures the chain the TSA embedded and (if fetch_crl) the CRL
     bytes at capture time; it does NOT itself judge revocation nor build a legally
-    complete LTV bundle — it preserves the inputs a validator would need later."""
+    complete LTV bundle — it preserves the inputs a validator would need later.
+
+    `ca_file` (PEM trust anchor of the TSA) and `expected_digest_hex` (the digest the token must be over), with
+    `untrusted` as in `verify`: when both are given the token is verified and the result says so (`token_verified`:
+    True or False; None when they are not given, openssl cannot run the check or cannot say). `fetch_crl=True` asks a
+    URL only under the rule in the module docstring: a verified token, the signer's chain, the closed URL rule of
+    `_crl_fetch`. Otherwise `crls_b64` is empty and `crl_fetch` is `{"fetched": False, "reason": ...}`; when URLs are
+    asked it is `{"fetched": True, "chain_certificates": n}` and each entry of `crls_b64` is `{url, crl_b64, bytes}`
+    or `{url, error}`. Until 0.12.0 `fetch_crl=True` asked the distribution points of every certificate of the token,
+    verified or not, with no bound (measured 20/11/2026: a GET to a loopback address, its answer in the sidecar)."""
     exe = shutil.which("openssl")
     if not exe:
         return {"available": False, "note": "openssl absent"}
@@ -208,13 +239,116 @@ def extract_validation_material(tsr_b64: str, fetch_crl: bool = False,
         material = {"available": True, "certs_der_b64": certs_der_b64,
                     "cert_count": len(certs_der_b64), "subjects": subjects,
                     "crl_distribution_points": sorted(set(cdps))}
+        verified, why = None, "no trust anchor (ca_file) and digest (expected_digest_hex) given"
+        if ca_file and isinstance(expected_digest_hex, str) and expected_digest_hex:
+            try:
+                v = verify(tsr_b64, expected_digest_hex, timeout=timeout, ca_file=ca_file, untrusted=untrusted)
+                verified = v.get("verified")
+                why = "" if verified is True else str(v.get("reason") or v.get("note") or "not verified")[:160]
+            except (CheckNotRun, ValueError) as e:
+                why = f"the check could not be run: {str(e)[:120]}"
+        material["token_verified"] = verified if isinstance(verified, bool) else None
+        if verified is not True:
+            material["note"] = _UNVERIFIED_NOTE
         if fetch_crl:
-            material["crls_b64"] = _fetch_crls(sorted(set(cdps)), timeout)
+            material["crls_b64"], material["crl_fetch"] = [], {"fetched": False}
+            if verified is not True:
+                material["crl_fetch"]["reason"] = ("the token is not verified against the caller's trust anchor (" + why
+                                                   + "): no URL named by its certificates is asked")
+            else:
+                try:
+                    chain, why = _signer_chain(exe, tok, certs, ca_file, untrusted, d, timeout)
+                except CheckNotRun as e:
+                    chain, why = None, f"the check could not be run: {str(e)[:120]}"
+                if chain is None:
+                    material["crl_fetch"]["reason"] = why + ": no URL is asked"
+                else:
+                    urls = sorted({u for c in chain for u in _cert_crl_dps(exe, _pem_text(c), d)})
+                    material["crl_fetch"] = {"fetched": True, "chain_certificates": len(chain)}
+                    material["crls_b64"] = _fetch_crls(urls, timeout)
         return material
     except Exception as e:  # noqa: BLE001
         return {"available": False, "note": f"{type(e).__name__}: {str(e)[:80]}"}
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+_CHAIN_POOL_MAX = 16   # certificates looked at to build the signer's chain (the token's and the caller's untrusted)
+
+
+def _pem_text(der: bytes) -> str:
+    return _tsa_keyid._pem(der).decode("ascii")
+
+
+def _names_of(der: bytes) -> Tuple[bytes, bytes]:
+    """(issuer, subject) of a certificate, each as the DER of its Name; DerError when it is not read"""
+    cert = _tsa_keyid._items(_tsa_keyid._one(der, "certificate", 0x30), "certificate")
+    tbs = _tsa_keyid._items(cert[0][1], "tbsCertificate")
+    k = 1 if tbs[0][0] == 0xA0 else 0
+    if len(tbs) < k + 5:
+        raise _tsa_keyid.DerError("tbsCertificate: too short")
+    return _tsa_keyid._tlv(0x30, tbs[k + 2][1]), _tsa_keyid._tlv(0x30, tbs[k + 4][1])
+
+
+def _signer_chain(exe: str, tok: str, certs_pem: List[str], ca_file: str, untrusted: Optional[str], d: str,
+                  timeout: int) -> Tuple[Optional[List[bytes]], str]:
+    """Rule (b) of the module docstring, for a token `verify` has accepted under `ca_file`: ([signer, issuers...], "")
+    as DER, or (None, why). The signer is the certificate whose key `openssl cms -verify` checks the signature with;
+    a certificate of the pool joins the chain when it issued one already in it (same Name as that one's issuer, and
+    `openssl verify -partial_chain -trusted <it>` accepts that one) AND itself verifies under `ca_file` — a copy of an
+    issuer with the same name and key and another distribution point has no valid signature and stays out."""
+    def write(path: str, data: bytes) -> None:
+        with open(path, "wb") as f:
+            f.write(data)
+    pool: List[bytes] = []
+    extra_pem = b""
+    if untrusted is not None:
+        with open(untrusted, "rb") as f:
+            extra_pem = f.read()
+    for block in certs_pem + _split_pem_certs(extra_pem.decode("ascii", "replace")):
+        der = _tsa_keyid._first_pem_der(block.encode("ascii", "replace"))
+        if der is not None and der not in pool:
+            pool.append(der)
+    if len(pool) > _CHAIN_POOL_MAX:
+        return None, f"more than {_CHAIN_POOL_MAX} certificates to build the signer's chain from"
+    sp, pp = os.path.join(d, "chain_signer.pem"), os.path.join(d, "chain_pool.pem")
+    write(pp, b"".join(_tsa_keyid._pem(c) for c in pool))
+    r = _run_openssl([exe, "cms", "-verify", "-noverify", "-binary", "-inform", "DER", "-in", tok, "-signer", sp,
+                      "-out", os.devnull, "-certfile", pp], capture_output=True, timeout=timeout)
+    signer = None
+    if r.returncode == 0 and os.path.exists(sp):
+        with open(sp, "rb") as f:
+            signer = _tsa_keyid._first_pem_der(f.read())
+    if signer is None or signer not in pool:
+        return None, "the signer certificate of the token was not found among its certificates"
+
+    def anchored(der: bytes, purpose: List[str]) -> bool:
+        cp = os.path.join(d, "chain_c.pem")
+        write(cp, _tsa_keyid._pem(der))
+        return _run_openssl([exe, "verify", "-CAfile", ca_file, "-no-CApath", "-no-CAstore", "-untrusted", pp] + purpose
+                            + [cp], capture_output=True, timeout=timeout).returncode == 0
+
+    def issued(issuer: bytes, subject: bytes) -> bool:
+        try:
+            if not _tsa_keyid.names_equal(_names_of(subject)[0], _names_of(issuer)[1]):
+                return False
+        except (ValueError, IndexError):
+            return False
+        ip, cp = os.path.join(d, "chain_i.pem"), os.path.join(d, "chain_s.pem")
+        write(ip, _tsa_keyid._pem(issuer))
+        write(cp, _tsa_keyid._pem(subject))
+        return _run_openssl([exe, "verify", "-partial_chain", "-trusted", ip, "-no-CApath", "-no-CAstore", cp],
+                            capture_output=True, timeout=timeout).returncode == 0
+    if not anchored(signer, ["-purpose", "timestampsign"]):
+        return None, "the signer certificate does not verify under ca_file"
+    chain, todo = [signer], [signer]
+    while todo:
+        cur = todo.pop()
+        for cand in pool:
+            if cand not in chain and issued(cand, cur) and anchored(cand, []):
+                chain.append(cand)
+                todo.append(cand)
+    return chain, ""
 
 
 def _split_pem_certs(pem_text: str):
@@ -274,16 +408,26 @@ def _cert_crl_dps(exe: str, pem: str, d: str):
 
 
 def _fetch_crls(urls, timeout: int):
-    out = []
-    for u in urls:
-        if urlparse(u).scheme not in ("http", "https"):
+    """Rule (c) of the module docstring: each URL asked through `_crl_fetch.fetch`, its refusals recorded."""
+    out, total = [], 0
+    for n, u in enumerate(urls):
+        if n >= _crl_fetch.CRL_MAX_URLS:
+            out.append({"url": u, "error": f"not asked: more than {_crl_fetch.CRL_MAX_URLS} distribution points"})
+            continue
+        left = _crl_fetch.CRL_TOTAL_MAX_BYTES - total
+        if left <= 0:
+            out.append({"url": u, "error": f"not asked: {_crl_fetch.CRL_TOTAL_MAX_BYTES} bytes of CRLs already captured"})
             continue
         try:
-            with urllib.request.urlopen(u, timeout=timeout) as rh:  # nosec B310 - scheme checked
-                data = rh.read()
-            out.append({"url": u, "crl_b64": base64.b64encode(data).decode(), "bytes": len(data)})
+            data = _crl_fetch.fetch(u, timeout, min(_crl_fetch.CRL_MAX_BYTES, left))
+        except _crl_fetch.Refused as e:
+            out.append({"url": u, "error": f"refused: {str(e)[:120]}"})
+            continue
         except Exception as e:  # noqa: BLE001 - best-effort per CDP
             out.append({"url": u, "error": f"{type(e).__name__}: {str(e)[:60]}"})
+            continue
+        total += len(data)
+        out.append({"url": u, "crl_b64": base64.b64encode(data).decode(), "bytes": len(data)})
     return out
 
 
