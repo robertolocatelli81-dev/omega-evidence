@@ -361,7 +361,10 @@ public class OeVerify {
             String act = str(dd, "action"); if (!"trust".equals(act) && !"rotate".equals(act) && !"revoke".equals(act)) continue;
             String sid = str(dd, "signer_id"), pk = str(dd, "pubkey"), pq = str(dd, "pq_pubkey");
             if (sid == null || sid.isEmpty() || (!"revoke".equals(act) && (pk == null || pk.isEmpty())) || (dd.vals.containsKey("pq_pubkey") && (pq == null || pq.isEmpty()))) { ok[0] = false; return st; }
-            if ("trust".equals(act)) { TrustEntry cur = st.get(sid); if (cur != null && cur.revoked) continue; TrustEntry t = new TrustEntry(); t.pubkey = pk; t.pq = pq; st.put(sid, t); }
+            if ("trust".equals(act)) { TrustEntry cur = st.get(sid); if (cur != null && cur.revoked) continue;
+                // 20/11/2026: a trust line that changes a trusted key (or its PQ key) is rotate's job — a broken store, as in the four
+                if (cur != null && (!cur.pubkey.equals(pk) || (cur.pq != null && pq != null && !cur.pq.equals(pq)))) { ok[0] = false; return st; }
+                TrustEntry t = new TrustEntry(); t.pubkey = pk; t.pq = pq != null ? pq : (cur != null ? cur.pq : null); st.put(sid, t); }
             else if ("rotate".equals(act)) { TrustEntry t = new TrustEntry(); t.pubkey = pk; t.pq = pq; st.put(sid, t); }
             else if ("revoke".equals(act)) { TrustEntry cur = st.get(sid); if (cur != null) cur.revoked = true; }
         }

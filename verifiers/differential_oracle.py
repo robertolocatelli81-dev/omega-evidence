@@ -267,6 +267,14 @@ def build_cases(d):
     cases["trust-rotated"] = (rot, ["--trust-store", store_r], None)
     rev = mk("revoked"); sign_declared(rev, idt); store_v = os.path.join(d, "trust_rev.jsonl"); tr3 = trust.TrustRegistry(store_v); tr3.trust("acme", idt.public_key_b64); tr3.revoke("acme", "x")
     cases["trust-revoked"] = (rev, ["--trust-store", store_v], None)
+    # 20/11/2026: a 'trust' line appended (the chain re-linked, as anyone who can write the file can) with ANOTHER key for a
+    # trusted signer — trust() refuses it live; on replay it replaced the key in the four. Now a broken store in the four.
+    rk = mk("retrusted"); sign_declared(rk, idt); store_k = os.path.join(d, "trust_rekey.jsonl"); trust.TrustRegistry(store_k).trust("acme", other.public_key_b64)
+    Ledger(store_k).append({"action": "trust", "signer_id": "acme", "pubkey": idt.public_key_b64, "ts": "2026-11-20T00:00:00+00:00"})
+    cases["trust-retrusted-other-key"] = (rk, ["--trust-store", store_k], None)
+    store_s = os.path.join(d, "trust_same.jsonl"); trust.TrustRegistry(store_s).trust("acme", idt.public_key_b64)   # control: the same key again
+    Ledger(store_s).append({"action": "trust", "signer_id": "acme", "pubkey": idt.public_key_b64, "ts": "2026-11-20T00:00:00+00:00"})
+    cases["trust-retrusted-same-key"] = (rk, ["--trust-store", store_s], None)
     if HAVE_PQ:
         kf = os.path.join(d, "acme.pq"); mldsa.MlDsaFileSigner.keygen(kf); ps = mldsa.MlDsaFileSigner(kf); K = ps.public_key_b64
         store_h = os.path.join(d, "trust_h.jsonl"); trust.TrustRegistry(store_h).trust("acme", idt.public_key_b64, pq_pubkey=K)
@@ -294,6 +302,11 @@ def build_cases(d):
         cases["hybrid-rotated-keeps-pq-required"] = (h, ["--trust-store", store_rk, "--require-pq"], JS_NO_PQ)
         store_rd = os.path.join(d, "trust_rd.jsonl"); trd = trust.TrustRegistry(store_rd); trd.trust("acme", other.public_key_b64, pq_pubkey=K); trd.rotate("acme", idt.public_key_b64, drop_pq=True)
         cases["hybrid-rotated-dropped-pq-required"] = (h, ["--trust-store", store_rd, "--require-pq"], None)
+        # 20/11/2026: a 'trust' line without pq_pubkey appended for a signer whose PQ key is pinned dropped the pin on replay
+        # (trust() leaves it): the pin is kept in the four, so the hybrid pack stays pq-protected through the registry
+        store_np = os.path.join(d, "trust_nopq.jsonl"); trust.TrustRegistry(store_np).trust("acme", idt.public_key_b64, pq_pubkey=K)
+        Ledger(store_np).append({"action": "trust", "signer_id": "acme", "pubkey": idt.public_key_b64, "ts": "2026-11-20T00:00:00+00:00"})
+        cases["hybrid-retrusted-without-pq-required"] = (h, ["--trust-store", store_np, "--require-pq"], JS_NO_PQ)
         cases["hybrid-bad-pq-required"] = (bp, ["--expect-pq-key", K], None)
         sw = mk("pq-space"); sign_declared(sw, idt); P.pq_cosign(sw, ps); sp = sw[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["pq_signature_b64"] = sd["pq_signature_b64"][:6] + " " + sd["pq_signature_b64"][6:]; json.dump(sd, open(sp, "w"))
         cases["hybrid-pq-lenient-base64"] = (sw, [], None)

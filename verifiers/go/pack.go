@@ -350,8 +350,16 @@ func trustState(path string) (map[string]*trustEntry, bool) {
 		}
 		switch act {
 		case "trust":
-			if cur := st[sid]; cur != nil && cur.revoked {
+			cur := st[sid]
+			if cur != nil && cur.revoked {
 				continue
+			}
+			// 20/11/2026: a trust line that changes a trusted key (or its PQ key) is rotate's job — a broken store, as in the four
+			if cur != nil && (cur.pubkey != pk || (cur.pqPubkey != "" && pqPresent && cur.pqPubkey != pq)) {
+				return st, false
+			}
+			if !pqPresent && cur != nil {
+				pq = cur.pqPubkey
 			}
 			st[sid] = &trustEntry{pubkey: pk, pqPubkey: pq}
 		case "rotate":

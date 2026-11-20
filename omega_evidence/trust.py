@@ -97,7 +97,16 @@ class TrustRegistry:
                 # a revoked signer is NOT silently re-trusted by a 'trust' entry
                 # (rotate() is the explicit way to re-establish).
                 return
-            self._state[sid] = {"pubkey": d.get("pubkey"), "pq_pubkey": d.get("pq_pubkey"), "revoked": False, "since": d.get("ts")}
+            if cur:
+                # mirror the live trust() guards too (20/11/2026: a 'trust' line appended with another key replaced the
+                # trusted one on reload, where trust() refuses it; a line without pq_pubkey dropped the pinned PQ key,
+                # where trust() leaves it): a key change is rotate()'s, so such a line is a broken store
+                if cur["pubkey"] != d["pubkey"]:
+                    raise ValueError(f"trust store broken: a trust record changes the key of {sid!r} (only rotate may)")
+                if cur.get("pq_pubkey") and d.get("pq_pubkey") and cur["pq_pubkey"] != d["pq_pubkey"]:
+                    raise ValueError(f"trust store broken: a trust record changes the post-quantum key of {sid!r} (only rotate may)")
+            self._state[sid] = {"pubkey": d.get("pubkey"), "pq_pubkey": d.get("pq_pubkey") or (cur or {}).get("pq_pubkey"),
+                                "revoked": False, "since": d.get("ts")}
         elif act == "rotate":
             self._state[sid] = {"pubkey": d.get("pubkey"), "pq_pubkey": d.get("pq_pubkey"), "revoked": False, "since": d.get("ts")}
         elif act == "revoke" and sid in self._state:

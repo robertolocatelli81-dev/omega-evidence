@@ -274,7 +274,10 @@ function trustState(path) {
     const sid = d.signer_id;
     const badKey = (v) => typeof v !== "string" || !v;
     if (badKey(sid) || (d.action !== "revoke" && badKey(d.pubkey)) || ("pq_pubkey" in d && badKey(d.pq_pubkey))) return { ok: false, st };
-    if (d.action === "trust") { if (st[sid] && st[sid].revoked) continue; st[sid] = { pubkey: d.pubkey, pq: d.pq_pubkey, revoked: false }; }
+    if (d.action === "trust") { const cur = st[sid]; if (cur && cur.revoked) continue;
+      // 20/11/2026: a trust line that changes a trusted key (or its PQ key) is rotate's job — a broken store, as in the four
+      if (cur && (cur.pubkey !== d.pubkey || (cur.pq && d.pq_pubkey !== undefined && cur.pq !== d.pq_pubkey))) return { ok: false, st };
+      st[sid] = { pubkey: d.pubkey, pq: d.pq_pubkey !== undefined ? d.pq_pubkey : (cur ? cur.pq : undefined), revoked: false }; }
     else if (d.action === "rotate") st[sid] = { pubkey: d.pubkey, pq: d.pq_pubkey, revoked: false };
     else if (d.action === "revoke" && st[sid]) st[sid].revoked = true;
   }
