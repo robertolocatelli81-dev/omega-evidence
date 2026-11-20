@@ -429,6 +429,28 @@ very function registered) the layer is reported present-but-unverifiable (never 
 
 0.12.0 was released on 19 November 2026; its changes are the three 0.12.0 sections below (18, 17 and 14 November).
 
+### Unreleased — an AAT chain carrying an integer outside ±(2^53−1) verifies with a warning that names it (20 November 2026)
+
+`aat.verify_chain` and `aat.verify_epochs` read foreign chains the ES6 way: an integer outside ±(2^53−1) is hashed as
+the nearest double, so 2^53 and 2^53+1 give the same JCS bytes. RFC 8785 §3.1 requires JCS input adapted to I-JSON,
+with numbers expressible as IEEE 754 doubles; RFC 7493 §2.2: a sender cannot expect such an integer to be treated as
+exact. Measured on 0.12.0: a chain whose record carried 2^53 still verified, with no warning, after that integer was
+changed to 2^53+1, a value that was never hashed; the same swap also passed `verify_epochs` against the epoch anchor.
+The verdict stays the same (this release warns, it does not refuse; the AAT draft, -10 of 17 November 2026, says
+nothing about integers beyond requiring RFC 8785), but each such record now gets one warning from each of the two
+functions, with the JSON Pointers (RFC 6901) of the first five such integers in the record (members in key order,
+array elements in index order; the detached `batch`, which no hash covers, is not searched) and how many more there
+are, so a reader knows the value it holds may not be the signed one. `from_omega` and `anchor_epoch` already refuse
+these integers and are unchanged; `sign_record`, `tombstone`, `close_record` and `to_jsonl` still take them as
+doubles (`to_jsonl` writes 2^53+1 as 9007199254740992).
+`tests/test_aat_beyond_safe_int_20261120.py`, 8 tests: the swap above; 300 generated values (±(2^53−1), ±2^53, 2^60,
+−2^64, booleans, 0 and random integers within the range, directly in `action_detail`, in a list and under a key with
+`/` and `~`); a clean chain; the order and the five-pointer cap; `batch` not searched; a non-string key (a problem,
+not a crash); the root pointer `""`; `verify_epochs` alone. 5 of the 8 fail on 0.12.0 (positive control); 18 of 19
+mutants on the new lines killed, the 19th (excluding booleans from the check) is equivalent (|True| = 1; same output
+on 20 000 generated values). Same class found on 19 November 2026 in another verifier of ours with a review tool;
+found by that review, not by an outside report.
+
 ### 0.12.0 — attestations and timestamps made by others: ECDSA P-256 in DSSE, sigstore bundles, RFC 3161 tokens without their certificate (18 November 2026)
 
 Measured on 18 November 2026 on real material of 24 public GitHub repositories (the latest release of each): 24 GitHub

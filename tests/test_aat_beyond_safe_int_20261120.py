@@ -1,0 +1,133 @@
+"""verify_chain warns about every integer outside +/-(2^53-1) in a foreign AAT chain (2026-11-20).
+
+On VERIFY such integers are hashed as the nearest double (ES6), so 2^53 and 2^53+1 hash alike: the chain still
+verifies (foreign records, RFC 8785 §3.1 / RFC 7493 §2.2), but the value read in Python may not be the signed one.
+Positive control: on 11f5aa0 (0.12.0) the swapped chain verified with no warning; these tests failed there."""
+import json
+import os
+import random
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from omega_evidence.interop import aat  # noqa: E402
+import test_toolkit  # noqa: E402  (module import: its test classes are not collected here)
+
+LIM = 2 ** 53 - 1
+
+
+def _rehash(recs):
+    for k in range(1, len(recs)):
+        recs[k]["prev_hash"] = aat.record_hash(recs[k - 1], strict=False)
+    return recs
+
+
+def _warned(res):
+    return [w for w in res["warnings"] if "outside +/-(2^53-1)" in w["why"]]
+
+
+class TestBeyondSafeInt(unittest.TestCase):
+    def _chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = list(test_toolkit.TestAATInterop._log(test_toolkit.TestAATInterop(), tmp)._ledger.entries())
+        return next(iter(aat.from_omega(entries, agent_version="1.0", close=True).values()))
+
+    def test_swap_2p53_plus_1_still_verifies_but_is_warned(self):
+        recs = json.loads(json.dumps(self._chain()))
+        recs[1]["action_detail"]["amount"] = 2 ** 53
+        _rehash(recs)
+        signed = aat.verify_chain(recs)
+        swapped = json.loads(json.dumps(recs))
+        swapped[1]["action_detail"]["amount"] = 2 ** 53 + 1      # never "signed": same JCS bytes
+        res = aat.verify_chain(swapped)
+        self.assertEqual(res["ok"], signed["ok"])                  # verdict unchanged (foreign format)
+        self.assertEqual(res["problems"], signed["problems"])
+        w = _warned(res)
+        self.assertEqual(len(w), 1, res["warnings"])
+        self.assertEqual(w[0]["i"], 1)
+        self.assertIn("/action_detail/amount", w[0]["why"])
+
+    def test_generated_bounds_both_signs_and_bools(self):
+        rng = random.Random(20261120)
+        base = json.loads(json.dumps(self._chain()))
+        for _ in range(300):
+            v = rng.choice([LIM, -LIM, LIM + 1, -LIM - 1, 2 ** 60, -(2 ** 64), rng.randint(-LIM, LIM), True, False, 0])
+            where = rng.choice(["flat", "list", "nested"])
+            recs = json.loads(json.dumps(base))
+            d = recs[1]["action_detail"]
+            if where == "flat":
+                d["x"] = v
+                ptr = "/action_detail/x"
+            elif where == "list":
+                d["x"] = [0, v]
+                ptr = "/action_detail/x/1"
+            else:
+                d["a/b~c"] = {"y": v}
+                ptr = "/action_detail/a~1b~0c/y"
+            _rehash(recs)
+            w = _warned(aat.verify_chain(recs))
+            bad = type(v) is int and abs(v) > LIM
+            self.assertEqual(bool(w), bad, (v, where))
+            if bad:
+                self.assertIn(ptr, w[0]["why"])
+
+    def test_clean_chain_has_no_such_warning(self):
+        self.assertEqual(_warned(aat.verify_chain(self._chain())), [])
+
+    def _one(self, detail_extra):
+        recs = json.loads(json.dumps(self._chain()))
+        recs[1]["action_detail"].update(detail_extra)
+        _rehash(recs)
+        w = _warned(aat.verify_chain(recs))
+        self.assertEqual(len(w), 1, w)
+        return w[0]["why"]
+
+    def test_pointers_in_order_first_five_and_count(self):
+        why = self._one({"L": [2 ** 53] * 7, "a": -(2 ** 53)})
+        self.assertIn("at /action_detail/L/0, /action_detail/L/1, /action_detail/L/2, /action_detail/L/3, "
+                      "/action_detail/L/4 (+3 more): ", why)
+        why = self._one({"L": [2 ** 53] * 4, "a": -(2 ** 53)})
+        self.assertIn("at /action_detail/L/0, /action_detail/L/1, /action_detail/L/2, /action_detail/L/3, "
+                      "/action_detail/a: ", why)
+
+    def test_batch_is_not_named(self):
+        # `batch` is detached: no hash and no signature covers it, so its integers are not "hashed as doubles"
+        recs = json.loads(json.dumps(self._chain()))
+        recs[1]["batch"] = {"epoch_id": "8f5ad8b4-6a3e-4c43-9a51-5b8a2b1f6c11", "merkle_root": "0" * 64, "leaf_index": 2 ** 53}
+        self.assertEqual(_warned(aat.verify_chain(recs)), [])
+
+    def test_non_string_keys_are_a_problem_not_a_crash(self):
+        recs = json.loads(json.dumps(self._chain()))
+        recs[1]["action_detail"][1] = 2 ** 53
+        res = aat.verify_chain(recs)
+        self.assertTrue(any("not canonicalizable" in p["why"] for p in res["problems"]), res["problems"])
+
+    def test_root_pointer_is_empty_string(self):
+        self.assertEqual(aat._beyond_safe_int(2 ** 53), [""])                    # RFC 6901: "" is the whole value
+        self.assertEqual(aat._beyond_safe_int({"": 2 ** 53}), ["/"])             # "/" is the member named ""
+
+    def test_verify_epochs_alone_warns(self):
+        recs = json.loads(json.dumps(self._chain()))
+        recs[1]["action_detail"]["amount"] = 2 ** 53
+        _rehash(recs)
+        leaves = [aat.leaf_hash(r) for r in recs]                                 # strict=False: a foreign epoch
+        root, paths, eid = aat.merkle_root(leaves), aat.audit_paths(leaves), "8f5ad8b4-6a3e-4c43-9a51-5b8a2b1f6c11"
+        for k, r in enumerate(recs):
+            r["batch"] = {"epoch_id": eid, "merkle_root": root.hex(), "leaf_index": k, "inclusion_proof": paths[k]}
+        anchor = {"epoch_id": eid, "merkle_root": root.hex(), "leaf_count": len(recs),
+                  "hash": "RFC 6962 / SHA-256 (leaf 0x00 || JCS(record without batch), node 0x01)"}
+        recs[1]["action_detail"]["amount"] = 2 ** 53 + 1                         # same leaf hash
+        res = aat.verify_epochs(recs, [anchor])
+        self.assertTrue(res["ok"], res["problems"])
+        w = _warned(res)
+        self.assertEqual([x["i"] for x in w], [1], res["warnings"])
+        self.assertIn("/action_detail/amount", w[0]["why"])
+        recs[1]["action_detail"]["amount"] = 2 ** 53 + 2                         # positive control: a different double
+        self.assertFalse(aat.verify_epochs(recs, [anchor])["ok"])
+
+
+if __name__ == "__main__":
+    unittest.main()

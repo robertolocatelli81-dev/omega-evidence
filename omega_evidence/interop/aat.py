@@ -725,6 +725,9 @@ def verify_epochs(records: List[Dict[str, Any]], anchors: List[Dict[str, Any]],
             lh = leaf_hash(r)
         except (ValueError, TypeError, RecursionError) as ex:
             problems.append({"i": i, "why": f"record not canonicalizable: {type(ex).__name__}"}); continue
+        w = _beyond_safe_int_warning(i, r)       # the leaf hash read such integers as doubles too (verify_epochs runs alone as well)
+        if w:
+            warnings.append(w)
         a = by_id.get(b.get("epoch_id"))
         if a is None:
             problems.append({"i": i, "why": f"no anchor for epoch {b.get('epoch_id')}"}); continue
@@ -957,6 +960,37 @@ def _check_optional(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], w
         problems.append({"i": i, "why": "signer_kid_classical without signature_classical: hybrid claimed, classical half missing"})
 
 
+def _beyond_safe_int(obj: Any) -> List[str]:
+    """JSON Pointers (RFC 6901; "" is the whole value) of every integer outside +/-(2^53-1) in `obj`, members in
+    code-point key order, array elements in index order. Iterative: callers run it only on a value jcs() accepted, so
+    the depth is bounded by JCS_MAX_DEPTH and every object key is a string."""
+    out: List[str] = []
+    stack = [("", obj)]
+    while stack:
+        path, x = stack.pop()
+        if isinstance(x, int):                       # bool included: |True| = 1 is never outside
+            if abs(x) > _SAFE_INT:
+                out.append(path)
+        elif isinstance(x, dict):
+            for k in sorted(x, reverse=True):
+                stack.append((path + "/" + str(k).replace("~", "~0").replace("/", "~1"), x[k]))
+        elif isinstance(x, list):
+            for j in range(len(x) - 1, -1, -1):
+                stack.append((f"{path}/{j}", x[j]))
+    return out
+
+
+def _beyond_safe_int_warning(i: int, r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The warning for record `i` when its hashed content (the record without the detached `batch`, which no hash or
+    signature covers) holds integers outside +/-(2^53-1): the first five JSON Pointers and how many more."""
+    beyond = _beyond_safe_int(_no_batch(r))
+    if not beyond:
+        return None
+    more = f" (+{len(beyond) - 5} more)" if len(beyond) > 5 else ""
+    return {"i": i, "why": f"integer(s) outside +/-(2^53-1) at {', '.join(beyond[:5])}{more}: hashed and checked as the "
+                          "nearest double (RFC 8785 §3.1 / RFC 7493 §2.2), so the value read here may not be the one that was signed"}
+
+
 def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = None,
                  keys: Optional[Dict[str, Any]] = None, agent_kid: Optional[str] = None,
                  require_signatures: bool = False, consequential: Optional[Callable[[Dict[str, Any]], bool]] = None,
@@ -1095,6 +1129,10 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
         except (ValueError, TypeError, RecursionError) as ex:
             canonical_ok = False
             problems.append({"i": i, "why": f"record not canonicalizable: {type(ex).__name__}"})
+        if canonical_ok:
+            w = _beyond_safe_int_warning(i, r)
+            if w:
+                warnings.append(w)
         _check_detail(i, r, problems, warnings)
         _check_optional(i, r, problems, warnings)
         d = r.get("action_detail") if isinstance(r.get("action_detail"), dict) else {}
