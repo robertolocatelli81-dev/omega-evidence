@@ -27,6 +27,10 @@ from omega_evidence import verifier  # noqa: E402
 from omega_evidence.pqbackends import gate as pqgate  # noqa: E402
 
 
+def _layer_of(r, name):
+    return next((ly for ly in r["layers"] if ly["layer"] == name), {})
+
+
 class TestCanonicalLedger(unittest.TestCase):
     def test_canonical_deterministic_and_injective(self):
         self.assertEqual(canonical.sha3({"a": 1, "b": [2, 3]}),
@@ -486,7 +490,10 @@ class TestCryptoAgility(unittest.TestCase):
             sp = pp[:-5] + ".sig.json"
             side = json.loads(Path(sp).read_text()); side["sig_alg"] = "martian-sig"
             Path(sp).write_text(json.dumps(side))
-            v = verify_pack(pp, trust_store=store)
+            # Unreleased (Decision 1, 20/11/2026): a trust store requires a signature, so beside one this is a FAIL
+            st = verify_pack(pp, trust_store=store)
+            self.assertFalse(st["valid"]); self.assertEqual(_layer_of(st, "producer-signature")["status"], "FAIL")
+            v = verify_pack(pp)
             prod = [l for l in v["layers"] if l["layer"] == "producer-signature"][0]
             self.assertEqual(prod["status"], "SKIP")
             # 0.10.0: the SKIP says that a signature is present and was not verified, and so does the authenticity layer;
@@ -2513,9 +2520,11 @@ class NemesisInputsAndFaults(unittest.TestCase):
                         self.assertFalse(r["valid"])
                         if field != "pq_sig_alg":   # a malformed PQ field fails its own layer; the classical signature still holds
                             self.assertFalse(r["authenticated"])
-            p = self._signed(tmp); self.assertTrue(verify_pack(p)["authenticated"])        # as produced: PASS
+            # as produced: PASS (valid; not authenticated without a trust registry — Unreleased, Decision 1 of 20/11/2026)
+            p = self._signed(tmp); r = verify_pack(p); self.assertEqual((r["valid"], r["authenticated"]), (True, False))
+            self.assertEqual(_layer_of(r, "producer-signature")["status"], "PASS")
             sp = p[:-5] + ".sig.json"; sd = json.load(open(sp)); sd.pop("fingerprint"); sd.pop("signed_utc"); json.dump(sd, open(sp, "w"))
-            self.assertTrue(verify_pack(p)["authenticated"])                               # absent (legacy): PASS
+            r = verify_pack(p); self.assertEqual(_layer_of(r, "producer-signature")["status"], "PASS")   # absent (legacy): PASS
 
     def test_internal_error_is_not_assessed_never_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2791,7 +2800,8 @@ class TestSigAlg20260929(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             good = self._pack(tmp, "g", "ed25519"); legacy = self._pack(tmp, "l", None)
             for p in (good, legacy):                                        # a verified signature satisfies the requirement
-                v = verify_pack(p, require_signed=True); self.assertTrue(v["valid"]); self.assertTrue(v["authenticated"])
+                v = verify_pack(p, require_signed=True); self.assertTrue(v["valid"])
+                self.assertFalse(v["authenticated"])                        # no registry: not an identity (Unreleased, Decision 1)
             unknown = self._pack(tmp, "u", "rsa-pss"); v = verify_pack(unknown, require_signed=True)
             self.assertFalse(v["valid"]); self.assertFalse(v["authenticated"])
             ly = self._layer(v, "producer-signature")

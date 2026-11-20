@@ -302,6 +302,7 @@ export function verifyPack(packPath, opts = {}) {
 function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ = "", requirePQ = false, requireSigned = false } = {}) {
   const add = (layer, status, detail = "", assessed = true) => layers.push(assessed ? { layer, status, detail } : { layer, status, detail, assessed });
   const required = requirePQ || Boolean(expectPQ);
+  requireSigned = requireSigned || Boolean(trustStore);   // a trust registry asks for an identity: it requires a signature (Unreleased, the four)
   let pack, packBytes;   // read ONCE; the timestamp binding hashes these bytes, not a second read
   try { packBytes = readInput(packPath); pack = objectOf(UTF8.decode(packBytes)); } catch (e) { add("pack-json", "FAIL", e.message); return finish(layers, false, false, required); }
   add("pack-json", "PASS");
@@ -368,7 +369,7 @@ function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ
           const sid = side.signer_id;
           if (typeof sid !== "string" || !sid) { add("producer-signature", "FAIL", "malformed sidecar fields: signer_id must be a non-empty string"); sigStatus = "FAIL"; }   // council r2
           else {
-          add("producer-signature", "PASS", `signed by ${sid} (ed25519)`); sigStatus = "PASS";
+          add("producer-signature", "PASS", `valid ed25519 signature by the key in the sidecar; signer_id ${sid} is not covered by it`); sigStatus = "PASS";
           let st = null, stOK = true; if (trustStore) { const r = trustState(trustStore); st = r.st; stOK = r.ok; }
           // the registry's PQ pin is borrowed only when the classical key that signed is the registered one (council 16/09 r1)
           let pinned = expectPQ; if (!pinned && st && stOK && st[sid] && !st[sid].revoked && st[sid].pq && st[sid].pubkey === side.public_key_b64) pinned = st[sid].pq;
@@ -391,7 +392,7 @@ function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ
   else if (sigStatus === "FAIL") add("authenticity", "FAIL", "producer signature present but invalid");
   else if (trustFailed) add("authenticity", "FAIL", "valid signature but signer not trusted/revoked");
   else if (trusted) add("authenticity", "PASS", "trusted-signed");
-  else if (sigStatus === "PASS") add("authenticity", "PASS", "signed (identity not checked against a registry)");
+  else if (sigStatus === "PASS") add("authenticity", "PASS", "signed by a key NOT checked against a registry (integrity, not identity; signer_id is an unsigned label)");
   else if (ledgerOK) add("authenticity", "PASS", "anchored (integrity/time, not identity)" + note);
   else add("authenticity", "FAIL", "no anchor and no verified signature: cannot authenticate" + note);
   return finish(layers, trusted, sigStatus === "PASS" && !trustFailed, required);   // council 16/09 r1: never authenticated for a revoked/untrusted signer
@@ -457,7 +458,7 @@ function finish(layers, trusted, signed, pqRequired) {
   const absent = layers.some((l) => l.assessed === false);
   const assessed = judged || !absent;                 // FAIL > NOT_ASSESSED > PASS, SKIP included
   const passed = valid && assessed && (!pqRequired || pq === true);
-  return { valid, assessed, layers, authenticated: (trusted || signed) && integrity, pq_protected: pq, verdict: passed ? "PASS" : (assessed ? "FAIL" : "NOT_ASSESSED"), verifier: "oeverify.mjs (Node stdlib; ML-DSA-65 " + (MLDSA_SUPPORTED ? "verified through OpenSSL >= 3.5" : "not verifiable on this Node") + ")" };
+  return { valid, assessed, layers, authenticated: trusted && signed && integrity /* Unreleased: trusted-signed only (until 0.13.0: trusted || signed) */, pq_protected: pq, verdict: passed ? "PASS" : (assessed ? "FAIL" : "NOT_ASSESSED"), verifier: "oeverify.mjs (Node stdlib; ML-DSA-65 " + (MLDSA_SUPPORTED ? "verified through OpenSSL >= 3.5" : "not verifiable on this Node") + ")" };
 }
 
 function main(argv) {

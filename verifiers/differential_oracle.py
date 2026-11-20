@@ -69,6 +69,7 @@ CASE_ENV = {}   # name -> extra environment (the internal-error injection hook)
 HAZARD = set()  # names whose input used to block or exhaust memory: run with a memory cap (prlimit) and a short timeout
 DETAILS = {}    # name -> {verifier command: {layer: (status, detail)}} — every layer, the RFC 3161 one under its Go/Java/Node name `timestamp`
 DETAIL_LAYERS = ("producer-signature", "authenticity")   # compared on the sig-alg- cases (29/09/2026)
+EXPECT_AUTH = {}   # name -> the `authenticated` EVERY verifier must give (Unreleased: true for trusted-signed only)
 COMPARE_LAYERS = {}   # name -> layers whose (status, detail) must be one in the four (11/10/2026: the closed-schema cases)
 
 
@@ -444,6 +445,15 @@ def _sigalg_cases(d, cases, mk, idt, store):
         p = anchored_signed(f"sigalg-unknown-{nm}", alg)
         cases[f"sig-alg-unknown-{nm}-anchored"] = (p, [], None); EXPECT[f"sig-alg-unknown-{nm}-anchored"] = "PASS"
         cases[f"sig-alg-unknown-{nm}-required-signed"] = (p, ["--require-signed"], None); EXPECT[f"sig-alg-unknown-{nm}-required-signed"] = "FAIL"
+    # Unreleased (Decision 1 of 20/11/2026): `authenticated` is trusted-signed only, and a trust store requires a signature
+    # (no sidecar, or an algorithm that cannot be checked here: FAIL, as --require-signed). Measured before: exit 0 for both.
+    s, a, store = cases["signed"][0], cases["anchored"][0], cases["signed-trusted"][1][1]
+    cases["d1-signed-no-store"] = (s, [], None); EXPECT["d1-signed-no-store"] = "PASS"; EXPECT_AUTH["d1-signed-no-store"] = False
+    cases["d1-signed-trusted"] = (s, ["--trust-store", store], None); EXPECT["d1-signed-trusted"] = "PASS"; EXPECT_AUTH["d1-signed-trusted"] = True
+    cases["d1-store-unsigned-anchored"] = (a, ["--trust-store", store], None); EXPECT["d1-store-unsigned-anchored"] = "FAIL"
+    cases["d1-store-unsigned-bare"] = (cases["bare"][0], ["--trust-store", store], None); EXPECT["d1-store-unsigned-bare"] = "FAIL"
+    p = anchored_signed("sigalg-unknown-store", "rsa-pss")
+    cases["d1-store-alg-unknown-anchored"] = (p, ["--trust-store", store], None); EXPECT["d1-store-alg-unknown-anchored"] = "FAIL"
     EXPECT["sig-alg-unknown"] = "PASS"   # the 0.7.0 case (rsa-pss, anchored): the verdict is unchanged, the reason is now said
     un = mk("sigalg-unknown-unanchored"); sign_declared(un, idt); sp = un[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["sig_alg"] = "rsa-pss"; json.dump(sd, open(sp, "w"))
     cases["sig-alg-unknown-unanchored"] = (un, [], None); EXPECT["sig-alg-unknown-unanchored"] = "FAIL"
@@ -669,7 +679,8 @@ def main():
             # a case with an expected verdict: every verifier must give it (so a wrong outcome shared by all is visible),
             # and the tuples must agree; NOT_ASSESSED is judged like any verdict here (the injected fault expects it)
             ref = res.get("python")
-            bad = {k: v for k, v in res.items() if v[0] != EXPECT[name] or v != ref}
+            bad = {k: v for k, v in res.items() if v[0] != EXPECT[name] or v != ref
+                   or (name in EXPECT_AUTH and (not isinstance(v, tuple) or len(v) < 3 or v[2] is not EXPECT_AUTH[name]))}
             if bad or layer_bad:
                 diffs += 1
             print(f"  [{'OK ' if not (bad or layer_bad) else 'DIFF'}] {name:34} {res}  <- expected {EXPECT[name]} from each")

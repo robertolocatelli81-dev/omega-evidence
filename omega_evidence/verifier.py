@@ -25,7 +25,8 @@ Every file it reads (pack, sidecars, ledger, trust store) must be a regular file
 
 Graduated authenticity (strongest first):
   trusted-signed  — producer signature valid AND key trusted in the registry
-  signed          — producer signature valid (identity not checked)
+  signed          — producer signature valid under the sidecar's key; no registry, so the key is NOT checked
+                    (integrity, not identity; `signer_id` is a label the signature does not cover)
   anchored        — valid ledger chain (integrity/time); an RFC 3161 token is recorded and bound, not a tier
   none            — internal consistency only  →  FAIL, cannot authenticate
 
@@ -33,6 +34,9 @@ A signature sidecar whose `sig_alg` is a non-canonical spelling of a supported n
   FAIL of the producer-signature layer (0.10.0); one whose algorithm is genuinely unknown here is SKIP, the pack
   falls to the tier its other layers earn, and both the producer-signature and the authenticity layer say that a
   signature is present and was not verified. `require_signed` makes either a FAIL (fail-closed).
+
+`authenticated` is true only for trusted-signed (Unreleased; until 0.13.0 also for signed). A `trust_store` given
+  requires a signature, as `require_signed` does: no sidecar, or an algorithm this verifier cannot check, is FAIL.
 
 A bare fabricated pack (no ledger, no signature) cannot pass. A SELF-MADE ledger anchor,
   however, only proves integrity/time — read `authenticated` (not just `valid`). The RFC 3161
@@ -323,6 +327,9 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
     downgrade to "anchored"); "required" when `require_signed` was not met (no sidecar, or a signature that could not
     be verified) — then the layer is FAIL, fail-closed, like a required post-quantum layer."""
     sig_side = path[:-5] + ".sig.json" if path.endswith(".json") else path + ".sig.json"
+    # a trust registry asks for an identity, which only a verified signature can give: it requires one (Unreleased,
+    # the four; until 0.13.0 a pack with no signature, or an unknown algorithm, was exit 0 beside a trust store)
+    require_signed = bool(require_signed or trust_store)
     if not os.path.exists(sig_side):
         if require_signed:
             layers.append(_layer("producer-signature", "FAIL", "signature required but the pack is not signed"))
@@ -389,7 +396,7 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
         layers.append(_layer("producer-signature", "FAIL", "signature invalid or pack changed"))
         return "FAIL", False, False, ""
     layers.append(_layer("producer-signature", "PASS",
-                         f"signed by {side.get('signer_id')} ({alg})"))
+                         f"valid {alg} signature by the key in the sidecar; signer_id {side.get('signer_id')} is not covered by it"))
     sid, pk = side.get("signer_id"), side.get("public_key_b64")
     tr, tr_broken = None, None
     if trust_store:
@@ -422,6 +429,7 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
 # The authenticity layer's wording is the same in the four verifiers (0.10.0): a signature that is present and was not
 # verified is NAMED in the tier the pack falls to, so a reader of the layers never mistakes it for an unsigned pack.
 UNVERIFIED_NOTE = " — a signature is present but its algorithm is unsupported and was not verified"
+SIGNED_TIER = "signed by a key NOT checked against a registry (integrity, not identity; signer_id is an unsigned label)"
 
 
 def _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, ts_status, why=""):
@@ -433,7 +441,7 @@ def _decide_authenticity(layers, sig_status, trusted, trust_failed, ledger_ok, t
     elif trusted:
         layers.append(_layer("authenticity", "PASS", "trusted-signed"))
     elif sig_status == "PASS":
-        layers.append(_layer("authenticity", "PASS", "signed (identity not checked against a registry)"))
+        layers.append(_layer("authenticity", "PASS", SIGNED_TIER))
     elif ledger_ok:   # r7/r8: the "or ts_status == PASS" branch was dead (never PASS here); removed from Go too in r8
         layers.append(_layer("authenticity", "PASS", "anchored (integrity/time, not identity)" + (UNVERIFIED_NOTE if why == "unverified" else "")))
     else:
@@ -528,7 +536,9 @@ def _verify_pack(layers, path, ledger_path, trust_store, expected_pq_public_key_
     # requires the pack-sha3 integrity layer to PASS. The same three booleans as Go/Java/JS (0.10.0: it was read off
     # the wording of the authenticity layer, which now carries a note about an unverified signature).
     integrity = next((ly for ly in layers if ly["layer"] == "pack-sha3"), {}).get("status") == "PASS"
-    roll["authenticated"] = integrity and sig_status == "PASS" and not trust_failed
+    # Unreleased: only a registry binds signer_id to the key, so `authenticated` is trusted-signed only (until 0.13.0
+    # it was true for a signature by any key under any signer_id, with no registry — measured 20/11/2026)
+    roll["authenticated"] = integrity and sig_status == "PASS" and trusted and not trust_failed
     return roll
 
 

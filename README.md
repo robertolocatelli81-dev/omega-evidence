@@ -50,11 +50,23 @@ the index links carry `#sha256=` fragments, so pip verifies every download.
 A pack's trust level is *stated, not implied*:
 
 ```
-trusted-signed  producer signature valid AND key trusted in the registry
-signed          producer signature valid (identity not checked)
-anchored        valid ledger chain (integrity/time) — an RFC 3161 token is recorded and bound to the pack, not a tier
-none            internal consistency only  →  rejected, cannot authenticate
+trusted-signed  producer signature valid AND key trusted in the registry       authenticated: true
+signed          producer signature valid under the key the sidecar carries;     authenticated: false
+                no registry given, so that key is NOT checked (integrity, not identity)
+anchored        valid ledger chain (integrity/time) — an RFC 3161 token is      authenticated: false
+                recorded and bound to the pack, not a tier
+none            internal consistency only  →  rejected, cannot authenticate     authenticated: false
 ```
+
+Rule (Unreleased, the same in the four verifiers):
+
+- `authenticated` is true only for `trusted-signed`: a valid signature, the pack body matching `pack_sha3`, and a
+  trust registry that binds this `signer_id` to this key and has not revoked it. `signer_id` is a label in the
+  sidecar that the signature does not cover; only a registry binds it to the key. Until 0.13.0 `authenticated` was
+  also true for the `signed` tier, i.e. for a signature by any key under any `signer_id` (measured 20/11/2026).
+- A trust registry given (`--trust-store`, `trust_store=`) asks for an identity, so it requires a signature: a pack
+  with no signature sidecar, or with a signature whose algorithm this verifier cannot check, is a FAIL, as with
+  `--require-signed`. Until 0.13.0 both were exit 0 with no `trusted-signer` layer (measured 20/11/2026).
 
 A bare fabricated pack (no ledger, no signature) **cannot pass**. A signed pack whose signature this verifier cannot check
 does not fall silently to `anchored`: a `sig_alg` that is a non-canonical spelling of a supported name (`"eD25519"`,
@@ -418,8 +430,9 @@ registry, and only when the classical key that signed is the registered one) and
 when absent, foreign, malformed or invalid — and also when the layer was required (`require_pq`, or a pinned key)
 and could not be confirmed: a required layer that is stripped, foreign or unverifiable is a FAIL, never null. A
 downgrade to Ed25519-only is refused by the relying party's requirement, not by the file. `authenticated` is
-never true for a signer the given trust store revokes or does not trust, nor when the body no longer matches `pack_sha3`; without
-a trust store it says only that the producer signature verifies with the key in the sidecar (the `signed` tier: identity not checked) (a signed identity over
+true only for the `trusted-signed` tier (Unreleased; until 0.13.0, without a trust store, it said only that the producer
+signature verifies with the key in the sidecar): never for a signer the given trust store revokes or does not trust,
+never without a trust store, nor when the body no longer matches `pack_sha3` (a signed identity over
 content that was changed afterwards is not authenticated content). Re-establishing a revoked signer with `rotate` must
 decide its post-quantum key explicitly (`pq_pubkey=<new>` or `drop_pq=True`). The PQ private key lives on disk (PKCS#8, 0600) or in **AWS KMS**
 (`KeySpec ML_DSA_65`, `ML_DSA_SHAKE_256`, `MessageType RAW`; the Sign response's KeyId must match the key whose
@@ -461,6 +474,20 @@ Each was reproduced on 0.12.0 and on 0.13.0 before it was fixed; `tests/test_ban
   `recorder_kid` an unsigned record, and with `tombstone_kids` an unsigned tombstone, is now a problem (the chain was ok
   and the pin never compared). The RFC 3339 pattern took any Unicode decimal digit (`２０２６-…`): RFC 3339 DIGIT is
   `%x30-39`; record timestamps, `deleted_at`, `checked_at` and `anchored_at` now refuse the others.
+
+### Unreleased — six behaviours 0.13.0 documented and the same review benches flagged, decided and changed (20 November 2026)
+
+Each was measured on 404b60b (the branch before these changes) and reproduced before it was changed;
+`tests/test_decisioni_20261120.py` holds the tests (those that name the old behaviour fail on 404b60b). Verdicts change.
+
+- **`authenticated` is true only for `trusted-signed`, and a trust store requires a signature** (the four verifiers; rule
+  in *Graduated authenticity*). Measured on 404b60b: a pack signed by a fresh key under `signer_id` "bank-official", no
+  trust store, was `authenticated: true`; an anchored unsigned pack, and an anchored pack whose `sig_alg` is unknown, were
+  exit 0 beside `--trust-store` with no `trusted-signer` layer. Now `authenticated` is false without a trust registry (the
+  `signed` tier stays a PASS, its text says the key is not checked and `signer_id` is not signed), and with a trust store
+  those two packs are FAIL. Verdicts changed in the differential oracle: 36 of its 209 cases change `authenticated` from
+  true to false and none changes its verdict; five cases are new (two with `authenticated` named, three FAIL beside a trust
+  store): 0 disagreements over 214, Python 3.11.2, Go 1.27.0, JDK 27, Node 22.23.2.
 
 0.13.0 was released on 20 November 2026; its changes are the two 0.13.0 sections below (both of 20 November).
 

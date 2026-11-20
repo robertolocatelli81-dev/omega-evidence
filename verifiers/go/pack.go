@@ -417,6 +417,8 @@ func InternalError(layers []Layer, what string) Receipt {
 func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string, requirePQ, requireSigned bool) Receipt {
 	r := rp
 	add := func(l, s, d string) { r.Layers = append(r.Layers, Layer{l, s, d, nil}) }
+	// a trust registry asks for an identity, which only a verified signature gives: it requires one (Unreleased, the four)
+	requireSigned = requireSigned || trustStore != ""
 	packBytes, err := readInput(packPath) // read ONCE: the timestamp binding hashes these bytes, not a second read
 	var pack *Object
 	if err == nil {
@@ -577,7 +579,7 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 					add("authenticity", "FAIL", "producer signature present but invalid") // r9: the ledger may be fine here
 					return finish(*r, declared, false, false, "", requirePQ || expectedPQ != "")
 				}
-				add("producer-signature", "PASS", "signed by "+sid+" (ed25519)")
+				add("producer-signature", "PASS", "valid ed25519 signature by the key in the sidecar; signer_id "+sid+" is not covered by it")
 				sigStatus = "PASS"
 				var st map[string]*trustEntry
 				stOK := true
@@ -632,7 +634,7 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 	case trusted:
 		add("authenticity", "PASS", "trusted-signed")
 	case sigStatus == "PASS":
-		add("authenticity", "PASS", "signed (identity not checked against a registry)")
+		add("authenticity", "PASS", "signed by a key NOT checked against a registry (integrity, not identity; signer_id is an unsigned label)")
 	case ledgerOK: // 0.8.3 r8: "|| tsStatus == PASS" was dead (the token is never verified here)
 		add("authenticity", "PASS", "anchored (integrity/time, not identity)"+note)
 	default:
@@ -753,7 +755,8 @@ func finish(r Receipt, digest string, trusted, signed bool, force string, pqRequ
 			integrity = true
 		}
 	}
-	r.Authenticated = (trusted || signed) && integrity
+	// Unreleased: only a registry binds signer_id to the key — authenticated is trusted-signed only (until 0.13.0: || signed)
+	r.Authenticated = trusted && signed && integrity
 	var pq *bool
 	for _, l := range r.Layers {
 		if l.Layer == "pq-signature" {

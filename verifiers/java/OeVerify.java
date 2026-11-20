@@ -454,6 +454,7 @@ public class OeVerify {
     static Map<String, Object> verifyPackIn(List<Map<String, Object>> layers, String packPath, String ledgerPath, String trustStore, String expectedPQ, boolean requirePQ, boolean requireSigned) throws Exception {
         java.util.function.BiConsumer<String[], String> add = (ls, d) -> { Map<String, Object> m = new LinkedHashMap<>(); m.put("layer", ls[0]); m.put("status", ls[1]); m.put("detail", d); layers.add(m); };
         boolean required = requirePQ || !expectedPQ.isEmpty();
+        requireSigned = requireSigned || !trustStore.isEmpty();   // a trust registry asks for an identity: it requires a signature (Unreleased, the four)
         Obj pack; byte[] packBytes;   // read ONCE: the timestamp binding hashes these bytes, not a second read
         try { packBytes = readInput(packPath); pack = objectOf(packBytes); } catch (Exception e) { add.accept(new String[]{"pack-json", "FAIL"}, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); return finish(layers, false, false, required); }
         add.accept(new String[]{"pack-json", "PASS"}, "");
@@ -530,7 +531,7 @@ public class OeVerify {
                         String sid = str(side, "signer_id");
                         if (sid == null || sid.isEmpty()) { add.accept(new String[]{"producer-signature", "FAIL"}, "malformed sidecar fields: signer_id must be a non-empty string"); sigStatus = "FAIL"; }   // council r2
                         else {
-                        add.accept(new String[]{"producer-signature", "PASS"}, "signed by " + sid + " (ed25519)"); sigStatus = "PASS";
+                        add.accept(new String[]{"producer-signature", "PASS"}, "valid ed25519 signature by the key in the sidecar; signer_id " + sid + " is not covered by it"); sigStatus = "PASS";
                         Map<String, TrustEntry> st = null; boolean[] stOK = new boolean[]{true};
                         if (!trustStore.isEmpty()) { try { st = trustState(trustStore, stOK); } catch (Exception e) { st = new HashMap<>(); stOK[0] = false; } }
                         String pinned = expectedPQ;
@@ -555,7 +556,7 @@ public class OeVerify {
         else if ("FAIL".equals(sigStatus)) add.accept(new String[]{"authenticity", "FAIL"}, "producer signature present but invalid");
         else if (trustFailed) add.accept(new String[]{"authenticity", "FAIL"}, "valid signature but signer not trusted/revoked");
         else if (trusted) add.accept(new String[]{"authenticity", "PASS"}, "trusted-signed");
-        else if ("PASS".equals(sigStatus)) add.accept(new String[]{"authenticity", "PASS"}, "signed (identity not checked against a registry)");
+        else if ("PASS".equals(sigStatus)) add.accept(new String[]{"authenticity", "PASS"}, "signed by a key NOT checked against a registry (integrity, not identity; signer_id is an unsigned label)");
         else if (ledgerOK) add.accept(new String[]{"authenticity", "PASS"}, "anchored (integrity/time, not identity)" + note);
         else add.accept(new String[]{"authenticity", "FAIL"}, "no anchor and no verified signature: cannot authenticate" + note);
         return finish(layers, trusted, "PASS".equals(sigStatus) && !trustFailed, required);   // council 16/09 r1: never authenticated for a revoked/untrusted signer
@@ -668,7 +669,8 @@ public class OeVerify {
         boolean passed = checked && valid && assessed && (!pqRequired || Boolean.TRUE.equals(pq));
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("valid", checked && valid); r.put("assessed", assessed); r.put("layers", layers);
-        r.put("authenticated", trusted || signed); r.put("pq_protected", pq);
+        r.put("authenticated", trusted && signed);   // Unreleased: trusted-signed only (until 0.13.0: trusted || signed)
+        r.put("pq_protected", pq);
         r.put("verdict", passed ? "PASS" : (assessed ? "FAIL" : "NOT_ASSESSED"));
         r.put("verifier", "OeVerify (Java, JDK stdlib)");
         return r;
