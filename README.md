@@ -537,6 +537,10 @@ Each was measured on 404b60b (the branch before these changes) and reproduced be
   body; a registry applies a signer's update only when its `update_seq` is greater than the last applied
   (`last_seq()`, `ChipRegistry(last_seq=…)` across restarts); the old kind is refused with its reason;
   `publish_signed_update` takes `update_seq=` (keyword, required).
+- **Temporary files.** Measured on 21/11/2026: a run of `verifiers/differential_oracle.py` that stopped on an
+  exception left its cases, about 450 MB, in the temporary directory (the removal was the last line of `main`), and
+  `tests/test_toolkit.py` left 5 directories and one file there on every run (284 KB). The oracle now removes its
+  directory in a `finally`, also on SIGTERM; the tests remove theirs (`addCleanup`). Tested with a private `TMPDIR`.
 
 0.13.0 was released on 20 November 2026; its changes are the two 0.13.0 sections below (both of 20 November).
 

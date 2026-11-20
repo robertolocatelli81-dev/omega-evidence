@@ -14,6 +14,7 @@
 (D5) `sigstore.verify_bundle(tsa_ca_file=...)` on a bundle with no token, and `sdjwt.verify(expected_aud / expected_nonce)`
      on a credential without `cnf`, verified true without the proof the argument asks for.
 (D6) `chip_registry`: an older signed update applied after a newer one put the old mapping back.
+Also (21/11/2026): the differential oracle left its cases in /tmp when it stopped early, and test_toolkit left files.
 """
 import base64
 import hashlib
@@ -551,6 +552,54 @@ class D6ChipRegistryOrder(unittest.TestCase):
                 best[name] = max(best.get(name, 0), seq)
             for name, seq in best.items():
                 self.assertEqual(reg.service_for(f"cls-{name}"), f"svc-{seq}")
+
+
+class TemporaryFilesAreRemoved(unittest.TestCase):
+    """Measured 21/11/2026: a run of the differential oracle that stopped on an exception left its ~450 MB of cases in
+    /tmp (the removal was its last line), and the CI test line left 6 entries (284 KB) in the temporary directory."""
+
+    def _fresh_tmp(self):
+        d = tempfile.mkdtemp(prefix="oe-leakprobe-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def test_oracle_removes_its_directory_on_an_exception_and_on_sigterm(self):
+        """fails on 56de8cb: the directory stays"""
+        probe = self._fresh_tmp()
+        script = (
+            "import os, sys, tempfile, time\n"
+            "sys.path.insert(0, os.path.join(sys.argv[1], 'verifiers'))\n"
+            "tempfile.tempdir = sys.argv[2]\n"
+            "import differential_oracle as O\n"
+            "def fake(tmp):\n"
+            "    open(os.path.join(tmp, 'case.json'), 'w').write('x' * 1000)\n"
+            "    print('ready', flush=True)\n"
+            "    if sys.argv[3] == 'raise':\n"
+            "        raise RuntimeError('stopped')\n"
+            "    time.sleep(60)\n"
+            "O._main = fake\n"
+            "O.main()\n")
+        r = subprocess.run([sys.executable, "-c", script, ROOT, probe, "raise"], capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("RuntimeError", r.stderr)
+        self.assertEqual(os.listdir(probe), [])
+        p = subprocess.Popen([sys.executable, "-c", script, ROOT, probe, "sleep"], stdout=subprocess.PIPE, text=True)
+        self.assertEqual(p.stdout.readline().strip(), "ready")
+        self.assertEqual(len(os.listdir(probe)), 1)                    # control: the cases are there while it runs
+        p.terminate()
+        p.wait(timeout=30)
+        p.stdout.close()
+        self.assertEqual(os.listdir(probe), [])
+
+    def test_the_toolkit_suite_leaves_nothing_in_the_temporary_directory(self):
+        """fails on 56de8cb: 4 directories of r.json, one of .ots.json files and dup_kat.jsonl stayed"""
+        probe = self._fresh_tmp()
+        env = dict(os.environ, TMPDIR=probe)
+        env.pop("PYTHONPATH", None)
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "test_toolkit.py")], capture_output=True,
+                           text=True, timeout=900, env=env, cwd=ROOT)
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertEqual(sorted(os.listdir(probe)), [])
 
 
 if __name__ == "__main__":

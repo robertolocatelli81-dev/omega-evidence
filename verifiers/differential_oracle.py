@@ -651,12 +651,25 @@ def run(cmd, path, flags, go_style, name=""):
 
 
 def main():
+    """The cases (about 450 MB with the bound cases) live in one temporary directory that is removed whatever happens:
+    an exception, Ctrl-C or SIGTERM included (21/11/2026: a run that stopped on an exception left 450 MB in /tmp,
+    measured; the removal was the last line of the function)."""
+    import signal
+    tmp = tempfile.mkdtemp(prefix="oe-oracle-")
+    previous = signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+    try:
+        return _main(tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _main(tmp):
     avail = {"python": [sys.executable, "-m", "omega_evidence"], "js": ["node", os.environ.get("OEVERIFY_JS") or os.path.join(HERE, "js", "oeverify.mjs")]}
     global PY_CWD
     if os.environ.get("OEVERIFY_PYTHONPATH"):   # r9: run the Python verifier from another tree (the lax ablation, verifiers/lax_python_ablation.sh)
         PY_CWD = os.environ["OEVERIFY_PYTHONPATH"]   # cwd, so that `-m omega_evidence` resolves THAT tree, not this one
         print(f"  python verifier taken from OEVERIFY_PYTHONPATH={PY_CWD} (ablation)")
-    tmp = tempfile.mkdtemp()
     go = os.environ.get("OEVERIFY_GO")
     if not go and shutil.which("go"):
         b = os.path.join(tmp, "oeverify")
@@ -810,7 +823,6 @@ def main():
         print(f"  [{'OK ' if ok else 'DIFF'}] {name:34} expect {want if want != 'usage' else 'usage(exit 2)'}: {row}")
     print(f"disagreements: {diffs}/{len(cases) + len(cli)} (declared Node divergences: {declared}; "
           f"cases with a verifier that could not assess: {inconclusive})")
-    shutil.rmtree(tmp, ignore_errors=True)
     return 1 if diffs else 0
 
 

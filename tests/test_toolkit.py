@@ -2359,7 +2359,8 @@ class TestMlDsaHybrid(unittest.TestCase):
             return self.m._kat_verify(p, s, m, next(v["context_hex"] for v in ctxed if v["public"] == p and v["message_hex"] == m.hex()))
         from omega_evidence.pqbackends import gate
         self.assertTrue(gate.run_kat(spy, ctxed)["passed"]); self.assertTrue(all(n == 2 for n in seen.values()))   # positive + negative, both with ctx
-        with unittest.mock.patch.object(self.m, "KAT_FILE", os.path.join(tempfile.gettempdir(), "dup_kat.jsonl")):
+        kat_dir = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, kat_dir, ignore_errors=True)   # left in /tmp until 21/11/2026
+        with unittest.mock.patch.object(self.m, "KAT_FILE", os.path.join(kat_dir, "dup_kat.jsonl")):
             with open(os.path.join(os.path.dirname(self.m.__file__), "vectors", "nist_acvp_mldsa65.jsonl")) as f:
                 head, ln = f.readline(), next(l for l in f if '"testPassed":true' in l)
             with open(self.m.KAT_FILE, "w") as f:
@@ -3054,7 +3055,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
 
     def test_preservation_malformed_is_a_verdict(self):   # #6
         from omega_evidence import preservation as P
-        d = tempfile.mkdtemp(); pp = os.path.join(d, "r.json")
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True); pp = os.path.join(d, "r.json")
         pack.write_pack(pp, pack.build_pack("k", {"a": 1}, "does NOT prove x"))
         rec = P.build_evidence_record([pp])
 
@@ -3094,7 +3095,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
     def test_preservation_rfc3161_follows_timestamp_verify(self):   # audit V2 final round P3 (02/10/2026)
         # until 0.10.0 every record carrying an RFC 3161 token was FAIL: the layer read a "status" key verify() never returns
         from omega_evidence import preservation as P
-        d = tempfile.mkdtemp(); pp = os.path.join(d, "r.json")
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True); pp = os.path.join(d, "r.json")
         pack.write_pack(pp, pack.build_pack("k", {"a": 1}, "does NOT prove x"))
         rec = P.build_evidence_record([pp])
         rec["archive_timestamps"][0]["timestamp"] = {"time_source": "rfc3161", "tsr_b64": "AAAA", "tsa": "test-tsa"}
@@ -3127,7 +3128,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         # whether or not a trust anchor is held and whether or not openssl is there — until 0.10.0 it was SKIP with
         # valid: true without a trust anchor and FAIL with one: the same record, two verdicts.
         from omega_evidence import preservation as P
-        d = tempfile.mkdtemp(); pp = os.path.join(d, "r.json")
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True); pp = os.path.join(d, "r.json")
         pack.write_pack(pp, pack.build_pack("k", {"a": 1}, "does NOT prove x"))
         rec = P.build_evidence_record([pp])
         ca = os.path.join(d, "ca.pem"); Path(ca).write_text("-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n")
@@ -3156,7 +3157,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
 
     def test_a_bad_pack_is_not_a_malformed_record(self):   # NEMESIS V2 fine, G2 (02/10/2026)
         from omega_evidence import preservation as P
-        d = tempfile.mkdtemp(); pp = os.path.join(d, "r.json")
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True); pp = os.path.join(d, "r.json")
         pack.write_pack(pp, pack.build_pack("k", {"a": 1}, "does NOT prove x"))
         rec = P.build_evidence_record([pp])
         other = os.path.join(d, "o.json"); pack.write_pack(other, pack.build_pack("k", {"a": 2}, "does NOT prove x"))
@@ -3173,7 +3174,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
 
     def test_ots_malformed_sidecar_is_a_status(self):  # #7
         from omega_evidence import ots
-        d = tempfile.mkdtemp()
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         r = ots.verify(os.path.join(d, "none.ots.json"))                 # no sidecar at all
         self.assertEqual((r["status"], r["confirmed"]), ("absent", False))
         for body in ("{}", '{"x": 1}'):                                   # K14: no status recorded is not malformed
