@@ -129,5 +129,66 @@ class TestBeyondSafeInt(unittest.TestCase):
         self.assertFalse(aat.verify_epochs(recs, [anchor])["ok"])
 
 
+
+class TestProducersRefuse(unittest.TestCase):
+    """Producing side (2026-11-20): sign_record / sign_record_hybrid refuse a signed content with an integer outside
+    +/-(2^53-1); to_jsonl refuses an integer it would write changed. Positive control: on 7de1e14 these fail."""
+
+    def setUp(self):
+        self.recs = TestBeyondSafeInt._chain(TestBeyondSafeInt())
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        self.pem = ec.generate_private_key(ec.SECP256R1()).private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+
+    def _with(self, v, where="detail"):
+        r = json.loads(json.dumps(self.recs[1]))
+        if where == "detail":
+            r["action_detail"]["n"] = v
+        else:
+            r["batch"] = {"n": v}
+        return r
+
+    def test_sign_record_refuses_both_signs_and_names_the_pointer(self):
+        for v in (LIM + 1, -LIM - 1, 2 ** 53 + 1, 2 ** 64):
+            with self.assertRaises(ValueError) as cm:
+                aat.sign_record(self._with(v), self.pem)
+            self.assertIn("/action_detail/n", str(cm.exception))
+
+    def test_sign_record_accepts_the_bound_and_ignores_batch(self):
+        for v in (LIM, -LIM, 0):
+            aat.sign_record(self._with(v), self.pem)
+        aat.sign_record(self._with(2 ** 60, where="batch"), self.pem)     # batch is not signed
+
+    def test_sign_record_hybrid_refuses_before_any_key_is_used(self):
+        class Never:
+            public_key_b64 = ""
+            def sign(self, m):
+                raise AssertionError("signed")
+        with self.assertRaises(ValueError) as cm:
+            aat.sign_record_hybrid(self._with(LIM + 1), Never(), self.pem)
+        self.assertIn("outside", str(cm.exception))
+
+    def test_to_jsonl_refuses_inexact_writes_exact(self):
+        for v in (2 ** 53 + 1, -(2 ** 53) - 1, 2 ** 60, 2 ** 64 + 1, 10 ** 400):    # 2^60 is a double, written ...847000
+            recs = json.loads(json.dumps(self.recs))
+            recs[1]["action_detail"]["n"] = v
+            with self.assertRaises(ValueError) as cm:
+                aat.to_jsonl(recs)
+            self.assertIn("record 1", str(cm.exception))
+        recs = json.loads(json.dumps(self.recs))
+        recs[1]["action_detail"]["a"] = 2 ** 53                                  # written as is, then one that is not
+        recs[1]["action_detail"]["b"] = 2 ** 53 + 1
+        with self.assertRaises(ValueError) as cm:
+            aat.to_jsonl(recs)
+        self.assertIn("/action_detail/b", str(cm.exception))
+        self.assertNotIn("/action_detail/a,", str(cm.exception))
+        for v in (2 ** 53, -(2 ** 53), 10 ** 20, LIM):                            # JCS text = the digits
+            recs = json.loads(json.dumps(self.recs))
+            recs[1]["action_detail"]["a/b~"] = [v]
+            line = aat.to_jsonl(recs).splitlines()[1]
+            self.assertEqual(json.loads(line)["action_detail"]["a/b~"], [v])
+
+
 if __name__ == "__main__":
     unittest.main()

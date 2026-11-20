@@ -441,8 +441,13 @@ nothing about integers beyond requiring RFC 8785), but each such record now gets
 functions, with the JSON Pointers (RFC 6901) of the first five such integers in the record (members in key order,
 array elements in index order; the detached `batch`, which no hash covers, is not searched) and how many more there
 are, so a reader knows the value it holds may not be the signed one. `from_omega` and `anchor_epoch` already refuse
-these integers and are unchanged; `sign_record`, `tombstone`, `close_record` and `to_jsonl` still take them as
-doubles (`to_jsonl` writes 2^53+1 as 9007199254740992).
+these integers and are unchanged. On the producing side (closed by construction): `sign_record` and
+`sign_record_hybrid` refuse a record whose signed content (without `batch`) holds an integer outside ±(2^53−1), naming
+the pointers — on 0.12.0 a signature made over 2^53+1 also verified for 2^53 — and `to_jsonl` refuses an integer whose
+JCS text (RFC 8785 §3.2.2.3) is not its own digits — on 0.12.0 it wrote 2^53+1 as 9007199254740992 and 2^60 as
+1152921504606847000 — while 2^53, whose text is its digits, is still written. `tombstone` and `close_record` hash the
+record they replace or close the way `verify_chain` does and are unchanged; a signed tombstone goes through
+`sign_record`.
 `tests/test_aat_beyond_safe_int_20261120.py`, 8 tests: the swap above; 300 generated values (±(2^53−1), ±2^53, 2^60,
 −2^64, booleans, 0 and random integers within the range, directly in `action_detail`, in a list and under a key with
 `/` and `~`); a clean chain; the order and the five-pointer cap; `batch` not searched; a non-string key (a problem,
@@ -450,6 +455,9 @@ not a crash); the root pointer `""`; `verify_epochs` alone. 5 of the 8 fail on 0
 mutants on the new lines killed, the 19th (excluding booleans from the check) is equivalent (|True| = 1; same output
 on 20 000 generated values). Same class found on 19 November 2026 in another verifier of ours with a review tool;
 found by that review, not by an outside report.
+Four more tests in the same file for the producing side (2^53+1, −2^53−1, 2^64 refused by `sign_record`, the bound and
+`batch` accepted; the hybrid refusal before any key is used; `to_jsonl` refusing 2^53+1, −2^53−1, 2^60, 2^64+1, 10^400
+and writing 2^53, −2^53, 10^20, 2^53−1 unchanged): 3 of the 4 fail on the previous commit, the fourth holds the bound.
 
 ### 0.12.0 — attestations and timestamps made by others: ECDSA P-256 in DSSE, sigstore bundles, RFC 3161 tokens without their certificate (18 November 2026)
 

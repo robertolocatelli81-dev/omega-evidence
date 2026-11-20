@@ -991,6 +991,18 @@ def _beyond_safe_int_warning(i: int, r: Dict[str, Any]) -> Optional[Dict[str, An
                           "nearest double (RFC 8785 §3.1 / RFC 7493 §2.2), so the value read here may not be the one that was signed"}
 
 
+
+def _refuse_beyond_safe_int(rec: Dict[str, Any], what: str) -> None:
+    """Producing side (closed by construction, 2026-11-20): a record this package signs is refused when its signed
+    content (the record without the detached `batch`) holds an integer outside +/-(2^53-1) — the bound of from_omega and
+    anchor_epoch — because the signature would also verify for the nearest double (2^53 and 2^53+1 sign alike)."""
+    beyond = _beyond_safe_int(_no_batch(rec))
+    if beyond:
+        more = f" (+{len(beyond) - 5} more)" if len(beyond) > 5 else ""
+        raise ValueError(f"{what}: integer(s) outside +/-(2^53-1) at {', '.join(beyond[:5])}{more} are refused "
+                         "(RFC 7493 §2.2): carry them as strings")
+
+
 def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = None,
                  keys: Optional[Dict[str, Any]] = None, agent_kid: Optional[str] = None,
                  require_signatures: bool = False, consequential: Optional[Callable[[Dict[str, Any]], bool]] = None,
@@ -1425,6 +1437,7 @@ def sign_record(rec: Dict[str, Any], key: Any) -> Dict[str, Any]:
     (`.sign(bytes)`, `.public_key_b64`) → ML-DSA-65 raw signature (empty context) over the 32-byte hash. Sets `sig_alg`
     and `signer_kid` BEFORE signing (they are covered). Sign BEFORE computing the next record's prev_hash."""
     out = {k: v for k, v in rec.items() if k not in SIGNATURE_VALUE_FIELDS + ("signer_kid_classical",)}
+    _refuse_beyond_safe_int(out, "sign_record")
     if isinstance(key, (bytes, bytearray)):
         out["sig_alg"] = "ES256"
         from cryptography.hazmat.primitives import serialization
@@ -1446,6 +1459,7 @@ def sign_record_hybrid(rec: Dict[str, Any], pq_signer: Any, classical_private_ke
     """§6.2 hybrid mode: `signature` = ML-DSA-65 under `signer_kid`, `signature_classical` = ES256 under a DISTINCT
     `signer_kid_classical`, both over the single signed message (which covers sig_alg and both kids)."""
     out = {k: v for k, v in rec.items() if k not in SIGNATURE_VALUE_FIELDS}
+    _refuse_beyond_safe_int(out, "sign_record_hybrid")
     out["sig_alg"] = "ML-DSA-65"
     out["signer_kid"] = mldsa65_thumbprint(_pq_pub_raw(pq_signer))
     from cryptography.hazmat.primitives import serialization
@@ -1610,8 +1624,33 @@ def generate_p256_keypair() -> Tuple[bytes, bytes]:
 # ── §10 export formats ───────────────────────────────────────────────────────────────────────
 def to_jsonl(records: List[Dict[str, Any]]) -> str:
     """§10.1: one JSON object per line, chain order, UTF-8 without BOM, '\n' separators (the JSON is the JCS form so
-    the file re-reads to the same hashes)."""
+    the file re-reads to the same hashes). An integer whose JCS text is not its own digits is refused rather than
+    written changed (2026-11-20): 2^53+1 would be written 9007199254740992 and 2^60 1152921504606847000, both another
+    integer for a reader that does not go through a double; 2^53 (written 9007199254740992) is written as it is, so
+    such a foreign chain that verify_chain accepts with a warning still exports."""
+    for i, r in enumerate(records):
+        bad = [p for p in _beyond_safe_int(r) if not _written_as_is(_at_pointer(r, p))]
+        if bad:
+            more = f" (+{len(bad) - 5} more)" if len(bad) > 5 else ""
+            raise ValueError(f"to_jsonl: record {i}: integer(s) whose JCS text is another number at {', '.join(bad[:5])}"
+                             f"{more}: writing them would change their value (RFC 8785 §3.2.2.3)")
     return "".join(jcs(r, strict=False).decode() + "\n" for r in records)
+
+
+def _written_as_is(x: int) -> bool:
+    """True when the JCS text of the integer `x` is its own decimal digits."""
+    try:
+        return _es6_number(float(x)) == str(x)
+    except OverflowError:
+        return False
+
+
+def _at_pointer(obj: Any, ptr: str) -> Any:
+    """The value at a JSON Pointer produced by _beyond_safe_int (RFC 6901 §4 unescaping)."""
+    for tok in ptr.split("/")[1:]:
+        tok = tok.replace("~1", "/").replace("~0", "~")
+        obj = obj[int(tok)] if isinstance(obj, list) else obj[tok]
+    return obj
 
 
 def from_jsonl(text: str) -> List[Dict[str, Any]]:
