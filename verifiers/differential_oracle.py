@@ -36,6 +36,31 @@ try:
 except Exception:  # noqa: BLE001
     HAVE_PQ = False
 
+
+
+def sign_declared(pack_path, identity):
+    """What a forger writes (and what pack.sign_pack wrote until 0.13.0): a signature over the DECLARED pack_sha3, as read.
+    Since 20/11/2026 sign_pack refuses a pack whose declared digest is not its body's; the hostile cases need that sidecar."""
+    import datetime as _dt
+    from pathlib import Path as _Path
+    dd = json.loads(_Path(pack_path).read_text(encoding="utf-8"))
+    digest = dd.get("pack_sha3", "")
+    side = {"signer_id": identity.name, "sig_alg": getattr(identity, "sig_alg", "ed25519"), "public_key_b64": identity.public_key_b64,
+            "fingerprint": identity.fingerprint, "signed_pack_sha3": digest, "signature_b64": identity.sign(digest.encode()),
+            "signed_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")}
+    P._sig_sidecar(pack_path).write_text(json.dumps(side, ensure_ascii=False, indent=1), encoding="utf-8")
+    return side
+
+
+def anchor_declared(pack_path, ledger_path):
+    """The ledger entry pack.anchor_pack wrote until 0.13.0: the DECLARED pack_sha3, as read (the hostile cases need it)."""
+    import datetime as _dt
+    dd = json.load(open(pack_path, encoding="utf-8"))
+    entry = {"anchored_pack_sha3": dd.get("pack_sha3", ""), "anchored_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")}
+    Ledger(ledger_path).append(entry)
+    return entry
+
+
 SCOPE = "Proves integrity; does NOT prove the claim."
 PY_CWD = None   # set from OEVERIFY_PYTHONPATH (ablation)
 # 25/09/2026 — per-case metadata of the cases added for the NEMESIS findings:
@@ -56,13 +81,13 @@ def build_cases(d):
         return p
     idt = signing.Identity("acme")
     cases["bare"] = (mk("bare"), [], None)
-    a = mk("anchored"); P.anchor_pack(a, a[:-5] + ".ledger.jsonl"); cases["anchored"] = (a, [], None)
-    s = mk("signed"); P.sign_pack(s, idt); cases["signed"] = (s, [], None)
+    a = mk("anchored"); anchor_declared(a, a[:-5] + ".ledger.jsonl"); cases["anchored"] = (a, [], None)
+    s = mk("signed"); sign_declared(s, idt); cases["signed"] = (s, [], None)
     store = os.path.join(d, "trust.jsonl"); tr = trust.TrustRegistry(store); tr.trust("acme", idt.public_key_b64)
     cases["signed-trusted"] = (s, ["--trust-store", store], None)
-    other = signing.Identity("mallory"); s2 = mk("signed-other"); P.sign_pack(s2, other)
+    other = signing.Identity("mallory"); s2 = mk("signed-other"); sign_declared(s2, other)
     cases["signed-untrusted"] = (s2, ["--trust-store", store], None)
-    t = mk("tampered"); P.sign_pack(t, idt); dd = json.load(open(t)); dd["claim"] = "y"; json.dump(dd, open(t, "w"))
+    t = mk("tampered"); sign_declared(t, idt); dd = json.load(open(t)); dd["claim"] = "y"; json.dump(dd, open(t, "w"))
     cases["tampered"] = (t, [], None)
     # sidecar hostile shapes
     for nm, mut in (("sig-space", lambda sd: dict(sd, signature_b64=sd["signature_b64"][:8] + " " + sd["signature_b64"][8:])),   # r14: all anchored — SKIP vs FAIL of the layer shows in the verdict
@@ -70,7 +95,7 @@ def build_cases(d):
                     ("sig-alg-unknown", lambda sd: dict(sd, sig_alg="rsa-pss")),
                     ("pq-alg-int", lambda sd: dict(sd, pq_sig_alg=123)),
                     ("pq-alg-classical", lambda sd: dict(sd, pq_sig_alg="ed25519", pq_public_key_b64=sd["public_key_b64"], pq_signature_b64=sd["signature_b64"]))):
-        p = mk(nm); P.anchor_pack(p, p[:-5] + ".ledger.jsonl"); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
+        p = mk(nm); anchor_declared(p, p[:-5] + ".ledger.jsonl"); sign_declared(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
         cases[nm] = (p, [], None)
     cases["pq-alg-classical-required"] = (cases["pq-alg-classical"][0], ["--require-pq"], None)
     # council 16/09 r1: sig_alg shapes and a classical-layer sidecar that declares a PQ alg only
@@ -78,19 +103,19 @@ def build_cases(d):
                     ("sig-alg-list", lambda sd: dict(sd, sig_alg=["x"])),
                     ("sig-alg-pq-only", lambda sd: {"signer_id": "acme", "sig_alg": "ml-dsa-65", "signed_pack_sha3": sd["signed_pack_sha3"],
                                                     "public_key_b64": "A" * 2604, "signature_b64": "A" * 4412})):
-        p = mk(nm); P.anchor_pack(p, p[:-5] + ".ledger.jsonl"); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
+        p = mk(nm); anchor_declared(p, p[:-5] + ".ledger.jsonl"); sign_declared(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
         cases[nm] = (p, [], None)
-    un = mk("sig-alg-unknown-sha3-number"); P.sign_pack(un, idt); sp = un[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["sig_alg"] = "rsa-pss"; json.dump(sd, open(sp, "w"))
+    un = mk("sig-alg-unknown-sha3-number"); sign_declared(un, idt); sp = un[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["sig_alg"] = "rsa-pss"; json.dump(sd, open(sp, "w"))
     dd = json.load(open(un)); dd["pack_sha3"] = 5; json.dump(dd, open(un, "w")); cases["sig-alg-unknown-sha3-number"] = (un, [], None)
     # timestamp sidecar shapes (the token is verified by none of the four inside the verdict; shape and binding by all)
-    tl = mk("tsr-list"); P.sign_pack(tl, idt); open(tl[:-5] + ".tsr.json", "w").write("[1]"); cases["tsr-list"] = (tl, [], None)
-    tm = mk("tsr-mismatch"); P.sign_pack(tm, idt); json.dump({"digest_sha256": "0" * 64, "tsa": "x", "tsr_b64": "AA=="}, open(tm[:-5] + ".tsr.json", "w")); cases["tsr-digest-mismatch"] = (tm, [], None)
+    tl = mk("tsr-list"); sign_declared(tl, idt); open(tl[:-5] + ".tsr.json", "w").write("[1]"); cases["tsr-list"] = (tl, [], None)
+    tm = mk("tsr-mismatch"); sign_declared(tm, idt); json.dump({"digest_sha256": "0" * 64, "tsa": "x", "tsr_b64": "AA=="}, open(tm[:-5] + ".tsr.json", "w")); cases["tsr-digest-mismatch"] = (tm, [], None)
     # trust store shapes: a broken chain and a line with a duplicated key (strict profile: refused, never a pin)
-    bs = mk("trust-broken"); P.sign_pack(bs, idt); store_b = os.path.join(d, "trust_broken.jsonl"); trust.TrustRegistry(store_b).trust("acme", idt.public_key_b64)
+    bs = mk("trust-broken"); sign_declared(bs, idt); store_b = os.path.join(d, "trust_broken.jsonl"); trust.TrustRegistry(store_b).trust("acme", idt.public_key_b64)
     ln = json.loads(open(store_b).read().splitlines()[0]); ln["ts"] = "1999-01-01T00:00:00Z"; open(store_b, "w").write(json.dumps(ln, separators=(",", ":")) + "\n")
     cases["trust-broken-chain"] = (bs, ["--trust-store", store_b], None)
     acme2 = signing.Identity("acme")   # r10: a SECOND key under the trusted name, so a last-wins replay pins it and says trusted-signed
-    dk = mk("trust-dup"); P.sign_pack(dk, acme2); store_d = os.path.join(d, "trust_dup.jsonl"); trust.TrustRegistry(store_d).trust("acme", idt.public_key_b64)
+    dk = mk("trust-dup"); sign_declared(dk, acme2); store_d = os.path.join(d, "trust_dup.jsonl"); trust.TrustRegistry(store_d).trust("acme", idt.public_key_b64)
     txt = open(store_d).read(); txt = txt.replace('"pubkey":"' + idt.public_key_b64 + '"', '"pubkey":"' + idt.public_key_b64 + '","pubkey":"' + acme2.public_key_b64 + '"', 1)
     e = json.loads(txt); e2 = {k: v for k, v in e.items() if k != "self_hash"}; import hashlib as _h; e["self_hash"] = _h.sha256(json.dumps(e2, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     txt = txt.replace(json.loads(open(store_d).read())["self_hash"], e["self_hash"]); open(store_d, "w").write(txt.rstrip("\n") + "\n")
@@ -99,22 +124,22 @@ def build_cases(d):
     from omega_evidence.ledger import _hash_entry
     for nm, mut in (("sig-signer-id-list", lambda sd: dict(sd, signer_id=["acme"])),
                     ("sig-signer-id-missing", lambda sd: {k: v for k, v in sd.items() if k != "signer_id"})):
-        p = mk(nm); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
+        p = mk(nm); sign_declared(p, idt); sp = p[:-5] + ".sig.json"; json.dump(mut(json.load(open(sp))), open(sp, "w"))
         cases[nm] = (p, ["--trust-store", store], None)
     cases["sig-signer-id-missing-required-pq"] = (cases["sig-signer-id-missing"][0], ["--require-pq"], None)   # r14: the early-return branch in Go under the PQ requirement
-    sdk = mk("sig-dup-key"); P.sign_pack(sdk, idt); sp = sdk[:-5] + ".sig.json"; txt = open(sp).read().rstrip().rstrip("}")
+    sdk = mk("sig-dup-key"); sign_declared(sdk, idt); sp = sdk[:-5] + ".sig.json"; txt = open(sp).read().rstrip().rstrip("}")
     open(sp, "w").write(txt + ', "public_key_b64": "' + idt.public_key_b64 + '"}'); cases["sig-dup-key"] = (sdk, [], None)   # r8: the SAME value twice — a last-wins parser verifies and says PASS; strict = malformed
     def _store_with(name, edit):
-        pth = mk(name); P.sign_pack(pth, idt); st_ = os.path.join(d, name + "_trust.jsonl"); trust.TrustRegistry(st_).trust("acme", idt.public_key_b64)
+        pth = mk(name); sign_declared(pth, idt); st_ = os.path.join(d, name + "_trust.jsonl"); trust.TrustRegistry(st_).trust("acme", idt.public_key_b64)
         e = json.loads(open(st_).read().splitlines()[0]); edit(e); e["self_hash"] = _hash_entry(e); open(st_, "w").write(json.dumps(e, separators=(",", ":")) + "\n")
         return pth, st_
     p1, s1 = _store_with("trust-data-list", lambda e: e.__setitem__("data", [1])); cases["trust-data-not-object"] = (p1, ["--trust-store", s1], None)
     p2, s2 = _store_with("trust-sid-list", lambda e: e["data"].__setitem__("signer_id", ["acme"])); cases["trust-signer-id-list"] = (p2, ["--trust-store", s2], None)
-    bt = mk("body-tampered"); P.sign_pack(bt, idt); dd = json.load(open(bt)); dd["claim"] = "y"; json.dump(dd, open(bt, "w"))
+    bt = mk("body-tampered"); sign_declared(bt, idt); dd = json.load(open(bt)); dd["claim"] = "y"; json.dump(dd, open(bt, "w"))
     cases["body-tampered-trusted"] = (bt, ["--trust-store", store], None)
     # council r3: a REALLY signed uppercase digest + PQ fields of the right length (Python refused the sidecar before
     # the PQ layer -> false; Go/Java/JS reached it -> null); and an unsigned pack with the PQ layer required
-    up = mk("upper-signed"); dd = json.load(open(up)); dd["pack_sha3"] = dd["pack_sha3"].upper(); json.dump(dd, open(up, "w")); P.sign_pack(up, idt)
+    up = mk("upper-signed"); dd = json.load(open(up)); dd["pack_sha3"] = dd["pack_sha3"].upper(); json.dump(dd, open(up, "w")); sign_declared(up, idt)
     P.add_pq_signature(up, "ml-dsa-65", base64.b64encode(b"\x01" * 1952).decode(), base64.b64encode(b"\x02" * 3309).decode())
     cases["sig-digest-upper-signed-with-pq"] = (up, [], None)
     cases["unsigned-required-pq"] = (cases["anchored"][0], ["--require-pq"], None)   # r14: anchored (PASS without the flag) — a verifier ignoring the requirement says PASS
@@ -122,7 +147,7 @@ def build_cases(d):
     # verifier whose runtime has an ML-DSA backend reaches a verdict on it, one whose runtime has none cannot. Before
     # the absence side was separated, both answered FAIL and the oracle read that as agreement — a shared incapacity
     # looking like consensus. Now the second says NOT_ASSESSED and is reported rather than counted as agreeing.
-    hp = mk("pq-required-host-side"); P.sign_pack(hp, idt)
+    hp = mk("pq-required-host-side"); sign_declared(hp, idt)
     P.add_pq_signature(hp, "ml-dsa-65", base64.b64encode(b"\x03" * 1952).decode(), base64.b64encode(b"\x04" * 3309).decode())
     cases["pq-required-host-side"] = (hp, ["--require-pq"], None)
     # honest scope variants and pack shapes — every one ANCHORED with the hash a lenient verifier would accept (review r2,
@@ -167,7 +192,7 @@ def build_cases(d):
         dd = {"kind": "d", "honest_scope": scope, "n": 1}
         cases[nm] = (mk_text(nm, dd, json.dumps(dict(dd, pack_sha3="%H"), ensure_ascii=False)), [], None)
     for nm, vm in (("tsr-vm-crls-int", '{"available": true, "crls_b64": 1}'), ("tsr-vm-crls-list-of-int", '{"available": true, "crls_b64": [1]}')):
-        tp = mk(nm); P.anchor_pack(tp, tp[:-5] + ".ledger.jsonl"); dg = _hs.sha256(open(tp, "rb").read()).hexdigest()
+        tp = mk(nm); anchor_declared(tp, tp[:-5] + ".ledger.jsonl"); dg = _hs.sha256(open(tp, "rb").read()).hexdigest()
         open(tp[:-5] + ".tsr.json", "w").write('{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "validation_material": %s}' % (dg, vm)); cases[nm] = (tp, [], None)
     # review r4: the anchoring rule reads the ENTRY in the three and read `data` in Python (a top-level
     # anchored_pack_sha3: PASS in the three, FAIL in Python; data.data.anchored_pack_sha3: the reverse); a trust-store entry
@@ -179,7 +204,7 @@ def build_cases(d):
                          ("ledger-anchor-under-data-data", lambda H: {"data": {"data": {"anchored_pack_sha3": H}}})):
         ap = mk(nm); H = json.load(open(ap))["pack_sha3"]
         open(ap[:-5] + ".ledger.jsonl", "w").write(json.dumps(_entry(0, _G, mk_extra(H)), separators=(",", ":")) + "\n"); cases[nm] = (ap, [], None)
-    tw = mk("trust-no-data"); P.sign_pack(tw, idt); st_w = os.path.join(d, "trust_no_data.jsonl"); trust.TrustRegistry(st_w).trust("acme", idt.public_key_b64)
+    tw = mk("trust-no-data"); sign_declared(tw, idt); st_w = os.path.join(d, "trust_no_data.jsonl"); trust.TrustRegistry(st_w).trust("acme", idt.public_key_b64)
     e0 = json.loads(open(st_w).read().splitlines()[0]); open(st_w, "a").write(json.dumps(_entry(1, e0["self_hash"], {}), separators=(",", ":")) + "\n")
     cases["trust-entry-without-data"] = (tw, ["--trust-store", st_w], None)
     dd = {"kind": "d", "honest_scope": "guaranteed; does NOT " + "\U0001F600" * 21 + " guarantee x", "n": 1}
@@ -189,29 +214,29 @@ def build_cases(d):
     for nm, body in (("pack-reserved-tag-key-top-level", {"kind": "d", "honest_scope": "does NOT x", "__omega_reserved_type__": "Decimal", "value": "1"}),
                      ("pack-reserved-tag-key-nested", {"kind": "d", "honest_scope": "does NOT x", "x": {"__omega_reserved_type__": 1}})):
         rp = os.path.join(d, nm + ".json"); hh = _lax_sha3(body); open(rp, "w").write(json.dumps(dict(body, pack_sha3=hh))); anchor_hash(rp, hh); cases[nm] = (rp, [], None)
-    pid = signing.Identity("toString"); tsp = mk("proto-trust"); P.sign_pack(tsp, pid); st_p = os.path.join(d, "trust_proto.jsonl"); Lp_ = Ledger(st_p)
+    pid = signing.Identity("toString"); tsp = mk("proto-trust"); sign_declared(tsp, pid); st_p = os.path.join(d, "trust_proto.jsonl"); Lp_ = Ledger(st_p)
     Lp_.append({"action": "revoke", "signer_id": "__proto__", "reason": "x"}); Lp_.append({"action": "trust", "signer_id": "toString", "pubkey": pid.public_key_b64})
     cases["trust-revoke-proto-then-trust-toString"] = (tsp, ["--trust-store", st_p], None)
     # r10: a producer-made pack whose top-level key is "__proto__" (build_pack accepts it, hash correct): PASS in the four;
     # 0.8.2 Node dropped the key while copying and said FAIL alone
-    pph = os.path.join(d, "proto-hashed.json"); P.write_pack(pph, P.build_pack("demo", {"__proto__": {"x": 1}, "claim": "x"}, SCOPE)); P.anchor_pack(pph, pph[:-5] + ".ledger.jsonl")
+    pph = os.path.join(d, "proto-hashed.json"); P.write_pack(pph, P.build_pack("demo", {"__proto__": {"x": 1}, "claim": "x"}, SCOPE)); anchor_declared(pph, pph[:-5] + ".ledger.jsonl")
     cases["pack-proto-key-hashed-by-producer"] = (pph, [], None)
     bad8 = os.path.join(d, "bad8.json"); open(bad8, "wb").write(b'{"kind":"d","honest_scope":"does NOT x","s":"\xff","pack_sha3":"' + b"0" * 64 + b'"}'); cases["non-utf8"] = (bad8, [], None)   # not JSON anywhere: FAIL at pack-json
     # ledgers
     e = mk("empty-ledger"); open(e[:-5] + ".ledger.jsonl", "w").close(); cases["ledger-empty"] = (e, [], None)
     u = mk("unrelated-ledger"); L = Ledger(u[:-5] + ".ledger.jsonl"); L.append({"anchored_pack_sha3": "0" * 64}); cases["ledger-unrelated"] = (u, [], None)
-    tl = mk("tampered-ledger"); P.anchor_pack(tl, tl[:-5] + ".ledger.jsonl"); lines = open(tl[:-5] + ".ledger.jsonl").read().splitlines(); ee = json.loads(lines[0]); ee["ts"] = "1999-01-01T00:00:00Z"; open(tl[:-5] + ".ledger.jsonl", "w").write(json.dumps(ee, separators=(",", ":")) + "\n"); cases["ledger-tampered"] = (tl, [], None)
-    fl = mk("float-ledger"); P.anchor_pack(fl, fl[:-5] + ".ledger.jsonl"); ln = json.loads(open(fl[:-5] + ".ledger.jsonl").read().splitlines()[0]); ln["data"]["x"] = 1.5; ln.pop("self_hash"); ln["self_hash"] = _hs.sha256(json.dumps({k: v for k, v in ln.items()}, sort_keys=True, separators=(",", ":")).encode()).hexdigest(); open(fl[:-5] + ".ledger.jsonl", "w").write(json.dumps(ln, separators=(",", ":")) + "\n"); cases["ledger-float"] = (fl, [], None)   # r8: self_hash over the float content — a float-tolerant verifier says PASS, the four FAIL
+    tl = mk("tampered-ledger"); anchor_declared(tl, tl[:-5] + ".ledger.jsonl"); lines = open(tl[:-5] + ".ledger.jsonl").read().splitlines(); ee = json.loads(lines[0]); ee["ts"] = "1999-01-01T00:00:00Z"; open(tl[:-5] + ".ledger.jsonl", "w").write(json.dumps(ee, separators=(",", ":")) + "\n"); cases["ledger-tampered"] = (tl, [], None)
+    fl = mk("float-ledger"); anchor_declared(fl, fl[:-5] + ".ledger.jsonl"); ln = json.loads(open(fl[:-5] + ".ledger.jsonl").read().splitlines()[0]); ln["data"]["x"] = 1.5; ln.pop("self_hash"); ln["self_hash"] = _hs.sha256(json.dumps({k: v for k, v in ln.items()}, sort_keys=True, separators=(",", ":")).encode()).hexdigest(); open(fl[:-5] + ".ledger.jsonl", "w").write(json.dumps(ln, separators=(",", ":")) + "\n"); cases["ledger-float"] = (fl, [], None)   # r8: self_hash over the float content — a float-tolerant verifier says PASS, the four FAIL
     # 21/09/2026, propagated from the cra-evidence review: an own "__proto__" key added without rehashing (JS dropped it while
     # copying and said PASS alone), a raw non-UTF-8 byte where U+FFFD was hashed (a lossy decoder reads exactly the hashed text:
     # JS and Java said PASS), a raw byte in a key (Python raised UnicodeDecodeError instead of a verdict), a ledger line that is not
     # an object. Every one is FAIL in the four verifiers.
     from omega_evidence.ledger import _hash_entry as _he
-    pp = mk("proto-pack"); P.anchor_pack(pp, pp[:-5] + ".ledger.jsonl")   # anchored FIRST: a bare pack is FAIL whatever its hash (review r1)
+    pp = mk("proto-pack"); anchor_declared(pp, pp[:-5] + ".ledger.jsonl")   # anchored FIRST: a bare pack is FAIL whatever its hash (review r1)
     txt = open(pp).read(); open(pp, "w").write('{"__proto__": {"evil": 1}, ' + txt[1:]); cases["pack-proto-key-hash-untouched"] = (pp, [], None)
-    pl = mk("proto-ledger"); P.anchor_pack(pl, pl[:-5] + ".ledger.jsonl"); lpp = pl[:-5] + ".ledger.jsonl"; txt = open(lpp).read()
+    pl = mk("proto-ledger"); anchor_declared(pl, pl[:-5] + ".ledger.jsonl"); lpp = pl[:-5] + ".ledger.jsonl"; txt = open(lpp).read()
     open(lpp, "w").write('{"__proto__": {"evil": 1}, ' + txt[1:]); cases["ledger-proto-key-hash-untouched"] = (pl, [], None)
-    ff = mk("fffd-ledger"); P.anchor_pack(ff, ff[:-5] + ".ledger.jsonl"); lpf = ff[:-5] + ".ledger.jsonl"
+    ff = mk("fffd-ledger"); anchor_declared(ff, ff[:-5] + ".ledger.jsonl"); lpf = ff[:-5] + ".ledger.jsonl"
     ent = json.loads(open(lpf).read().splitlines()[0]); ent["data"]["note"] = "\ufffd"; ent.pop("self_hash"); ent["self_hash"] = _he(ent)
     open(lpf, "wb").write(json.dumps(ent, ensure_ascii=False, separators=(",", ":")).encode("utf-8").replace("\ufffd".encode("utf-8"), b"\xff", 1) + b"\n")
     cases["ledger-raw-byte-hashed-as-fffd"] = (ff, [], None)
@@ -219,12 +244,12 @@ def build_cases(d):
     open(fp, "wb").write(json.dumps(dd, ensure_ascii=False).encode("utf-8").replace("\ufffd".encode("utf-8"), b"\xff", 1))
     Ledger(fp[:-5] + ".ledger.jsonl").append({"anchored_pack_sha3": dd["pack_sha3"]})   # anchored by the hash over U+FFFD: a lossy reader says PASS
     cases["pack-raw-byte-hashed-as-fffd"] = (fp, [], None)
-    ls_ = mk("lone-ledger"); P.anchor_pack(ls_, ls_[:-5] + ".ledger.jsonl"); lpl = ls_[:-5] + ".ledger.jsonl"
+    ls_ = mk("lone-ledger"); anchor_declared(ls_, ls_[:-5] + ".ledger.jsonl"); lpl = ls_[:-5] + ".ledger.jsonl"
     ent = json.loads(open(lpl).read().splitlines()[0]); ent["data"]["note"] = "\ud800"; ent.pop("self_hash"); ent["self_hash"] = _he(ent)
     open(lpl, "w").write(json.dumps(ent, separators=(",", ":")) + "\n"); cases["ledger-lone-surrogate-entry"] = (ls_, [], None)   # r2: Python 0.8.2 wrote and accepted it
-    rb = mk("raw-ledger"); P.anchor_pack(rb, rb[:-5] + ".ledger.jsonl"); lpr = rb[:-5] + ".ledger.jsonl"; bb = open(lpr, "rb").read()
+    rb = mk("raw-ledger"); anchor_declared(rb, rb[:-5] + ".ledger.jsonl"); lpr = rb[:-5] + ".ledger.jsonl"; bb = open(lpr, "rb").read()
     open(lpr, "wb").write(bb.replace(b'"ts"', b'"t\xffs"', 1)); cases["ledger-raw-byte-in-key"] = (rb, [], None)
-    ll = mk("list-ledger"); P.anchor_pack(ll, ll[:-5] + ".ledger.jsonl"); open(ll[:-5] + ".ledger.jsonl", "a").write("[1]\n"); cases["ledger-line-not-object"] = (ll, [], None)   # r14: APPENDED — a verifier that skips the line says PASS
+    ll = mk("list-ledger"); anchor_declared(ll, ll[:-5] + ".ledger.jsonl"); open(ll[:-5] + ".ledger.jsonl", "a").write("[1]\n"); cases["ledger-line-not-object"] = (ll, [], None)   # r14: APPENDED — a verifier that skips the line says PASS
     # review r1 (21/09): a missing --ledger path was an uncaught ENOENT in Node; the .tsr.json sidecar was read with the
     # LOOSE json.loads in Python (a float / duplicate key beside a matching digest: PASS in Python, FAIL in the other three;
     # 100000 "[" a RecursionError traceback); a trust-store line that is not an object raised AttributeError in Python
@@ -233,32 +258,32 @@ def build_cases(d):
     for nm, body in (("tsr-float-beside-good-digest", '{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "x": 1.5}'),
                      ("tsr-dup-key-beside-good-digest", '{"digest_sha256": "%s", "digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA=="}'),
                      ("tsr-deep", "[" * 100000)):
-        tp = mk(nm); P.anchor_pack(tp, tp[:-5] + ".ledger.jsonl"); dg = _hl.sha256(open(tp, "rb").read()).hexdigest()
+        tp = mk(nm); anchor_declared(tp, tp[:-5] + ".ledger.jsonl"); dg = _hl.sha256(open(tp, "rb").read()).hexdigest()
         open(tp[:-5] + ".tsr.json", "w").write(body.replace("%s", dg)); cases[nm] = (tp, [], None)
-    tn = mk("trust-line-list"); P.sign_pack(tn, idt); st_n = os.path.join(d, "trust_line_list.jsonl"); open(st_n, "w").write(open(store).read() + "[1]\n")
+    tn = mk("trust-line-list"); sign_declared(tn, idt); st_n = os.path.join(d, "trust_line_list.jsonl"); open(st_n, "w").write(open(store).read() + "[1]\n")
     cases["trust-line-not-object"] = (tn, ["--trust-store", st_n], None)
     cases["cli-eq-form-verdict"] = (cases["anchored"][0], ["--ledger=" + cases["anchored"][0][:-5] + ".ledger.jsonl"], None)   # --flag=value is accepted by all four (argparse and Go flag do natively)
-    rot = mk("rotated"); P.sign_pack(rot, idt); store_r = os.path.join(d, "trust_rot.jsonl"); tr2 = trust.TrustRegistry(store_r); tr2.trust("acme", other.public_key_b64); tr2.rotate("acme", idt.public_key_b64)
+    rot = mk("rotated"); sign_declared(rot, idt); store_r = os.path.join(d, "trust_rot.jsonl"); tr2 = trust.TrustRegistry(store_r); tr2.trust("acme", other.public_key_b64); tr2.rotate("acme", idt.public_key_b64)
     cases["trust-rotated"] = (rot, ["--trust-store", store_r], None)
-    rev = mk("revoked"); P.sign_pack(rev, idt); store_v = os.path.join(d, "trust_rev.jsonl"); tr3 = trust.TrustRegistry(store_v); tr3.trust("acme", idt.public_key_b64); tr3.revoke("acme", "x")
+    rev = mk("revoked"); sign_declared(rev, idt); store_v = os.path.join(d, "trust_rev.jsonl"); tr3 = trust.TrustRegistry(store_v); tr3.trust("acme", idt.public_key_b64); tr3.revoke("acme", "x")
     cases["trust-revoked"] = (rev, ["--trust-store", store_v], None)
     if HAVE_PQ:
         kf = os.path.join(d, "acme.pq"); mldsa.MlDsaFileSigner.keygen(kf); ps = mldsa.MlDsaFileSigner(kf); K = ps.public_key_b64
         store_h = os.path.join(d, "trust_h.jsonl"); trust.TrustRegistry(store_h).trust("acme", idt.public_key_b64, pq_pubkey=K)
-        h = mk("hybrid"); P.sign_pack(h, idt); P.pq_cosign(h, ps)
+        h = mk("hybrid"); sign_declared(h, idt); P.pq_cosign(h, ps)
         JS_NO_PQ = {"js": ("FAIL", False, True)}
         cases["hybrid-unpinned"] = (h, [], None)
         cases["hybrid-registry-required"] = (h, ["--trust-store", store_h, "--require-pq"], JS_NO_PQ)
         cases["hybrid-expected-key"] = (h, ["--expect-pq-key", K], JS_NO_PQ)
         cases["hybrid-edonly-registry-required"] = (h, ["--trust-store", store, "--require-pq"], None)
-        st = mk("stripped"); P.sign_pack(st, idt); P.pq_cosign(st, ps); sp = st[:-5] + ".sig.json"; sd = json.load(open(sp)); [sd.pop(k) for k in ("pq_sig_alg", "pq_public_key_b64", "pq_signature_b64")]; json.dump(sd, open(sp, "w"))
+        st = mk("stripped"); sign_declared(st, idt); P.pq_cosign(st, ps); sp = st[:-5] + ".sig.json"; sd = json.load(open(sp)); [sd.pop(k) for k in ("pq_sig_alg", "pq_public_key_b64", "pq_signature_b64")]; json.dump(sd, open(sp, "w"))
         cases["hybrid-stripped-required"] = (st, ["--expect-pq-key", K], None)
-        kf2 = os.path.join(d, "other.pq"); mldsa.MlDsaFileSigner.keygen(kf2); fo = mk("foreign"); P.sign_pack(fo, idt); P.pq_cosign(fo, mldsa.MlDsaFileSigner(kf2))
+        kf2 = os.path.join(d, "other.pq"); mldsa.MlDsaFileSigner.keygen(kf2); fo = mk("foreign"); sign_declared(fo, idt); P.pq_cosign(fo, mldsa.MlDsaFileSigner(kf2))
         cases["hybrid-foreign-key"] = (fo, ["--expect-pq-key", K], None)
-        bp = mk("badpq"); P.sign_pack(bp, idt); P.pq_cosign(bp, ps); sp = bp[:-5] + ".sig.json"; sd = json.load(open(sp)); raw = bytearray(base64.b64decode(sd["pq_signature_b64"])); raw[5] ^= 1; sd["pq_signature_b64"] = base64.b64encode(bytes(raw)).decode(); json.dump(sd, open(sp, "w"))
+        bp = mk("badpq"); sign_declared(bp, idt); P.pq_cosign(bp, ps); sp = bp[:-5] + ".sig.json"; sd = json.load(open(sp)); raw = bytearray(base64.b64decode(sd["pq_signature_b64"])); raw[5] ^= 1; sd["pq_signature_b64"] = base64.b64encode(bytes(raw)).decode(); json.dump(sd, open(sp, "w"))
         cases["hybrid-bad-pq"] = (bp, [], {"js": ("PASS", None, True)})
         # council 16/09 r1: a FOREIGN Ed25519 key under a trusted signer_id must not borrow that signer's PQ pin
-        fe = mk("foreign-ed"); P.sign_pack(fe, signing.Identity("acme")); P.pq_cosign(fe, ps)
+        fe = mk("foreign-ed"); sign_declared(fe, signing.Identity("acme")); P.pq_cosign(fe, ps)
         cases["hybrid-foreign-classical-key"] = (fe, ["--trust-store", store_h], None)
         cases["hybrid-foreign-classical-key-required"] = (fe, ["--trust-store", store_h, "--require-pq"], None)
         # a revoked hybrid signer: never authenticated, never pq-protected through the registry
@@ -270,7 +295,7 @@ def build_cases(d):
         store_rd = os.path.join(d, "trust_rd.jsonl"); trd = trust.TrustRegistry(store_rd); trd.trust("acme", other.public_key_b64, pq_pubkey=K); trd.rotate("acme", idt.public_key_b64, drop_pq=True)
         cases["hybrid-rotated-dropped-pq-required"] = (h, ["--trust-store", store_rd, "--require-pq"], None)
         cases["hybrid-bad-pq-required"] = (bp, ["--expect-pq-key", K], None)
-        sw = mk("pq-space"); P.sign_pack(sw, idt); P.pq_cosign(sw, ps); sp = sw[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["pq_signature_b64"] = sd["pq_signature_b64"][:6] + " " + sd["pq_signature_b64"][6:]; json.dump(sd, open(sp, "w"))
+        sw = mk("pq-space"); sign_declared(sw, idt); P.pq_cosign(sw, ps); sp = sw[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["pq_signature_b64"] = sd["pq_signature_b64"][:6] + " " + sd["pq_signature_b64"][6:]; json.dump(sd, open(sp, "w"))
         cases["hybrid-pq-lenient-base64"] = (sw, [], None)
     else:
         print("  hybrid (ML-DSA-65) cases NOT measured: cryptography >= 48 absent")
@@ -281,7 +306,7 @@ def build_cases(d):
     # every port must refuse them, with and without the key pinned in a trust store
     for nm, keyhex in (("weak-key-identity", "01" + "00" * 31), ("weak-key-order8", "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
                        ("weak-key-noncanonical", "ed" + "ff" * 30 + "7f")):
-        w = mk(nm); P.sign_pack(w, idt); sp = w[:-5] + ".sig.json"; sd = json.load(open(sp))
+        w = mk(nm); sign_declared(w, idt); sp = w[:-5] + ".sig.json"; sd = json.load(open(sp))
         sd["public_key_b64"] = base64.b64encode(bytes.fromhex(keyhex)).decode()
         sd["signature_b64"] = base64.b64encode(bytes([1]) + bytes(63)).decode(); sd.pop("fingerprint", None); json.dump(sd, open(sp, "w"))
         cases[nm] = (w, [], None)
@@ -297,8 +322,8 @@ def _nemesis_cases(d, cases, mk, idt, store):
     def signed(name, anchored=False):
         p = mk(name)
         if anchored:
-            P.anchor_pack(p, p[:-5] + ".ledger.jsonl")
-        P.sign_pack(p, idt); return p
+            anchor_declared(p, p[:-5] + ".ledger.jsonl")
+        sign_declared(p, idt); return p
     def put(path, kind):   # replace a file by a FIFO or by a symlink to /dev/zero
         if os.path.lexists(path):
             os.remove(path)
@@ -323,7 +348,7 @@ def _nemesis_cases(d, cases, mk, idt, store):
         with open(path, "a") as f:
             f.write(" " * (size - os.path.getsize(path)))
     def big_entry_ledger(p, size):
-        lg = p[:-5] + ".ledger.jsonl"; P.anchor_pack(p, lg); prev = json.loads(open(lg).read().splitlines()[-1])["self_hash"]
+        lg = p[:-5] + ".ledger.jsonl"; anchor_declared(p, lg); prev = json.loads(open(lg).read().splitlines()[-1])["self_hash"]
         e = {"idx": 1, "ts": "2026-09-25T00:00:00+00:00", "data": {"blob": ""}, "prev_hash": prev}
         room = size - os.path.getsize(lg) - len(json.dumps(dict(e, self_hash="0" * 64), separators=(",", ":"))) - 1
         e["data"]["blob"] = "A" * room; e["self_hash"] = _hash_entry(e)
@@ -331,8 +356,8 @@ def _nemesis_cases(d, cases, mk, idt, store):
             f.write(json.dumps(e, separators=(",", ":")) + "\n")
         assert os.path.getsize(lg) == size, (os.path.getsize(lg), size)
     p = mk("cap-ledger-line-at-bound"); big_entry_ledger(p, CAP); cases["cap-ledger-line-at-bound"] = (p, [], None); EXPECT["cap-ledger-line-at-bound"] = "PASS"
-    p = mk("cap-ledger-line-over"); P.sign_pack(p, idt); big_entry_ledger(p, CAP + 1); cases["cap-ledger-line-over"] = (p, [], None)
-    p = mk("cap-pack-over"); P.anchor_pack(p, p[:-5] + ".ledger.jsonl"); pad_to(p, CAP + 1); cases["cap-pack-over"] = (p, [], None)   # trailing blanks: the SAME pack under the bound is PASS
+    p = mk("cap-ledger-line-over"); sign_declared(p, idt); big_entry_ledger(p, CAP + 1); cases["cap-ledger-line-over"] = (p, [], None)
+    p = mk("cap-pack-over"); anchor_declared(p, p[:-5] + ".ledger.jsonl"); pad_to(p, CAP + 1); cases["cap-pack-over"] = (p, [], None)   # trailing blanks: the SAME pack under the bound is PASS
     p = signed("cap-sig-over", anchored=True); pad_to(p[:-5] + ".sig.json", CAP + 1); cases["cap-sig-over"] = (p, [], None)
     p = signed("cap-trust-over"); t = os.path.join(d, "trust-over.jsonl"); open(t, "w").write(open(store).read()); pad_to(t, CAP + 1)
     cases["cap-trust-over"] = (p, ["--trust-store", t], None)
@@ -386,7 +411,7 @@ def _sigalg_cases(d, cases, mk, idt, store):
     silent downgrade of the tier (measured on 28/09/2026 by the fuzzer). Every case here has an EXPECTED verdict, and the
     `sig-alg-` prefix makes main() compare the (status, detail) of the producer-signature and authenticity layers too."""
     def anchored_signed(name, alg):
-        p = mk(name); P.anchor_pack(p, p[:-5] + ".ledger.jsonl"); P.sign_pack(p, idt); sp = p[:-5] + ".sig.json"; sd = json.load(open(sp))
+        p = mk(name); anchor_declared(p, p[:-5] + ".ledger.jsonl"); sign_declared(p, idt); sp = p[:-5] + ".sig.json"; sd = json.load(open(sp))
         if alg is None:
             sd.pop("sig_alg")
         else:
@@ -407,7 +432,7 @@ def _sigalg_cases(d, cases, mk, idt, store):
         cases[f"sig-alg-unknown-{nm}-anchored"] = (p, [], None); EXPECT[f"sig-alg-unknown-{nm}-anchored"] = "PASS"
         cases[f"sig-alg-unknown-{nm}-required-signed"] = (p, ["--require-signed"], None); EXPECT[f"sig-alg-unknown-{nm}-required-signed"] = "FAIL"
     EXPECT["sig-alg-unknown"] = "PASS"   # the 0.7.0 case (rsa-pss, anchored): the verdict is unchanged, the reason is now said
-    un = mk("sigalg-unknown-unanchored"); P.sign_pack(un, idt); sp = un[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["sig_alg"] = "rsa-pss"; json.dump(sd, open(sp, "w"))
+    un = mk("sigalg-unknown-unanchored"); sign_declared(un, idt); sp = un[:-5] + ".sig.json"; sd = json.load(open(sp)); sd["sig_alg"] = "rsa-pss"; json.dump(sd, open(sp, "w"))
     cases["sig-alg-unknown-unanchored"] = (un, [], None); EXPECT["sig-alg-unknown-unanchored"] = "FAIL"
     cases["sig-alg-unknown-unanchored-required-signed"] = (un, ["--require-signed"], None); EXPECT["sig-alg-unknown-unanchored-required-signed"] = "FAIL"
     # positive controls of the flag: a verified signature (canonical name, or the legacy sidecar without the field) satisfies it
@@ -440,7 +465,7 @@ def _closed_schema_cases(d, cases, mk, idt):
     from omega_evidence.ledger import _hash_entry as _hce
     KEY = "x_unknown_2026"
     def signed_anchored(name):
-        p = mk(name); P.anchor_pack(p, p[:-5] + ".ledger.jsonl"); P.sign_pack(p, idt); return p
+        p = mk(name); anchor_declared(p, p[:-5] + ".ledger.jsonl"); sign_declared(p, idt); return p
     def edit_json(path, fn):
         with open(path, encoding="utf-8") as f:
             o = json.load(f)
@@ -496,11 +521,11 @@ def _closed_schema_cases(d, cases, mk, idt):
     #     the key in the four (11/10/2026: the whole detail was cut at 200, path included, and the key fell off the end)
     deep = os.path.join(d, *(["customer_evidence_archive_2026"] * 8)); os.makedirs(deep, exist_ok=True)
     pd = os.path.join(deep, "closed-ledger-unknown-key-long-path.json"); P.write_pack(pd, P.build_pack("demo", {"claim": "x"}, SCOPE))
-    P.anchor_pack(pd, pd[:-5] + ".ledger.jsonl"); rechain(pd[:-5] + ".ledger.jsonl", lambda es: es[0].__setitem__(KEY, True))
+    anchor_declared(pd, pd[:-5] + ".ledger.jsonl"); rechain(pd[:-5] + ".ledger.jsonl", lambda es: es[0].__setitem__(KEY, True))
     cases["closed-ledger-unknown-key-long-path"] = (pd, [], None); EXPECT["closed-ledger-unknown-key-long-path"] = "FAIL"
     COMPARE_LAYERS["closed-ledger-unknown-key-long-path"] = ("ledger-chain",)
     # 4. the pack's own body: a producer-written key beside the format's four is REPORTED in pack-fields (SKIP), never refused
-    pb = os.path.join(d, "closed-pack-body-key.json"); P.write_pack(pb, P.build_pack("demo", {"claim": "x", KEY: 1}, SCOPE)); P.anchor_pack(pb, pb[:-5] + ".ledger.jsonl")
+    pb = os.path.join(d, "closed-pack-body-key.json"); P.write_pack(pb, P.build_pack("demo", {"claim": "x", KEY: 1}, SCOPE)); anchor_declared(pb, pb[:-5] + ".ledger.jsonl")
     cases["closed-pack-body-key-reported"] = (pb, [], None); EXPECT["closed-pack-body-key-reported"] = "PASS"; COMPARE_LAYERS["closed-pack-body-key-reported"] = ("pack-fields",)
 
 

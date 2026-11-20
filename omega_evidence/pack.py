@@ -68,13 +68,36 @@ def write_pack(path: str, pack: Dict[str, Any]) -> str:
     return path
 
 
+def _recomputed_digest(pack_path: str, what: str) -> str:
+    """The pack's SHA3 recomputed from its body as the verifier computes it (the same strict reading, the same canonical
+    form); ValueError when the file is not a pack object or when its declared `pack_sha3` is not that digest."""
+    from .ledger import loads_strict, read_input
+    try:
+        body = loads_strict(read_input(pack_path).decode("utf-8").strip(" \t\r\n"))
+    except (OSError, ValueError, RecursionError) as e:
+        raise ValueError(f"{what}: the pack cannot be read as the verifier reads it: {type(e).__name__}: {e}"[:300]) from None
+    if not isinstance(body, dict):
+        raise ValueError(f"{what}: the pack is not a JSON object")
+    try:
+        digest = sha3({k: v for k, v in body.items() if k != "pack_sha3"}, from_text=True)
+    except (ValueError, TypeError, RecursionError) as e:
+        raise ValueError(f"{what}: the pack body is not canonicalisable: {type(e).__name__}") from None
+    if body.get("pack_sha3") != digest:
+        raise ValueError(f"{what}: the declared pack_sha3 is not the digest of the pack body (stale or tampered); "
+                         "nothing was signed or recorded")
+    return digest
+
+
 def anchor_pack(pack_path: str, ledger_path: str) -> Dict[str, Any]:
     """Record the pack's pack_sha3 in a hash-chained ledger, so the verifier's
     'anchored' tier actually binds THIS pack to the ledger (not just 'a ledger
-    exists beside it'). Returns the ledger entry."""
+    exists beside it'). Returns the ledger entry.
+
+    The digest recorded is the one recomputed from the pack body, and it must equal the declared `pack_sha3`, else
+    ValueError and nothing is appended (until 0.13.0 the declared field was recorded as read: a pack whose `pack_sha3`
+    named another pack's body anchored that other pack — measured 20/11/2026)."""
     from .ledger import Ledger
-    pack = json.loads(Path(pack_path).read_text(encoding="utf-8"))
-    entry = {"anchored_pack_sha3": pack.get("pack_sha3", ""),
+    entry = {"anchored_pack_sha3": _recomputed_digest(pack_path, "anchor_pack"),
              "anchored_utc": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     Ledger(ledger_path).append(entry)
     return entry
@@ -93,9 +116,13 @@ def _ts_sidecar(pack_path: str) -> Path:
 def sign_pack(pack_path: str, identity: Identity) -> Dict[str, Any]:
     """Sign the pack's pack_sha3 and write the signature sidecar. The sidecar
     declares `sig_alg` (crypto-agility) so the format can migrate to post-quantum
-    without breaking existing packs; a legacy sidecar without it reads as ed25519."""
-    pack = json.loads(Path(pack_path).read_text(encoding="utf-8"))
-    digest = pack.get("pack_sha3", "")
+    without breaking existing packs; a legacy sidecar without it reads as ed25519.
+
+    What is signed is the digest recomputed from the pack body, and it must equal the declared `pack_sha3`, else
+    ValueError and no sidecar is written — the rule `pq_cosign` already applied (until 0.13.0 the declared field was
+    signed as read: a pack file whose `pack_sha3` named another pack's body got the producer's signature over that
+    other pack — measured 20/11/2026)."""
+    digest = _recomputed_digest(pack_path, "sign_pack")
     side = {"signer_id": identity.name, "sig_alg": getattr(identity, "sig_alg", "ed25519"),
             "public_key_b64": identity.public_key_b64,
             "fingerprint": identity.fingerprint, "signed_pack_sha3": digest,
