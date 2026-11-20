@@ -201,7 +201,7 @@ class TestProducersRefuse(unittest.TestCase):
             self.assertEqual(json.loads(line)["action_detail"]["a/b~"], [v])
 
     def test_a_tuple_is_an_array_for_every_check(self):
-        """jcs() writes a tuple as an array: on ce21abc an integer beyond the bound inside a tuple was signed, written
+        """jcs() writes a tuple as an array: on 61d755d an integer beyond the bound inside a tuple was signed, written
         changed by to_jsonl and not warned by verify_chain (measured 20/11/2026)."""
         for v in ((2 ** 53 + 1,), (1, (LIM + 1,))):
             with self.assertRaises(ValueError) as cm:
@@ -219,7 +219,7 @@ class TestProducersRefuse(unittest.TestCase):
         self.assertEqual(json.loads(aat.to_jsonl(recs).splitlines()[1])["action_detail"]["n"], [2 ** 53])
 
     def test_what_jcs_refuses_keeps_its_reason(self):
-        """a key that is not a string: on ce21abc sign_record and to_jsonl raised "'<' not supported between ..."
+        """a key that is not a string: on 61d755d sign_record and to_jsonl raised "'<' not supported between ..."
         from the walk, before jcs() gave its reason."""
         for d in ({1: 2 ** 60, "a": 1}, {1: 1, "b": 2}):
             r = self._with(0)

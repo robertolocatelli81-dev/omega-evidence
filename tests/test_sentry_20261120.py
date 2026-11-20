@@ -10,7 +10,7 @@
     fetch_crl=True)`) asked the CRL distribution points of every certificate of a token nobody had verified: a GET
     to a loopback address named by a self-made certificate, its answer stored in the sidecar.
 
-Positive control: on c4953ac (the commit before these fixes) the tests marked "fails on c4953ac" in their docstring fail.
+Positive control: on 9c55515 (the commit before these fixes) the tests marked "fails on 9c55515" in their docstring fail.
 """
 import base64
 import hashlib
@@ -40,7 +40,7 @@ from omega_evidence.verifier import verify_pack  # noqa: E402
 
 try:
     from omega_evidence import _crl_fetch as F  # noqa: E402
-except ImportError:   # c4953ac: the module is not there; the tests that need it fail on their first use of it
+except ImportError:   # 9c55515: the module is not there; the tests that need it fail on their first use of it
     F = None
 EXE = shutil.which("openssl")
 from omega_evidence.interop import aat  # noqa: E402
@@ -63,7 +63,7 @@ class TestAatSessionRecorderChosenOnce(unittest.TestCase):
     POOL = ["urn:rec:a", "urn:rec:b", "urn:rec:c", "urn:a:b", "", "é", "urn:rec:\U0001F600", "URN:REC:A"]
 
     def test_min_is_not_called_once_per_record(self):
-        """fails on c4953ac: there min() ran once per record, twice per record naming another recorder"""
+        """fails on 9c55515: there min() ran once per record, twice per record naming another recorder"""
         n = 300
         sid = str(uuid.UUID(int=7, version=4))
         chain = [_record(i, sid, f"urn:rec:{i}") for i in range(n)]
@@ -78,7 +78,7 @@ class TestAatSessionRecorderChosenOnce(unittest.TestCase):
         self.assertLessEqual(len(calls), 1)
 
     def test_generated_chains_name_the_same_recorder_as_the_rule(self):
-        """The rule, computed here record by record the way c4953ac did: the session's recorder is the genesis'
+        """The rule, computed here record by record the way 9c55515 did: the session's recorder is the genesis'
         recording_component_id when it is among the recorders, else the first in code point order; every other string
         recorder is a problem that names it. 3 000 generated chains (recorders from a pool with an empty string, a
         non-ASCII one, the agent's own id; non-string recorders; records that are not objects; every genesis mode)."""
@@ -153,7 +153,7 @@ class TestAatCliReadsBoundedRegularFiles(unittest.TestCase):
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "no FIFO on this system")
     def test_a_fifo_in_place_of_any_input_is_refused_at_once(self):
-        """fails on c4953ac: the CLI blocked on the FIFO (chain, --pubkey, --key, --epochs)"""
+        """fails on 9c55515: the CLI blocked on the FIFO (chain, --pubkey, --key, --epochs)"""
         with tempfile.TemporaryDirectory() as tmp:
             fifo = os.path.join(tmp, "fifo")
             os.mkfifo(fifo)
@@ -166,7 +166,7 @@ class TestAatCliReadsBoundedRegularFiles(unittest.TestCase):
 
     @unittest.skipUnless(os.path.exists("/dev/zero"), "no /dev/zero")
     def test_a_device_or_a_directory_is_refused(self):
-        """fails on c4953ac: a symlink to /dev/zero was read until memory ran out"""
+        """fails on 9c55515: a symlink to /dev/zero was read until memory ran out"""
         with tempfile.TemporaryDirectory() as tmp:
             link = os.path.join(tmp, "chain.jsonl")
             os.symlink("/dev/zero", link)
@@ -176,7 +176,7 @@ class TestAatCliReadsBoundedRegularFiles(unittest.TestCase):
                 self.assertIn("not a regular file", json.loads(out)["error"])
 
     def test_beyond_the_bound_is_refused_and_the_bound_itself_is_read(self):
-        """fails on c4953ac (the module had no read_input): the bound, here lowered to the size of the chain file"""
+        """fails on 9c55515 (the module had no read_input): the bound, here lowered to the size of the chain file"""
         with tempfile.TemporaryDirectory() as tmp:
             chain = self._chain_file(tmp)
             size = os.path.getsize(chain)
@@ -226,7 +226,7 @@ class TestChipRegistryAppliesTheBytesItVerified(unittest.TestCase):
             json.dump({"signer_id": "forged"}, f)
 
     def test_a_pack_replaced_after_verification_is_not_what_gets_applied(self):
-        """fails on c4953ac: the pack put in place after verify_pack returned was applied (evil-chip known, signer
+        """fails on 9c55515: the pack put in place after verify_pack returned was applied (evil-chip known, signer
         "forged" recorded). The replacement is made at the instant the old code was open to it: when verify_pack
         returns."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -250,7 +250,7 @@ class TestChipRegistryAppliesTheBytesItVerified(unittest.TestCase):
             self.assertEqual((r2["applied"], r2["reason"]), (False, "update is not trusted-signed"))
 
     def test_generated_replacements_at_every_read_never_apply_an_unverified_class(self):
-        """fails on c4953ac. 200 rounds: the pack, the sidecar or both are replaced before, during (after the n-th
+        """fails on 9c55515. 200 rounds: the pack, the sidecar or both are replaced before, during (after the n-th
         read_input of the verification) or after it; whatever is applied was signed by the trusted curator."""
         rng = random.Random(20261120)
         applied = refused = 0
@@ -307,7 +307,7 @@ class TestChipRegistryAppliesTheBytesItVerified(unittest.TestCase):
         self.assertGreater(refused, 30)
 
     def test_the_pack_and_each_sidecar_are_read_once(self):
-        """fails on c4953ac: the pack was read twice and the signature sidecar twice"""
+        """fails on 9c55515: the pack was read twice and the signature sidecar twice"""
         with tempfile.TemporaryDirectory() as tmp:
             up, store, _ = self._update(tmp, {self.FUTURE: "nvidia-nras"})
             opened = []
@@ -330,7 +330,7 @@ class TestChipRegistryAppliesTheBytesItVerified(unittest.TestCase):
             self.assertEqual(opened.count(up[:-5] + ".sig.json"), 1)
 
     def test_chip_classes_that_is_not_an_object_is_refused(self):
-        """fails on c4953ac: AttributeError (a list, a string, a number, null, true)"""
+        """fails on 9c55515: AttributeError (a list, a string, a number, null, true)"""
         for bad in ([], ["x"], "x", 1, None, True):
             with tempfile.TemporaryDirectory() as tmp:
                 ident = signing.Identity("curator")
@@ -596,7 +596,7 @@ class TestCrlCaptureClosedRule(unittest.TestCase):
 
     # ---- (a) no verified token, no request ----------------------------------------------------------------------
     def test_stamp_pack_with_a_tsa_nobody_trusts_asks_nothing(self):
-        """fails on c4953ac: one GET reached the loopback service and its answer was in the sidecar. The real path:
+        """fails on 9c55515: one GET reached the loopback service and its answer was in the sidecar. The real path:
         pack.stamp_pack against a local TSA whose self-made certificate names a loopback URL."""
         outer = self
 
@@ -619,7 +619,7 @@ class TestCrlCaptureClosedRule(unittest.TestCase):
                 except TypeError:
                     if not kw:
                         raise
-                    continue      # c4953ac has no ca_file: its failure is the first round
+                    continue      # 9c55515 has no ca_file: its failure is the first round
                 self.assertTrue(r["anchored"])
                 self.assertEqual(self.internal.hits, [], kw)
                 self.assertEqual((self.resolved, self.connected), ([], []))
@@ -674,7 +674,7 @@ class TestCrlCaptureClosedRule(unittest.TestCase):
             self.assertEqual((vm["token_verified"], "crls_b64" in vm, "crl_fetch" in vm, self.connected), (True, False, False, []))
 
     def test_no_anchor_wrong_anchor_wrong_digest_or_check_not_run_ask_nothing(self):
-        """fails on c4953ac. The token of the trusted chain itself, when the caller does not give what verifies it."""
+        """fails on 9c55515. The token of the trusted chain itself, when the caller does not give what verifies it."""
         tsr = base64.b64encode(self._reply("tsa", ["int"])).decode()
         evilroot = os.path.join(self.d, "evilroot.pem")
         cases = [({}, None), ({"ca_file": self.root}, None), ({"expected_digest_hex": self.digest}, None),
@@ -718,7 +718,7 @@ class TestCrlCaptureClosedRule(unittest.TestCase):
 
     # ---- (b) only the signer's chain ------------------------------------------------------------------------------
     def test_verified_token_only_the_signers_chain_names_a_url(self):
-        """fails on c4953ac (the loopback URL of `evil` was asked). The token carries int beside evil, sib and fakeint:
+        """fails on 9c55515 (the loopback URL of `evil` was asked). The token carries int beside evil, sib and fakeint:
         the two distribution points of tsa and int are asked, at the public address, and their CRLs kept."""
         kw = dict(fetch_crl=True, ca_file=self.root, expected_digest_hex=self.digest)
         # with the forged copy of the issuer met first, openssl does not build the chain: not verified, nothing asked
@@ -799,7 +799,7 @@ class TestCrlCaptureClosedRule(unittest.TestCase):
         return str(cm.exception)
 
     def test_generated_addresses_that_are_not_public_are_never_connected_to(self):
-        """fails on c4953ac. 400 addresses drawn from the ranges the rule names, each in 13 texts for IPv4 (decimal,
+        """fails on 9c55515. 400 addresses drawn from the ranges the rule names, each in 13 texts for IPv4 (decimal,
         hexadecimal, octal, one to four parts, a final dot, fullwidth digits, IPv4-mapped IPv6) and with a random
         scheme case, port and path; then the same texts for 60 public addresses, which ARE connected to (the control
         of the generator: it does not refuse everything)."""
@@ -852,7 +852,7 @@ class TestCrlCaptureClosedRule(unittest.TestCase):
             self.assertEqual(F.why_not_public(ipaddress.ip_address(text)), kind, text)
 
     def test_generated_urls_outside_the_grammar_are_refused_before_any_io(self):
-        """fails on c4953ac. Schemes, userinfo, percent signs, white space, control characters, backslashes, ports,
+        """fails on 9c55515. Schemes, userinfo, percent signs, white space, control characters, backslashes, ports,
         empty hosts and values that are not strings; `localhost` in every spelling without asking the resolver."""
         rng = random.Random(20261121)
         bad = [None, 1, b"http://crl.example.test/x", ["http://crl.example.test/x"], "", "crl.example.test/x.crl", "//crl.example.test/x",
@@ -1100,7 +1100,7 @@ class TestCrlCaptureClosedRule(unittest.TestCase):
 class TestCallerUrlsNoRedirectBounded(unittest.TestCase):
     """The four fetchers of a URL the CALLER gives (timestamp.stamp, ots.submit, chip_registry.discover_online and
     fetch_signed_update_online) go through _crl_fetch.ask: a redirect is never followed and the answer is bounded.
-    Fails on ce21abc: each followed a 302 to another host (ots.submit stored that host's answer in its result) and read
+    Fails on 61d755d: each followed a 302 to another host (ots.submit stored that host's answer in its result) and read
     an answer of any size."""
 
     def setUp(self):
