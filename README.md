@@ -1478,13 +1478,16 @@ p95: 518 → 694 µs); the per-run maxima by up to 71 %. Read the p95 / p99 colu
   order as the effect; the sync mode is bound by fsync and unaffected within noise.
 - **Fuzz (`tests/fuzz_toolkit.py`, stdlib, seeded)**: byte, JSON-structure, ledger-line and `sig_alg` mutations of four
   valid cases (anchored, signed, full, stamped) against `verify_pack` (plain and with `require_signed=True`) and the
-  library API. Measured on 29/09/2026 (the figures of 28/09 changed with the `sig_alg` mutator: the mutation sequence of a
-  seed is a function of the mutator list). Seed 20260928, 3 000 iterations: 0 violations, 545 PASS / 2 455 FAIL, twice
-  with an identical verdict sequence (SHA-256 `2698f366…`), and the same sequence on CPython 3.9.25, 3.11.2 and 3.13.15
-  — this is the CI smoke job. Seed 1, 30 000 iterations: 0 violations (5 598 PASS). Seed 2, 90 s: 53 899 iterations, 0
-  violations (10 200 PASS; a time-bound count, 52–54 000 across three runs of the day). Positive controls on seed 20260928, 3 000 iterations, one check of the verifier disabled at a
-  time: producer signature 2 violations, pack-sha3 recomputation 181, ledger chain 312, strict JSON profile 60, the
-  canonical-name rule of `sig_alg` 26, the `require_signed` requirement 160 — the fuzzer sees each. Two properties of
+  library API. The CI smoke job, seed 20260928, 3 000 iterations, measured on 20/11/2026 on this branch (Unreleased): 0
+  violations, 499 PASS / 2 501 FAIL, the same verdict sequence (SHA-256 `910b4635…`) on CPython 3.9.25, 3.11.2, 3.13.15
+  and 3.14.8 (on 404b60b, before the six decisions below: 516 PASS / 2 484 FAIL, `0ec89796…`; on 29/09/2026: 545 /
+  2 455, `2698f366…`). Positive controls on the same seed, one check of the verifier disabled at a time, measured on
+  20/11/2026 on this branch: producer signature 2 violations, pack-sha3 recomputation 181, ledger chain 308, strict JSON
+  profile 59, the canonical-name rule of `sig_alg` 15, the `require_signed` requirement 151 — the fuzzer sees each (on
+  404b60b: 2 / 181 / 308 / 59 / 22 / 160; the last two fell because a signature with no trust store is no longer
+  `authenticated`, Decision 1; until this measurement the README gave the figures of 29/09/2026, 2 / 181 / 312 / 60 /
+  26 / 160). Measured on 29/09/2026 and not repeated: seed 1, 30 000 iterations, 0 violations (5 598 PASS); seed 2,
+  90 s, 53 899 iterations, 0 violations (10 200 PASS; a time-bound count, 52–54 000 across three runs of the day). Two properties of
   the family the fuzz confirmed and encodes: a ledger cut at its tail to a valid prefix that still holds the anchor is a
   valid chain (undetectable without a close record or an external anchor); a signature sidecar whose `sig_alg` became a
   genuinely unknown string is a SKIP that names the unverified signature, so a pack that is also anchored still verifies
