@@ -208,7 +208,8 @@ def verify_evidence_record(record: Dict[str, Any],
     without `tsa_ca_file`: the claim of trusted time has no proof to verify, now or later (RFC 4998 §4.1).
     A pack of `pack_paths` that cannot be read as an evidence pack is a FAIL of
     `data-objects-bound`, not of the record. An
-    `asserted` time is reported as NOT trusted-time. A malformed record (missing
+    `asserted` time is reported as NOT trusted-time; a `time_source` that is neither `rfc3161` nor `asserted` (or none) is a
+    FAIL (20/11/2026). A malformed record (missing
     or unsupported hash_alg, wrong types) is `valid: false` with a FAIL layer, never
     an exception (audit V2 #6, 30/09/2026)."""
     if not isinstance(record, dict):
@@ -340,8 +341,15 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
                 ok, detail = False, detail + "; the following archive timestamp is dated before this one"
             time_layers.append((f"time[{i}]-rfc3161", ok, detail, False))
             later_gen = gen if ok else None
-        else:
+        elif ts.get("time_source") == "asserted":
             time_layers.append((f"time[{i}]-asserted", True, "asserted time — NOT trusted time", True))
+        else:
+            # the producer writes "rfc3161" or "asserted" only (_timestamp_root): any other value, or none, is a malformed
+            # entry, never read as "asserted" (20/11/2026: "bogus", "RFC3161" with a token, or no time_source at all gave an
+            # asserted SKIP and valid: true)
+            time_layers.append((f"time[{i}]-source", False,
+                                f"time_source is neither rfc3161 nor asserted: {str(ts.get('time_source'))[:40]!r}", False))
+            later_gen = None
     for name, ok, detail, skip in reversed(time_layers):
         add(name, ok, detail, skip=skip)
 
