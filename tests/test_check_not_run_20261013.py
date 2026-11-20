@@ -249,7 +249,9 @@ class TestCheckNotRun(unittest.TestCase):
     def test_openssl_absent_is_still_none(self):
         out = self.child("absent", self.j("empty"))
         self.assertIsNone(out["verify"]["returned"]["verified"], out)
-        self.assertIs(out["record"]["returned"], True, out)   # SKIP layer, as in 0.11.3
+        # SKIP layer in 0.11.3 - 0.13.0; since Unreleased (Decision 4 of 20/11/2026) tsa_ca_file asks for a verified time,
+        # so a token this host cannot check is a FAIL of the record (valid False), never an exception
+        self.assertIs(out["record"]["returned"], False, out)
 
     def test_token_not_base64_is_still_false(self):
         out = self.child("badb64")

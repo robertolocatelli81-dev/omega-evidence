@@ -517,6 +517,14 @@ Each was measured on 404b60b (the branch before these changes) and reproduced be
   `spec/v1/statement.md`), `pack` is None for a predicate that is not an object, and `build_statement` recomputes the
   subject's `sha3_256` from the body (`ValueError` when a declared `pack_sha3` differs). API change: the test calls that
   relied on the carried key now pass `allow_embedded_key=True`; fixtures with a declared digest over no body are real packs.
+- **`preservation`: trusted time when a trust anchor is given; evidence record version 2.** With `tsa_ca_file`, an
+  `asserted` time, or a token this host cannot check, is a FAIL (measured on 404b60b: `time[0]-asserted` SKIP, `valid:
+  true`). New records carry `"record_version": 2` and their Merkle root is the Merkle Tree Hash of RFC 6962 §2.1 (unchanged
+  in RFC 9162 §2.1.1, which obsoletes it; rfc-editor.org, read 20/11/2026): leaves and inner nodes in separate domains
+  (0x00 / 0x01), no node duplicated. Measured on 404b60b: root[a, b, c] == root[a, b, c, c], and root[l1, l2] ==
+  root[H(l1 ‖ l2)]. Records without `record_version` (every record written up to 0.13.0) verify as before and keep their
+  version through renewals; any other `record_version` is a FAIL (`record-version`). Rule in the module docstring
+  (RECORD FORMAT).
 
 0.13.0 was released on 20 November 2026; its changes are the two 0.13.0 sections below (both of 20 November).
 

@@ -196,7 +196,7 @@ class TestValidityTimeOfRenewedTokens(unittest.TestCase):
         rec = self._record(["short_d", None], [1])
         self._wait_until(exp)
         res = PR.verify_evidence_record(rec, tsa_ca_file=self._p("ca.crt"))
-        self.assertEqual(self._time_layers(res), [("time[0]-rfc3161", "FAIL"), ("time[1]-asserted", "SKIP")], res)
+        self.assertEqual(self._time_layers(res), [("time[0]-rfc3161", "FAIL"), ("time[1]-asserted", "FAIL")], res)   # FAIL beside tsa_ca_file since Unreleased (Decision 4)
 
     def test_asserted_between_two_tokens_keeps_the_later_trusted_time(self):
         exp = self._tsa("short_e", 4)
@@ -204,7 +204,8 @@ class TestValidityTimeOfRenewedTokens(unittest.TestCase):
         rec = self._record(["short_e", None, "long_e"], [0.5, 0.5])
         self._wait_until(exp)
         res = PR.verify_evidence_record(rec, tsa_ca_file=self._p("ca.crt"))
-        self.assertEqual(self._time_layers(res), [("time[0]-rfc3161", "PASS"), ("time[1]-asserted", "SKIP"),
+        # the asserted entry is passed over for the time of entry 0, and is itself a FAIL beside tsa_ca_file (Decision 4)
+        self.assertEqual(self._time_layers(res), [("time[0]-rfc3161", "PASS"), ("time[1]-asserted", "FAIL"),
                                                   ("time[2]-rfc3161", "PASS")], res)
 
     def test_untrusted_renewal_gives_no_trusted_time(self):
@@ -266,14 +267,14 @@ class TestValidityTimeOfRenewedTokens(unittest.TestCase):
         got = self._time_layers(PR.verify_evidence_record(bad, tsa_ca_file=self._p("ca.crt")))
         self.assertEqual(got, [("time[0]-rfc3161", "FAIL"), ("time[1]-rfc3161", "FAIL"), ("time[2]-rfc3161", "PASS")])
 
-        # (c) the middle entry is recorded but not verified (SKIP)
+        # (c) the middle entry is recorded but not verified (SKIP without tsa_ca_file; FAIL with it, Decision 4)
         def skip_middle(tok, digest, timeout=15, ca_file=None, at_time=None):
             if tok == toks[1]:
                 return {"verified": None, "note": "not verified"}
             return real_verify(tok, digest, timeout=timeout, ca_file=ca_file, at_time=at_time)
         with mock.patch.object(T, "verify", skip_middle):
             got = self._time_layers(PR.verify_evidence_record(rec, tsa_ca_file=self._p("ca.crt")))
-        self.assertEqual(got, [("time[0]-rfc3161", "FAIL"), ("time[1]-rfc3161", "SKIP"), ("time[2]-rfc3161", "PASS")])
+        self.assertEqual(got, [("time[0]-rfc3161", "FAIL"), ("time[1]-rfc3161", "FAIL"), ("time[2]-rfc3161", "PASS")])   # FAIL beside tsa_ca_file since Unreleased (Decision 4)
 
     def test_token_over_other_data_lends_no_time(self):
         """A timestamp renewal is checked over its prev_binding: an extra merkle_root naming the data of a foreign token

@@ -36,6 +36,24 @@ HONEST SCOPE (mandatory, embedded in every record):
     record says so (fail-open is flagged, not hidden) — an asserted time is NOT
     proof of time.
 
+RECORD FORMAT — two versions, both verified (the version is part of what record_sha3 covers):
+  * version 1 (no `record_version` member; every record written up to 0.13.0): the Merkle root over an entry's
+    `leaves` hashes the concatenation of two child digests, with no prefix, and an odd node is paired with itself.
+    Two weaknesses (measured 20/11/2026): root[a, b, c] == root[a, b, c, c] (a data object listed once more gives the
+    same root), and root[l1, l2] == root[H(l1 || l2)] (an inner node reads as a leaf).
+  * version 2 (`"record_version": 2`, written from Unreleased on): the root is the Merkle Tree Hash of RFC 6962 §2.1,
+    unchanged in RFC 9162 §2.1.1 (Certificate Transparency 2.0, Experimental, December 2021, which obsoletes RFC 6962;
+    rfc-editor.org read 20/11/2026), with HASH = the entry's `hash_alg` and d[i] = the bytes of leaves[i]:
+        MTH({}) = HASH(),  MTH({d[0]}) = HASH(0x00 || d[0]),
+        MTH(D_n) = HASH(0x01 || MTH(D[0:k]) || MTH(D[k:n])), k the largest power of two smaller than n.
+    No node is duplicated; leaves and inner nodes are hashed in separate domains. A record keeps its version through
+    its renewals (`renew_timestamp`, `renew_hash_tree`); a version 1 record becomes version 2 only by building a new one.
+  * any other `record_version` (or a non-integer) is a FAIL of the layer `record-version`.
+
+TIME WITH A TRUST ANCHOR (Unreleased): `verify_evidence_record(..., tsa_ca_file=...)` asks for trusted time, so every
+entry's time must be an RFC 3161 token that verifies: an `asserted` time, or a token this host cannot check (no
+openssl: verified None), is a FAIL. Without `tsa_ca_file` they stay SKIP, as before.
+
 Self-contained: Python stdlib (+ optional openssl via `timestamp`). Apache-2.0.
 The structural verification (Merkle roots + renewal chaining) is fully OFFLINE.
 """
@@ -72,8 +90,42 @@ def _digest(alg: str, data: bytes) -> str:
     return h.hexdigest()
 
 
+RECORD_VERSION = 2   # written by build_evidence_record (see RECORD FORMAT above)
+
+
+def _mth(leaf_bytes: List[bytes], alg: str) -> bytes:
+    """RFC 6962 §2.1 / RFC 9162 §2.1.1 Merkle Tree Hash in `alg` (record version 2)."""
+    if not leaf_bytes:
+        return _hnew(alg).digest()
+    if len(leaf_bytes) == 1:
+        h = _hnew(alg)
+        h.update(b"\x00" + leaf_bytes[0])
+        return h.digest()
+    k = 1
+    while k * 2 < len(leaf_bytes):
+        k *= 2
+    h = _hnew(alg)
+    h.update(b"\x01" + _mth(leaf_bytes[:k], alg) + _mth(leaf_bytes[k:], alg))
+    return h.digest()
+
+
+def _root(leaf_hexes: List[str], alg: str, version: int) -> str:
+    """The Merkle root of an entry under the record's version (1: _merkle_root; 2: RFC 6962 MTH)."""
+    if version == 2:
+        return _mth([bytes.fromhex(x) for x in leaf_hexes], alg).hex()
+    return _merkle_root(leaf_hexes, alg)
+
+
+def _version_of(record: Dict[str, Any]) -> int:
+    """1 when the record has no `record_version`, else the value; ValueError when it is not 1 or 2 (an int, not bool)"""
+    v = record.get("record_version", 1)
+    if type(v) is not int or v not in (1, 2) or ("record_version" in record and v == 1):   # not bool, not 2.0
+        raise ValueError(f"record_version is not a known version (absent = 1, or 2): {str(v)[:40]!r}")
+    return v
+
+
 def _merkle_root(leaf_hexes: List[str], alg: str) -> str:
-    """Binary Merkle root over leaf digests (odd node duplicated), in `alg`."""
+    """Record version 1: binary Merkle root over leaf digests (odd node duplicated, no prefixes), in `alg`."""
     if not leaf_hexes:
         return _digest(alg, b"")
     level = [bytes.fromhex(h) for h in leaf_hexes]
@@ -128,11 +180,11 @@ def build_evidence_record(pack_paths: List[str], tsa_url: Optional[str] = None,
     root over their pack_sha3 values, timestamped (RFC 3161 if available)."""
     pack_sha3 = [_pack_sha3_of(p) for p in pack_paths]
     leaves = _leaves(pack_sha3, hash_alg)
-    root = _merkle_root(leaves, hash_alg)
+    root = _root(leaves, hash_alg, RECORD_VERSION)
     ats0 = {"seq": 0, "type": "initial", "hash_alg": hash_alg,
             "leaves": leaves, "merkle_root": root, "covers": "data-objects",
             "timestamp": _timestamp_root(root, tsa_url), "created_utc": _now()}
-    return _finalize({"kind": RECORD_KIND, "honest_scope": HONEST_SCOPE,
+    return _finalize({"kind": RECORD_KIND, "record_version": RECORD_VERSION, "honest_scope": HONEST_SCOPE,
                       "data_objects": [{"pack_sha3": s} for s in pack_sha3],
                       "archive_timestamps": [ats0]})
 
@@ -175,7 +227,7 @@ def renew_hash_tree(record: Dict[str, Any], pack_paths: List[str], new_hash_alg:
     leaves = _leaves(pack_sha3, new_hash_alg)
     chain_binding = _digest(new_hash_alg, canonical_json(record["archive_timestamps"]))
     leaves = leaves + [chain_binding]
-    root = _merkle_root(leaves, new_hash_alg)
+    root = _root(leaves, new_hash_alg, _version_of(record))
     ats = {"seq": prev["seq"] + 1, "type": "hash-tree-renewal", "hash_alg": new_hash_alg,
            "leaves": leaves, "merkle_root": root, "covers": "data-objects+previous-chain",
            "chain_binding": chain_binding,
@@ -207,7 +259,7 @@ def verify_evidence_record(record: Dict[str, Any],
     without `tsa_ca_file`: the claim of trusted time has no proof to verify, now or later (RFC 4998 §4.1).
     A pack of `pack_paths` that cannot be read as an evidence pack is a FAIL of
     `data-objects-bound`, not of the record. An
-    `asserted` time is reported as NOT trusted-time; a `time_source` that is neither `rfc3161` nor `asserted` (or none) is a
+    `asserted` time is reported as NOT trusted-time, and with `tsa_ca_file` it is a FAIL (Unreleased); a `time_source` that is neither `rfc3161` nor `asserted` (or none) is a
     FAIL (20/11/2026). A malformed record (missing
     or unsupported hash_alg, wrong types) is `valid: false` with a FAIL layer, never
     an exception (audit V2 #6, 30/09/2026)."""
@@ -234,6 +286,14 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
         {k: v for k, v in record.items() if k != "record_sha3"}))
     add("record-sha3", record.get("record_sha3") == recomputed)
 
+    try:
+        version = _version_of(record)
+        add("record-version", True, f"version {version}" + (" (Merkle root without RFC 6962 domain separation)"
+                                                             if version == 1 else " (RFC 6962 Merkle Tree Hash)"))
+    except ValueError as e:
+        add("record-version", False, str(e))
+        version = 0                     # no root is recomputed under a version nobody defined: the layers below FAIL
+
     ats = record.get("archive_timestamps", [])
     add("has-archive-timestamps", bool(ats), f"{len(ats)} entr{'y' if len(ats)==1 else 'ies'}")
 
@@ -249,8 +309,8 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
     # 2) initial Merkle root
     if ats:
         a0 = ats[0]
-        expect = _merkle_root(_leaves(pack_sha3, a0["hash_alg"]), a0["hash_alg"])
-        add("initial-merkle-root", a0.get("merkle_root") == expect and
+        expect = _root(_leaves(pack_sha3, a0["hash_alg"]), a0["hash_alg"], version) if version else None
+        add("initial-merkle-root", expect is not None and a0.get("merkle_root") == expect and
             a0.get("leaves") == _leaves(pack_sha3, a0["hash_alg"]),
             f"seq0 {a0['hash_alg']}")
 
@@ -269,7 +329,7 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
             expect_leaves = data_leaves + [chain_binding]
             ok = (cur.get("chain_binding") == chain_binding and
                   cur.get("leaves") == expect_leaves and
-                  cur.get("merkle_root") == _merkle_root(expect_leaves, alg))
+                  version != 0 and cur.get("merkle_root") == _root(expect_leaves, alg, version))
             add(f"renewal[{i}]-hash-tree", ok, f"re-hashed to {alg}, carries previous chain")
             bound[i] = ok
         else:
@@ -314,7 +374,11 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
             # True / False = verified. Until 0.10.0 this read a "status" key that verify() never returns, so every
             # record with an RFC 3161 token was FAIL (audit V2 final round, 02/10/2026).
             if r.get("verified") is None:
-                time_layers.append((f"time[{i}]-rfc3161", True, r.get("note", "token recorded, not verified"), True))
+                if tsa_ca_file:   # Unreleased: a trust anchor given asks for verified time; not checkable here = FAIL
+                    time_layers.append((f"time[{i}]-rfc3161", False, "tsa_ca_file given but the token could not be "
+                                        "verified here: " + str(r.get("note", ""))[:120], False))
+                else:
+                    time_layers.append((f"time[{i}]-rfc3161", True, r.get("note", "token recorded, not verified"), True))
                 later_gen = None
                 continue
             ok = r.get("verified") is True
@@ -341,7 +405,11 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
             time_layers.append((f"time[{i}]-rfc3161", ok, detail, False))
             later_gen = gen if ok else None
         elif ts.get("time_source") == "asserted":
-            time_layers.append((f"time[{i}]-asserted", True, "asserted time — NOT trusted time", True))
+            if tsa_ca_file:   # Unreleased (Decision 4): until 0.13.0 a SKIP beside a trust anchor, and the record valid
+                time_layers.append((f"time[{i}]-asserted", False, "asserted time — NOT trusted time, and tsa_ca_file "
+                                    "asks for trusted time", False))
+            else:
+                time_layers.append((f"time[{i}]-asserted", True, "asserted time — NOT trusted time", True))
         else:
             # the producer writes "rfc3161" or "asserted" only (_timestamp_root): any other value, or none, is a malformed
             # entry, never read as "asserted" (20/11/2026: "bogus", "RFC3161" with a token, or no time_source at all gave an

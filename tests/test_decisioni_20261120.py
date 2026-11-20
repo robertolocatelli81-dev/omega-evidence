@@ -9,6 +9,8 @@
      read as found (`cert_count: "lots"` printed as a count). Now the token's form and a closed material, FAIL.
 (D3) `interop.dsse.from_dsse` verified an envelope with the key the envelope itself carries (`verified: True` for anyone's
      envelope), read neither `subject` nor `predicateType`, and `build_statement` wrote a declared `pack_sha3` as read.
+(D4) `preservation`: an `asserted` time beside `tsa_ca_file` was a SKIP and the record valid; the Merkle root had no
+     domain separation and duplicated an odd node. Now FAIL, and record version 2 with the RFC 6962 Merkle Tree Hash.
 """
 import base64
 import hashlib
@@ -327,6 +329,93 @@ class D3DsseKeyOfTheCaller(unittest.TestCase):
             self.dsse.to_dsse(forged, self.ident)
         st = self.dsse.build_statement(self.pk)
         self.assertEqual(st["subject"][0]["digest"]["sha3_256"], self.pk["pack_sha3"])
+
+
+class D4PreservationRecord(unittest.TestCase):
+    def _ca(self, d):
+        ca = os.path.join(d, "ca.pem")
+        with open(ca, "w") as f:
+            f.write("-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n")
+        return ca
+
+    def test_asserted_time_beside_a_trust_anchor_fails(self):
+        """fails on 404b60b: valid True with time[0]-asserted SKIP though tsa_ca_file was given"""
+        from omega_evidence import preservation as PR
+        d = _tmp(self)
+        rec = PR.build_evidence_record([_pack(d, "p")])
+        self.assertTrue(PR.verify_evidence_record(rec)["valid"])                     # control: no anchor, SKIP
+        r = PR.verify_evidence_record(rec, tsa_ca_file=self._ca(d))
+        self.assertFalse(r["valid"])
+        self.assertEqual(_layer(r, "time[0]-asserted")["status"], "FAIL")
+
+    def test_version_2_is_rfc6962(self):
+        """fails on 404b60b: root[a,b,c] == root[a,b,c,c] and root[l1,l2] == root[H(l1||l2)]; new records are version 2"""
+        import hashlib as H
+        from omega_evidence import preservation as PR
+        l3 = PR._leaves(["a", "b", "c"], "sha256")
+        l4 = PR._leaves(["a", "b", "c", "c"], "sha256")
+        self.assertNotEqual(PR._root(l3, "sha256", 2), PR._root(l4, "sha256", 2))
+        inner = H.sha256(bytes.fromhex(l3[0]) + bytes.fromhex(l3[1])).hexdigest()
+        self.assertNotEqual(PR._root(l3[:2], "sha256", 2), PR._root([inner], "sha256", 2))
+        # the RFC 6962 vectors this repository already holds (cryptovalid-opencore 0.14.0, leaf data = bytes([i]) * 3)
+        with open(os.path.join(ROOT, "tests", "fixtures", "rfc6962_cryptovalid_vectors.json")) as f:
+            vec = json.load(f)
+        for t in vec["trees"]:
+            self.assertEqual(PR._root([(bytes([i]) * 3).hex() for i in range(t["n"])], "sha256", 2), t["root"], t["n"])
+        self.assertEqual(PR._root([], "sha256", 2), H.sha256(b"").hexdigest())
+        d = _tmp(self)
+        rec = PR.build_evidence_record([_pack(d, "p"), _pack(d, "q", {"amount": "2"})])
+        self.assertEqual(rec["record_version"], 2)
+        self.assertTrue(PR.verify_evidence_record(rec)["valid"])
+
+    def test_version_1_records_still_verify_and_unknown_versions_fail(self):
+        from omega_evidence import preservation as PR
+        d = _tmp(self)
+        paths = [_pack(d, f"p{i}", {"amount": str(i)}) for i in range(3)]
+        rec = PR.build_evidence_record(paths)
+        v1 = {k: v for k, v in json.loads(json.dumps(rec)).items() if k != "record_version"}   # as 0.13.0 wrote it
+        a0 = v1["archive_timestamps"][0]
+        a0["merkle_root"] = PR._merkle_root(a0["leaves"], a0["hash_alg"])
+        v1 = PR._finalize(v1)
+        self.assertTrue(PR.verify_evidence_record(v1, pack_paths=paths)["valid"])
+        v1r = PR.renew_hash_tree(json.loads(json.dumps(v1)), paths, "sha3_256")
+        self.assertNotIn("record_version", v1r)
+        self.assertTrue(PR.verify_evidence_record(v1r, pack_paths=paths)["valid"])
+        v2r = PR.renew_hash_tree(PR.renew_timestamp(json.loads(json.dumps(rec))), paths, "sha512")
+        self.assertTrue(PR.verify_evidence_record(v2r, pack_paths=paths)["valid"])
+        for bad in (2.0, True, 1, "2"):
+            with self.assertRaises(ValueError):
+                PR._version_of({"record_version": bad})
+        for bad in (1, 3, 0, "2", True, None, [2]):   # a float cannot be canonicalised into a record at all
+            r2 = PR._finalize(dict(json.loads(json.dumps(rec)), record_version=bad))
+            r = PR.verify_evidence_record(r2)
+            self.assertFalse(r["valid"], bad)
+            self.assertEqual(_layer(r, "record-version")["status"], "FAIL", bad)
+        # a version 1 root under a version 2 label (and the reverse) is refused
+        swap = PR._finalize(dict(json.loads(json.dumps(v1)), record_version=2))
+        self.assertFalse(PR.verify_evidence_record(swap)["valid"])
+
+    def test_generated_trees(self):
+        """random lists of 0..70 leaves and every hash_alg: version 2 equals an independent RFC 6962 implementation (the
+        one of interop.aat for sha256), a duplicated last leaf and an inner node as a leaf never give the same root"""
+        import hashlib as H
+        from omega_evidence import preservation as PR
+        from omega_evidence.interop import aat
+        rnd = random.Random(6962)
+        for _ in range(150):
+            alg = rnd.choice(PR._SUPPORTED_HASH)
+            n = rnd.randrange(0, 70)
+            leaves = [PR._digest(alg, str(rnd.random()).encode()) for _ in range(n)]
+            root = PR._root(leaves, alg, 2)
+            if alg == "sha256" and n:
+                ref = aat.merkle_root([H.sha256(b"\x00" + bytes.fromhex(x)).digest() for x in leaves]).hex()
+                self.assertEqual(root, ref, n)
+            if n:
+                self.assertNotEqual(root, PR._root(leaves + [leaves[-1]], alg, 2))
+            if n >= 2:
+                h = PR._hnew(alg)
+                h.update(bytes.fromhex(leaves[0]) + bytes.fromhex(leaves[1]))
+                self.assertNotEqual(PR._root(leaves[:2], alg, 2), PR._root([h.hexdigest()], alg, 2))
 
 
 if __name__ == "__main__":
