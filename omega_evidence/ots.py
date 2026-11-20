@@ -36,11 +36,11 @@ from __future__ import annotations
 
 import base64
 import json
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import _crl_fetch
 from .canonical import sha256_bytes
 from .ledger import loads_bounded
 
@@ -59,6 +59,9 @@ def _ots_sidecar(pack_path: str) -> Path:
     return Path(p[:-5] + ".ots.json" if p.endswith(".json") else p + ".ots.json")
 
 
+OTS_REPLY_MAX_BYTES = 1024 * 1024   # a pending calendar timestamp is a few hundred bytes
+
+
 def submit(digest_sha256_hex: str, calendars: Optional[List[str]] = None,
            timeout: float = 20.0) -> Dict[str, Any]:
     """Submit a 32-byte SHA-256 digest to the calendars. Returns the per-calendar
@@ -72,13 +75,10 @@ def submit(digest_sha256_hex: str, calendars: Optional[List[str]] = None,
     for cal in cals:
         url = cal.rstrip("/") + "/digest"
         try:
-            req = urllib.request.Request(
-                url, data=digest, method="POST",
-                headers={"Content-Type": "application/octet-stream",
-                         "Accept": "application/octet-stream",
-                         "User-Agent": "omega-evidence/ots"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310 - https calendar
-                body = r.read()
+            body = _crl_fetch.ask(url, data=digest, timeout=timeout, max_bytes=OTS_REPLY_MAX_BYTES,
+                                  headers={"Content-Type": "application/octet-stream",
+                                           "Accept": "application/octet-stream",
+                                           "User-Agent": "omega-evidence/ots"})   # no redirect, bounded
             results.append({"calendar": cal, "timestamp_b64": base64.b64encode(body).decode()})
         except Exception as e:  # noqa: BLE001 - fail-soft per calendar
             errors.append({"calendar": cal, "error": f"{type(e).__name__}: {e}"})

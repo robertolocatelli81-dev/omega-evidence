@@ -50,11 +50,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .ledger import loads_bounded, loads_strict, read_input
+from . import _crl_fetch
+from .ledger import MAX_INPUT_BYTES, loads_bounded, loads_strict, read_input
 from .pack import build_pack, sign_pack, write_pack
 from .signing import Identity
 from .verifier import verify_pack
@@ -85,9 +85,9 @@ def _now() -> str:
 def _http_get(url: str, timeout: float) -> bytes:
     if not (url.startswith("http://") or url.startswith("https://")):
         raise ValueError("only http(s) URLs are allowed")
-    req = urllib.request.Request(url, headers={"User-Agent": "omega-evidence/chip_registry"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec - explicit scheme check
-        return resp.read()
+    # no redirect, at most the bound of every verifier input (_crl_fetch.ask; until 0.12.0 a redirect was followed)
+    return _crl_fetch.ask(url, headers={"User-Agent": "omega-evidence/chip_registry"}, timeout=timeout,
+                          max_bytes=MAX_INPUT_BYTES)
 
 
 class ChipRegistry:

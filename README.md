@@ -429,7 +429,7 @@ very function registered) the layer is reported present-but-unverifiable (never 
 
 0.12.0 was released on 19 November 2026; its changes are the three 0.12.0 sections below (18, 17 and 14 November).
 
-### Unreleased — three defects found on 0.12.0 by a security review tool, each reproduced before it was fixed (20 November 2026)
+### Unreleased — three defects found on 0.12.0 by a security review tool, each reproduced before it was fixed, and the same redirect class in four more fetchers (20 November 2026)
 
 Found on 20 November 2026 by running a security review tool on 0.12.0, not by an outside report. The same tool, run on
 a copy of 0.12.0 with a known defect put back (the weak-key check of Ed25519 reduced to a length check), did not find
@@ -478,9 +478,7 @@ downloaded (same SHA-256); the FreeTSA and Apple tokens do not verify against th
 Declared limits: behind a proxy that is the only way out, no CRL is captured (the error is recorded); a server that
 answers a distribution point with a redirect or with a PEM CRL is recorded as an error; a token whose signer is named
 by subjectKeyIdentifier is not captured at all (`openssl ts` does not read it; unchanged); with https the server
-certificate is checked against the system's trust store. Not changed here, measured the same day: `timestamp.stamp`,
-`chip_registry.discover_online` and `chip_registry.fetch_signed_update_online` ask the URL their caller gives and
-follow a redirect from it to another host (a GET reached a second loopback server in each).
+certificate is checked against the system's trust store.
 14 tests, on a lab made with openssl when they run (a root, an intermediate and a TSA; beside them a self-made
 certificate, one issued by the root that is not an issuer of the signer, one issued by the root with the
 intermediate's name and another key, and a copy of the intermediate signed by another "root"), with local servers and
@@ -492,7 +490,7 @@ and 780 spellings of public addresses that are (the control of the generator); m
 grammar; 300 generated answers of a resolver with one address that is not public among public ones; an answer that
 changes after the check; eleven statuses that are not 200 and a proxy in the environment; the byte bound and one
 byte less, an answer without end, one byte at a time; 300 changed or cut CRLs, a certificate, a PEM CRL; the caps
-per capture; TLS for the URL's name. On the previous commit all 14 fail: 1 on the defect itself (the GET arrived), 13
+per capture; TLS for the URL's name. On 0.12.0 all 14 fail: 1 on the defect itself (the GET arrived), 13
 because they use the parameters or the module that were not there. 82 mutants on the new and changed lines: 74 killed
 (67 at first, 7 more after tests were added for them); the other 8 give the same verdict on every input here —
 verification with another anchor is behind the same `if`; the issuer's name is compared again by openssl; with
@@ -500,6 +498,23 @@ verification with another anchor is behind the same `if`; the issuer's name is c
 "not global" and the carried IPv4 address never decide alone on Python 3.9, 3.11 and 3.13 (300 000 random addresses);
 the read loop ends when the size to read reaches zero; a read of a whole chunk overshoots the bound by at most 64 KiB
 before the same refusal.
+
+**The same class in the four fetchers of a URL the caller gives: a redirect was followed and the answer was not
+bounded.** `timestamp.stamp` (the TSA), `ots.submit` (the OpenTimestamps calendars, and so `ots.stamp_pack`),
+`chip_registry.discover_online` and `chip_registry.fetch_signed_update_online` gave their URL to `urllib.request.urlopen`:
+a redirect to another host was followed and the answer read whole. Measured on 0.12.0 with a local server answering
+302 to a second one: a request reached the second server from each of the four, and `ots.submit` returned the second
+server's answer as the calendar's `timestamp_b64`, which `ots.stamp_pack` writes in the `.ots.json` sidecar; a 70 MiB
+answer of a calendar was stored whole. Now the four go through `_crl_fetch.ask`: the URL under rule 1 of `_crl_fetch`
+(so userinfo, a percent sign in the host, a backslash or white space are refused); a redirect is never followed (a 3xx
+is an error naming the status), any status but 200 is an error; at most 1 MiB for a TSA reply and for a calendar
+answer, 64 MiB (`ledger.MAX_INPUT_BYTES`, the bound of every verifier input) for a registry feed or update; `timeout`
+for each read, and an answer still arriving after `timeout` seconds in all is dropped. The address is NOT judged, as
+it is for a distribution point: the caller chose it, and a TSA on the local network is legitimate. The proxies of the
+environment are used as before. Declared: a TSA, a calendar or a feed that answers with a redirect now fails (the error
+names the status) where 0.12.0 followed it. 3 tests (each of the four with 301, 302, 303, 307 and 308, and the same
+servers without the redirect as the control; the bounds and one byte less; userinfo, a backslash, white space or
+another scheme refused before any connection, and a status 201): all 3 fail on 0.12.0.
 
 **`aat.verify_chain` was quadratic in a chain whose records each name their own recorder.** The session's recorder
 (draft §5.2: one independent recorder; the genesis' `recording_component_id` when it is among the recorders, else the
@@ -516,7 +531,7 @@ blocking, at most 64 MiB, read once; anything else is exit 2 with the reason. Li
 CR as LF). Declared: a chain can no longer be given as a pipe (`/dev/stdin`, `<(...)`).
 6 tests (3 000 generated chains checked against the rule computed record by record; `min` called at most once on 300
 records; a FIFO in each of the four inputs; a device and a directory; the bound and one byte less; the three line
-ends): 5 of the 6 fail on the previous commit, 3 by behaviour and 2 because they call a function that was not there.
+ends): 5 of the 6 fail on 0.12.0, 3 by behaviour and 2 because they call a function that was not there.
 14 of 15 mutants on the changed lines killed; the 15th (no session recorder computed when there is only one) is
 equivalent: the value is read only when there are at least two.
 
@@ -536,7 +551,7 @@ that is there but is not readable is a refusal (`update not read: ...`), as it i
 both before, during — after the n-th read — or after the verification; each file opened once; six values of
 `chip_classes` that are not an object; a failing or unreadable timestamp, ledger or signature sidecar, for a pack
 named `.json` and not; a pack that is valid but only anchored, or signed with no trust registry named, and a signed
-pack of another kind; `signer_id` that is not a string): 6 of the 8 fail on the previous commit — 3 on the defect, 1 on
+pack of another kind; `signer_id` that is not a string): 6 of the 8 fail on 0.12.0 — 3 on the defect, 1 on
 the `AttributeError`, 1 only on the wording of a refusal that was a refusal there too, 1 because it calls a function
 that was not there. 16 of 16 mutants on the changed lines killed.
 
@@ -568,7 +583,12 @@ on 20 000 generated values). Same class found on 19 November 2026 in another ver
 found by that review, not by an outside report.
 Four more tests in the same file for the producing side (2^53+1, −2^53−1, 2^64 refused by `sign_record`, the bound and
 `batch` accepted; the hybrid refusal before any key is used; `to_jsonl` refusing 2^53+1, −2^53−1, 2^60, 2^64+1, 10^400
-and writing 2^53, −2^53, 10^20, 2^53−1 unchanged): 3 of the 4 fail on the previous commit, the fourth holds the bound.
+and writing 2^53, −2^53, 10^20, 2^53−1 unchanged): 3 of the 4 fail on 0.12.0, the fourth holds the bound; the refusals
+need no key, so they run without `cryptography` too (only the test that signs at the bound is skipped there). Two more:
+a tuple is an array for every check (`jcs` writes it as one; a first version of this change missed it, so 2^53+1 in a
+tuple was signed, exported as 9007199254740992 and not warned), and a record `jcs` refuses (a key that is not a string)
+is refused by `sign_record` and `to_jsonl` with `jcs`'s own reason (the first fails on 0.12.0; the second passes there
+and guards that first version, which raised a comparison error from its own walk instead).
 
 ### 0.12.0 — attestations and timestamps made by others: ECDSA P-256 in DSSE, sigstore bundles, RFC 3161 tokens without their certificate (18 November 2026)
 

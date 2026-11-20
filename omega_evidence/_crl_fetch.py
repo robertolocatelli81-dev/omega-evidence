@@ -52,6 +52,14 @@ the same check and a name is resolved twice; here neither happens (rules 4 and 5
 
 Not closed, stated: with https the certificate of the server is checked against the system's trust store as usual; a
 public host is asked on whatever port the certificate's author wrote.
+
+URLs the CALLER gives (`ask`, 20/11/2026): the TSA of `timestamp.stamp`, the calendars of `ots.submit`, the feed and the
+update of `chip_registry.discover_online` / `fetch_signed_update_online`. Their address is the caller's choice and is
+not judged (a TSA on the local network is legitimate); what the SERVER decides is: rule 1 (the URL), rule 5 (a redirect
+is never followed: until 0.12.0 each of the four followed one to another host, and `ots.submit` wrote the answer of the
+second host in the `.ots.json` sidecar, measured 20/11/2026) and a bound on bytes (each caller names it; until 0.12.0
+none: a 70 MiB answer of a calendar was stored whole). Time: `timeout` for each read, and an answer still arriving
+after `timeout` seconds in all is dropped. The proxies of the environment are used, as before.
 """
 
 from __future__ import annotations
@@ -62,6 +70,8 @@ import socket
 import ssl
 import threading
 import time
+import urllib.error
+import urllib.request
 from typing import List, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -276,3 +286,40 @@ def fetch(url, timeout: float = 20, max_bytes: int = CRL_MAX_BYTES) -> bytes:
     if not is_der_crl(data):
         raise Refused("the answer is not a DER CRL (RFC 5280 section 4.2.1.13)")
     return data
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """rule 5 for `ask`: a 3xx is refused, its Location never asked"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise Refused(f"HTTP status {code} (redirects are not followed)")
+
+
+def ask(url, data: Optional[bytes] = None, headers: Optional[dict] = None, timeout: float = 20,
+        max_bytes: int = CRL_MAX_BYTES) -> bytes:
+    """The body of a status-200 answer to a URL the CALLER gave (POST when `data` is given, else GET), under rule 1,
+    rule 5 and a bound of `max_bytes` (see the module docstring). Refused (a ValueError) for the URL, a redirect, another
+    status or an answer beyond the bounds; OSError / http.client.HTTPException for a connection that fails."""
+    check_url(url)
+    req = urllib.request.Request(url, data=data, headers=dict(headers or {}), method="GET" if data is None else "POST")
+    deadline = time.monotonic() + timeout
+    try:
+        resp = urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)   # nosec B310 - rule 1 checked
+    except urllib.error.HTTPError as e:
+        e.close()
+        raise Refused(f"HTTP status {e.code}") from None
+    with resp:
+        if resp.status != 200:
+            raise Refused(f"HTTP status {resp.status}")
+        chunks, total = [], 0
+        while total <= max_bytes:
+            b = resp.read1(min(65536, max_bytes + 1 - total))
+            if time.monotonic() >= deadline:
+                raise Refused(f"no whole answer within {timeout:g} s")
+            if not b:
+                break
+            chunks.append(b)
+            total += len(b)
+    if total > max_bytes:
+        raise Refused(f"the answer exceeds {max_bytes} bytes")
+    return b"".join(chunks)

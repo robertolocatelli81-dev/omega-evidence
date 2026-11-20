@@ -136,10 +136,20 @@ class TestProducersRefuse(unittest.TestCase):
 
     def setUp(self):
         self.recs = TestBeyondSafeInt._chain(TestBeyondSafeInt())
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric import ec
-        self.pem = ec.generate_private_key(ec.SECP256R1()).private_bytes(
-            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+        try:                       # the CI runs this file without cryptography too: a refusal needs no key
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+        except ImportError:
+            self.pem = b"not a key: refused before it is read"
+        else:
+            self.pem = ec.generate_private_key(ec.SECP256R1()).private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+
+    def _need_es256(self):
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("signing with ES256 needs cryptography")
 
     def _with(self, v, where="detail"):
         r = json.loads(json.dumps(self.recs[1]))
@@ -156,6 +166,7 @@ class TestProducersRefuse(unittest.TestCase):
             self.assertIn("/action_detail/n", str(cm.exception))
 
     def test_sign_record_accepts_the_bound_and_ignores_batch(self):
+        self._need_es256()
         for v in (LIM, -LIM, 0):
             aat.sign_record(self._with(v), self.pem)
         aat.sign_record(self._with(2 ** 60, where="batch"), self.pem)     # batch is not signed
@@ -188,6 +199,35 @@ class TestProducersRefuse(unittest.TestCase):
             recs[1]["action_detail"]["a/b~"] = [v]
             line = aat.to_jsonl(recs).splitlines()[1]
             self.assertEqual(json.loads(line)["action_detail"]["a/b~"], [v])
+
+    def test_a_tuple_is_an_array_for_every_check(self):
+        """jcs() writes a tuple as an array: on ce21abc an integer beyond the bound inside a tuple was signed, written
+        changed by to_jsonl and not warned by verify_chain (measured 20/11/2026)."""
+        for v in ((2 ** 53 + 1,), (1, (LIM + 1,))):
+            with self.assertRaises(ValueError) as cm:
+                aat.sign_record(self._with(v), self.pem)
+            self.assertIn("/action_detail/n/", str(cm.exception))
+            recs = json.loads(json.dumps(self.recs))
+            recs[1]["action_detail"]["n"] = v
+            if v == (2 ** 53 + 1,):
+                with self.assertRaises(ValueError):
+                    aat.to_jsonl(recs)
+            res = aat.verify_chain(_rehash(recs))
+            self.assertEqual([w["i"] for w in _warned(res)], [1], res["warnings"])
+        recs = json.loads(json.dumps(self.recs))
+        recs[1]["action_detail"]["n"] = (2 ** 53,)                      # written as is: exported unchanged
+        self.assertEqual(json.loads(aat.to_jsonl(recs).splitlines()[1])["action_detail"]["n"], [2 ** 53])
+
+    def test_what_jcs_refuses_keeps_its_reason(self):
+        """a key that is not a string: on ce21abc sign_record and to_jsonl raised "'<' not supported between ..."
+        from the walk, before jcs() gave its reason."""
+        for d in ({1: 2 ** 60, "a": 1}, {1: 1, "b": 2}):
+            r = self._with(0)
+            r["action_detail"] = d
+            for f in (lambda: aat.sign_record(r, self.pem), lambda: aat.to_jsonl([r])):
+                with self.assertRaises(TypeError) as cm:
+                    f()
+                self.assertIn("object keys must be strings", str(cm.exception))
 
 
 if __name__ == "__main__":

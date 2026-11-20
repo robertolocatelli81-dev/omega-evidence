@@ -962,8 +962,9 @@ def _check_optional(i: int, r: Dict[str, Any], problems: List[Dict[str, Any]], w
 
 def _beyond_safe_int(obj: Any) -> List[str]:
     """JSON Pointers (RFC 6901; "" is the whole value) of every integer outside +/-(2^53-1) in `obj`, members in
-    code-point key order, array elements in index order. Iterative: callers run it only on a value jcs() accepted, so
-    the depth is bounded by JCS_MAX_DEPTH and every object key is a string."""
+    code-point key order, array elements (a list or a tuple: jcs() writes both as arrays) in index order. Iterative:
+    callers run it only on a value jcs() accepted, so the depth is bounded by JCS_MAX_DEPTH and every object key is a
+    string."""
     out: List[str] = []
     stack = [("", obj)]
     while stack:
@@ -974,7 +975,7 @@ def _beyond_safe_int(obj: Any) -> List[str]:
         elif isinstance(x, dict):
             for k in sorted(x, reverse=True):
                 stack.append((path + "/" + str(k).replace("~", "~0").replace("/", "~1"), x[k]))
-        elif isinstance(x, list):
+        elif isinstance(x, (list, tuple)):
             for j in range(len(x) - 1, -1, -1):
                 stack.append((f"{path}/{j}", x[j]))
     return out
@@ -995,7 +996,9 @@ def _beyond_safe_int_warning(i: int, r: Dict[str, Any]) -> Optional[Dict[str, An
 def _refuse_beyond_safe_int(rec: Dict[str, Any], what: str) -> None:
     """Producing side (closed by construction, 2026-11-20): a record this package signs is refused when its signed
     content (the record without the detached `batch`) holds an integer outside +/-(2^53-1) — the bound of from_omega and
-    anchor_epoch — because the signature would also verify for the nearest double (2^53 and 2^53+1 sign alike)."""
+    anchor_epoch — because the signature would also verify for the nearest double (2^53 and 2^53+1 sign alike).
+    jcs() runs first, so a record it refuses (a key that is not a string, nesting too deep) is refused with its reason."""
+    jcs(_no_batch(rec), strict=False)
     beyond = _beyond_safe_int(_no_batch(rec))
     if beyond:
         more = f" (+{len(beyond) - 5} more)" if len(beyond) > 5 else ""
@@ -1632,13 +1635,18 @@ def to_jsonl(records: List[Dict[str, Any]]) -> str:
     written changed (2026-11-20): 2^53+1 would be written 9007199254740992 and 2^60 1152921504606847000, both another
     integer for a reader that does not go through a double; 2^53 (written 9007199254740992) is written as it is, so
     such a foreign chain that verify_chain accepts with a warning still exports."""
+    lines = []
     for i, r in enumerate(records):
+        try:                                              # first: what jcs() refuses is refused with its own reason
+            lines.append(jcs(r, strict=False).decode())
+        except (ValueError, TypeError) as ex:
+            raise type(ex)(f"to_jsonl: record {i}: {ex}") from None
         bad = [p for p in _beyond_safe_int(r) if not _written_as_is(_at_pointer(r, p))]
         if bad:
             more = f" (+{len(bad) - 5} more)" if len(bad) > 5 else ""
             raise ValueError(f"to_jsonl: record {i}: integer(s) whose JCS text is another number at {', '.join(bad[:5])}"
                              f"{more}: writing them would change their value (RFC 8785 §3.2.2.3)")
-    return "".join(jcs(r, strict=False).decode() + "\n" for r in records)
+    return "".join(line + "\n" for line in lines)
 
 
 def _written_as_is(x: int) -> bool:
@@ -1653,7 +1661,7 @@ def _at_pointer(obj: Any, ptr: str) -> Any:
     """The value at a JSON Pointer produced by _beyond_safe_int (RFC 6901 §4 unescaping)."""
     for tok in ptr.split("/")[1:]:
         tok = tok.replace("~1", "/").replace("~0", "~")
-        obj = obj[int(tok)] if isinstance(obj, list) else obj[tok]
+        obj = obj[int(tok)] if isinstance(obj, (list, tuple)) else obj[tok]
     return obj
 
 

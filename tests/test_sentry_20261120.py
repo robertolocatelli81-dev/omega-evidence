@@ -34,7 +34,7 @@ from unittest import mock
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, ROOT)
 
-from omega_evidence import chip_registry, ledger, pack, signing, trust  # noqa: E402
+from omega_evidence import chip_registry, ledger, ots, pack, signing, trust  # noqa: E402
 from omega_evidence import timestamp as T  # noqa: E402
 from omega_evidence.verifier import verify_pack  # noqa: E402
 
@@ -1051,6 +1051,11 @@ class TestCrlCaptureClosedRule(unittest.TestCase):
             self.assertEqual([m for _, m in asked], [2500, 1500, 500])
             self.assertEqual([c.get("bytes") for c in out[:3]], [1000] * 3)
             self.assertEqual([c["error"] for c in out[3:]], ["not asked: 2500 bytes of CRLs already captured"] * 2)
+            del asked[:]
+            with mock.patch.object(F, "CRL_TOTAL_MAX_BYTES", 3000):     # the bound reached exactly: nothing more is asked
+                out = T._fetch_crls(urls[:5], 5)
+            self.assertEqual([m for _, m in asked], [3000, 2000, 1000])
+            self.assertEqual([c["error"] for c in out[3:]], ["not asked: 3000 bytes of CRLs already captured"] * 2)
 
             def boom(url, timeout, max_bytes):
                 raise ConnectionResetError("reset by peer")
@@ -1090,6 +1095,123 @@ class TestCrlCaptureClosedRule(unittest.TestCase):
             self.assertEqual(self.connected, [(self.PUBLIC, 443)])
             with self.assertRaises(ssl.SSLError):      # the same server without its certificate trusted
                 F.fetch("https://crl.example.test/int.crl", timeout=5)
+
+
+class TestCallerUrlsNoRedirectBounded(unittest.TestCase):
+    """The four fetchers of a URL the CALLER gives (timestamp.stamp, ots.submit, chip_registry.discover_online and
+    fetch_signed_update_online) go through _crl_fetch.ask: a redirect is never followed and the answer is bounded.
+    Fails on ce21abc: each followed a 302 to another host (ots.submit stored that host's answer in its result) and read
+    an answer of any size."""
+
+    def setUp(self):
+        self.hits, self.servers = [], []
+        test = self
+
+        class Inner(http.server.BaseHTTPRequestHandler):
+            def _do(self):
+                test.hits.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Length", "6")
+                self.end_headers()
+                self.wfile.write(b"SECRET")
+            do_GET = do_POST = _do
+
+            def log_message(self, *a):
+                pass
+        self.inner = self._serve(Inner)
+
+    def tearDown(self):
+        for srv in self.servers:
+            srv.shutdown()
+            srv.server_close()
+
+    def _serve(self, handler):
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.servers.append(srv)
+        return srv.server_address[1]
+
+    def _outer(self, status=302, body=None):
+        inner = self.inner
+
+        class Outer(http.server.BaseHTTPRequestHandler):
+            def _do(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                if n:
+                    self.rfile.read(n)
+                if body is None:
+                    self.send_response(status)
+                    self.send_header("Location", f"http://localhost:{inner}/latest/meta-data/")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+            do_GET = do_POST = _do
+
+            def log_message(self, *a):
+                pass
+        return self._serve(Outer)
+
+    def _four(self, port, tmp):
+        d = "ab" * 32
+        return {"stamp": T.stamp(d, f"http://127.0.0.1:{port}/tsa", timeout=5),
+                "ots": ots.submit(d, [f"http://127.0.0.1:{port}/cal"], timeout=5),
+                "discover": chip_registry.ChipRegistry().discover_online(f"http://127.0.0.1:{port}/feed.json", timeout=5),
+                "update": chip_registry.ChipRegistry().fetch_signed_update_online(
+                    f"http://127.0.0.1:{port}/u.json", os.path.join(tmp, "t.jsonl"), timeout=5)}
+
+    def test_a_redirect_is_never_followed(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"no_proxy": "*", "NO_PROXY": "*"}):
+            for status in (301, 302, 303, 307, 308):
+                got = self._four(self._outer(status), tmp)
+                self.assertEqual(self.hits, [], (status, got))
+                self.assertIn(f"HTTP status {status}", got["stamp"]["note"])
+                self.assertEqual(got["ots"]["submitted"], [])
+                self.assertIn(f"HTTP status {status}", got["ots"]["errors"][0]["error"])
+                self.assertIn(f"HTTP status {status}", got["discover"]["reason"])
+                self.assertIn(f"HTTP status {status}", got["update"]["reason"])
+            ok = self._four(self.inner, tmp)                         # control: the same servers, no redirect
+            self.assertEqual(len(self.hits), 5, ok)
+            self.assertEqual(base64.b64decode(ok["ots"]["submitted"][0]["timestamp_b64"]), b"SECRET")
+
+    def test_the_url_rule_and_only_status_200(self):
+        """rule 1 of _crl_fetch before any connection, and a 2xx that is not 200 is an error"""
+        with mock.patch.dict(os.environ, {"no_proxy": "*", "NO_PROXY": "*"}):
+            for url in (f"http://u@127.0.0.1:{self.inner}/cal", f"http://127.0.0.1:{self.inner}\\@x/cal",
+                        f"http://127.0.0.1:{self.inner}/c al", f"ftp://127.0.0.1:{self.inner}/cal"):
+                got = ots.submit("ab" * 32, [url], timeout=5)
+                self.assertEqual(got["submitted"], [], url)
+                self.assertTrue(got["errors"][0]["error"].startswith("Refused: "), got)
+            self.assertEqual(self.hits, [])
+
+            class Created(http.server.BaseHTTPRequestHandler):
+                def do_POST(self):
+                    self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                    self.send_response(201)
+                    self.send_header("Content-Length", "6")
+                    self.end_headers()
+                    self.wfile.write(b"SECRET")
+
+                def log_message(self, *a):
+                    pass
+            got = ots.submit("ab" * 32, [f"http://127.0.0.1:{self._serve(Created)}/cal"], timeout=5)
+            self.assertEqual((got["submitted"], got["errors"][0]["error"]), ([], "Refused: HTTP status 201"))
+
+    def test_the_answer_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"no_proxy": "*", "NO_PROXY": "*"}), \
+                mock.patch.object(T, "TSA_REPLY_MAX_BYTES", 1000), mock.patch.object(ots, "OTS_REPLY_MAX_BYTES", 1000), \
+                mock.patch.object(chip_registry, "MAX_INPUT_BYTES", 1000):
+            got = self._four(self._outer(body=b"{" + b" " * 999 + b"}"), tmp)     # 1001 bytes
+            for k, v in (("stamp", got["stamp"]["note"]), ("ots", got["ots"]["errors"][0]["error"]),
+                         ("discover", got["discover"]["reason"]), ("update", got["update"]["reason"])):
+                self.assertIn("exceeds 1000 bytes", v, k)
+            got = self._four(self._outer(body=b"{" + b" " * 998 + b"}"), tmp)     # 1000 bytes: read whole
+            self.assertEqual(len(base64.b64decode(got["ots"]["submitted"][0]["timestamp_b64"])), 1000)
+            self.assertNotIn("exceeds", got["discover"].get("reason", ""))
+            self.assertNotIn("exceeds", got["stamp"]["note"])
 
 
 if __name__ == "__main__":

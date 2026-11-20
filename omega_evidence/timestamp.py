@@ -51,7 +51,6 @@ import re
 import shutil
 import subprocess  # nosec B404 - fixed-arg openssl calls, no shell
 import tempfile
-import urllib.request
 from urllib.parse import urlparse
 from typing import Dict, List, Optional, Tuple
 
@@ -149,6 +148,9 @@ def _reply_facts(exe: str, tsr_path: str, timeout: int, run=subprocess.run):
     return granted, "".join(hexbytes)
 
 
+TSA_REPLY_MAX_BYTES = 1024 * 1024   # an RFC 3161 reply with its certificates is a few kB
+
+
 def stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
     """Request an RFC 3161 token for digest_hex from a TSA. Returns
     {anchored, tsa, tsr_b64} or {anchored: False, note}."""
@@ -167,10 +169,8 @@ def stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
             return {"anchored": False, "note": "openssl ts-query failed"}
         with open(tsq, "rb") as fq:
             req = fq.read()
-        http = urllib.request.Request(tsa_url, data=req, method="POST",
-                                      headers={"Content-Type": "application/timestamp-query"})
-        with urllib.request.urlopen(http, timeout=timeout) as rh:  # nosec B310 - scheme checked
-            resp = rh.read()
+        resp = _crl_fetch.ask(tsa_url, data=req, headers={"Content-Type": "application/timestamp-query"},
+                              timeout=timeout, max_bytes=TSA_REPLY_MAX_BYTES)   # no redirect, bounded (_crl_fetch.ask)
         tsr = os.path.join(d, "t.tsr")
         with open(tsr, "wb") as f:
             f.write(resp)
