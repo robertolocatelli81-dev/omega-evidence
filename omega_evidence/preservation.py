@@ -44,11 +44,9 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .canonical import canonical_json
-from .ledger import loads_bounded
 
 _SUPPORTED_HASH = ("sha256", "sha512", "sha3_256", "sha3_512")
 RECORD_KIND = "omega_evidence_record"
@@ -92,11 +90,12 @@ def _merkle_root(leaf_hexes: List[str], alg: str) -> str:
 
 
 def _pack_sha3_of(pack_path: str) -> str:
-    d = loads_bounded(Path(pack_path).read_text(encoding="utf-8"))
-    v = d.get("pack_sha3", "")
-    if not v:
-        raise ValueError(f"{pack_path}: not an evidence pack (no pack_sha3)")
-    return v
+    """The pack's digest recomputed from its body, which must equal the declared `pack_sha3` (ValueError otherwise) —
+    the rule of `pack.sign_pack` and `pack.anchor_pack`. Until 35e8c40 the declared field was returned as read: a pack
+    file whose `pack_sha3` named another pack's body was preserved, renewed and reported `data-objects-bound` PASS as
+    that other pack (measured 20/11/2026)."""
+    from .pack import _recomputed_digest
+    return _recomputed_digest(pack_path, "evidence record")
 
 
 def _leaves(pack_sha3_list: List[str], alg: str) -> List[str]:

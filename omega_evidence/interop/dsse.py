@@ -246,10 +246,13 @@ def from_dsse(envelope: Dict[str, Any],
     (trust the key through the OMEGA trust registry). `verified` is True only when one signature verifies; every other
     answer carries `error` with the reason: no key, an unsupported key, a key that needs `cryptography` where it is not
     installed, or no signature that verifies (0.12.0; until 0.11.4 an ECDSA envelope — valid or tampered — gave
-    `verified: False` with no error). The payload is a Statement v1 or the envelope is refused: a `_type` other than
-    `https://in-toto.io/Statement/v1` (in-toto docs/validation.md) or a member name twice in one object is `verified:
-    False` with the reason; `pack` is the predicate only when `predicateType` is OMEGA's (PREDICATE_TYPE), else None —
-    `statement` carries the rest (20/11/2026; until 0.13.0 none of the three was read)."""
+    `verified: False` with no error). The `_type` of the payload is Statement v1 or the envelope is refused: a `_type`
+    other than `https://in-toto.io/Statement/v1` (in-toto docs/validation.md) or a member name twice in one object is
+    `verified: False` with the reason; `pack` is the predicate only when `predicateType` is OMEGA's (PREDICATE_TYPE),
+    else None — `statement` carries the rest (20/11/2026; until 0.13.0 none of the three was read). NOT read: the
+    other members in-toto spec/v1/statement.md requires (`subject`, an array whose elements each carry `digest`;
+    `predicateType`, a string) and the shape of `predicate` — a payload that is only `{"_type": …}` is `verified:
+    True` with `pack: None`, and with OMEGA's predicateType a predicate that is not an object comes back as `pack`."""
     def _fail(why):   # a malformed envelope is a verdict, never a traceback (audit V2 #5, 30/09/2026)
         return {"verified": False, "error": why, "payload_type": None, "statement": None, "pack": None}
     if not isinstance(envelope, dict):

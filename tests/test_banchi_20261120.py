@@ -11,6 +11,8 @@ reproduced before it was fixed.
 (3) `interop.dsse.from_dsse` read any `_type` as a Statement v1, handed back the predicate of any `predicateType` as
     `pack`, and took the last of two members with one name.
 (4) `preservation.verify_evidence_record` read a `time_source` other than rfc3161 / asserted (or none) as asserted.
+    The class of (1) in the same module: `build_evidence_record`, `renew_hash_tree` and the `data-objects-bound` layer
+    of `verify_evidence_record` took the DECLARED `pack_sha3` of each pack file (found on 35e8c40).
 (5) `interop.aat.verify_chain` left `agent_kid` / `recorder_kid` / `tombstone_kids` uncompared on unsigned records (ok
     True), and its RFC 3339 pattern took any Unicode decimal digit.
 
@@ -136,6 +138,26 @@ class TestSignAndAnchorTheBodysDigest(unittest.TestCase):
         self.assertEqual(_layer(verify_pack(p), "pack-sha3")["status"], "PASS")
         P.sign_pack(p, Identity("producer"))
         self.assertTrue(verify_pack(p)["authenticated"])
+
+    def test_a_pack_the_verifier_refuses_to_read_is_not_signed(self):
+        """the file is read as the verifier reads it: a member name twice, or a float, is refused by the verifier and
+        is not signed either, although the declared digest is the one a last-wins reading would compute"""
+        from omega_evidence import canonical
+        d = _tmp(self)
+        base = {"kind": "x", "generated_utc": "2026-11-20T00:00:00+00:00", "honest_scope": SCOPE}
+        digest = canonical.sha3(dict(base, a=2))
+        texts = {"dup": json.dumps(dict(base, a=1))[:-1] + ', "a": 2, "pack_sha3": "%s"}' % digest,
+                 "float": json.dumps(dict(base, a=1.5, pack_sha3=digest))}
+        for name, text in texts.items():
+            p = os.path.join(d, name + ".json")
+            _wt(p, text)
+            with self.subTest(case=name):
+                self.assertNotEqual(_layer(verify_pack(p), "pack-sha3").get("status"), "PASS")
+                with self.assertRaisesRegex(ValueError, "cannot be read as the verifier reads it"):
+                    P.sign_pack(p, Identity("producer"))
+                with self.assertRaisesRegex(ValueError, "cannot be read as the verifier reads it"):
+                    P.anchor_pack(p, os.path.join(d, name + ".ledger.jsonl"))
+                self.assertFalse(os.path.exists(p[:-5] + ".sig.json"))
 
     def test_a_file_that_is_not_a_pack_object_is_a_value_error(self):
         """fails on 6176841: "[]" raised AttributeError, the float and the duplicate key were signed"""
@@ -303,6 +325,15 @@ class TestDsseStatement(unittest.TestCase):
         st = dsse.build_statement({"kind": "x", "pack_sha3": "0" * 64}); del st["_type"]
         self.assertIs(self._from(json.dumps(st).encode())["verified"], False)
 
+    def test_what_the_docstring_says_is_not_read(self):   # holds on 6176841 too: the limit from_dsse states
+        st = {"_type": dsse.STATEMENT_TYPE}
+        r = self._from(json.dumps(st).encode())
+        self.assertEqual((r["verified"], r["pack"]), (True, None))
+        for more in ({"subject": 7}, {"subject": [{"name": "no digest"}]}, {"predicateType": 7}):
+            self.assertIs(self._from(json.dumps(dict(st, **more)).encode())["verified"], True, more)
+        r = self._from(json.dumps(dict(st, predicateType=dsse.PREDICATE_TYPE, predicate=7)).encode())
+        self.assertEqual((r["verified"], r["pack"]), (True, 7))
+
     def test_pack_only_for_the_omega_predicate_type(self):
         """fails on 6176841: the predicate of an SLSA provenance came back as `pack`"""
         for pt in ("https://slsa.dev/provenance/v1", dsse.PREDICATE_TYPE + "x", None):
@@ -354,6 +385,39 @@ class TestPreservationTimeSource(unittest.TestCase):
         self.assertIs(PR.verify_evidence_record(r2)["valid"], True)
 
 
+class TestPreservationBindsTheBodysDigest(unittest.TestCase):
+    """The class of (1) in `preservation` (measured on 35e8c40, where sign_pack and anchor_pack were already fixed)."""
+
+    def _forged(self, d):
+        a, b = _pack(d, "a"), _pack(d, "b", {"amount": "999999"})
+        f = os.path.join(d, "f.json")
+        pf = _rj(b); pf["pack_sha3"] = _rj(a)["pack_sha3"]; _wj(f, pf)      # the body of b under the digest of a
+        return a, b, f
+
+    def test_a_pack_under_another_packs_digest_is_not_bound_to_the_record(self):
+        """fails on 6176841 and on 35e8c40: data-objects-bound PASS, "packs match the record's data objects" """
+        d = _tmp(self)
+        a, b, f = self._forged(d)
+        rec = PR.build_evidence_record([a])
+        self.assertEqual(_layer(PR.verify_evidence_record(rec, pack_paths=[a]), "data-objects-bound")["status"], "PASS")
+        self.assertEqual(_layer(PR.verify_evidence_record(rec, pack_paths=[b]), "data-objects-bound")["status"], "FAIL")
+        r = PR.verify_evidence_record(rec, pack_paths=[f])
+        self.assertIs(r["valid"], False)
+        self.assertEqual(_layer(r, "data-objects-bound")["status"], "FAIL")
+        self.assertIn("not the digest of the pack body", _layer(r, "data-objects-bound")["detail"])
+
+    def test_a_pack_under_another_packs_digest_is_neither_preserved_nor_renewed(self):
+        """fails on 6176841 and on 35e8c40: the record carried the other pack's digest"""
+        d = _tmp(self)
+        a, b, f = self._forged(d)
+        with self.assertRaisesRegex(ValueError, "not the digest of the pack body"):
+            PR.build_evidence_record([f])
+        rec = PR.build_evidence_record([a])
+        with self.assertRaisesRegex(ValueError, "not the digest of the pack body"):
+            PR.renew_hash_tree(rec, [f], "sha3_512")
+        self.assertEqual(PR.renew_hash_tree(rec, [a], "sha3_512")["data_objects"], rec["data_objects"])   # control
+
+
 def _chain(n_calls=2, close=True):
     d = tempfile.mkdtemp(prefix="oe-banchi-aat-")
     try:
@@ -395,15 +459,17 @@ class TestAatPinsAndDigits(unittest.TestCase):
 
     def test_every_unicode_decimal_digit_other_than_ascii_is_refused(self):
         """fails on 6176841: the pattern took every Nd digit; in a record timestamp and in deleted_at it then passed. All
-        Unicode Nd characters (unicodedata of this Python), at each of the 14 digit positions of a timestamp, in turn."""
+        Unicode Nd characters (unicodedata of this Python), each at every one of the 17 digit positions of a timestamp
+        with a three-digit fraction."""
         nd = [chr(c) for c in range(0x110000) if unicodedata.category(chr(c)) == "Nd" and not "0" <= chr(c) <= "9"]
         self.assertGreater(len(nd), 600)
         base = "2026-11-20T16:22:05.123Z"
         pos = [i for i, ch in enumerate(base) if ch.isdigit()]
-        rng = random.Random(11)
+        self.assertEqual(len(pos), 17)
         for ch in nd:
-            t = list(base); t[rng.choice(pos)] = ch; t = "".join(t)
-            self.assertIsNone(aat._RFC3339.match(t), t)
+            for i in pos:
+                t = base[:i] + ch + base[i + 1:]
+                self.assertIsNone(aat._RFC3339.match(t), t)
         self.assertTrue(aat._RFC3339.match(base))                                                   # control
         recs = _chain(1, close=False)
         bad = "２０２６" + recs[1]["timestamp"][4:]

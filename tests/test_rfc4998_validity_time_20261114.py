@@ -386,6 +386,26 @@ class TestValidityTimeOfRenewedTokens(unittest.TestCase):
         self.assertEqual(self._time_layers(res), [("time[0]-rfc3161", "FAIL"), ("time[1]-rfc3161", "FAIL"),
                                                   ("time[2]-rfc3161", "PASS")], res)
 
+    def test_middle_entry_with_an_unknown_time_source_lends_no_time(self):
+        """20/11/2026: a middle entry whose time_source is neither rfc3161 nor asserted, correctly bound by the next one,
+        is a FAIL and no later genTime crosses it (an asserted middle entry keeps the later time: the test above)."""
+        exp = self._tsa("short_q", 4)
+        self._tsa("long_q", 3600)
+        with mock.patch.object(T, "stamp", self._stamper(["short_q", None, "long_q"])):
+            with mock.patch.object(PR, "_pack_sha3_of", lambda p: hashlib.sha3_256(p.encode()).hexdigest()):
+                rec = PR.build_evidence_record([self._pack()], tsa_url="http://local.invalid/")
+                time.sleep(0.5)
+                rec = PR.renew_timestamp(rec, tsa_url="http://local.invalid/")
+                rec["archive_timestamps"][1]["timestamp"] = {"time_source": "bogus"}
+                rec = PR._finalize(rec)
+                time.sleep(0.5)
+                rec = PR.renew_timestamp(rec, tsa_url="http://local.invalid/")
+        self._wait_until(exp)
+        res = PR.verify_evidence_record(rec, tsa_ca_file=self._p("ca.crt"))
+        self.assertEqual([x["status"] for x in res["layers"] if x["layer"].startswith("renewal[")], ["PASS", "PASS"])
+        self.assertEqual(self._time_layers(res), [("time[0]-rfc3161", "FAIL"), ("time[1]-source", "FAIL"),
+                                                  ("time[2]-rfc3161", "PASS")], res)
+
     def test_gen_time_of_needs_a_clean_openssl_exit(self):
         fake = mock.Mock(return_value=mock.Mock(returncode=1, stdout="Time stamp: Mar 11 08:52:08 2025 GMT\n"))
         with mock.patch.object(T, "_run_openssl", fake):

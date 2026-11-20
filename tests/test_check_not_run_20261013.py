@@ -104,8 +104,10 @@ class TestCheckNotRun(unittest.TestCase):
              "-out", j("tsa.csr"), "-subj", "/CN=c16-tsa")
         _run(EXE, "x509", "-req", "-in", j("tsa.csr"), "-CA", j("ca.crt"), "-CAkey", j("ca.key"), "-CAcreateserial",
              "-out", j("tsa.crt"), "-days", "2", "-extfile", j("tsa.cnf"), "-extensions", "v3_tsa")
-        with open(j("p.json"), "w") as f:
-            json.dump({"pack_sha3": "ab" * 32}, f)
+        # a real pack: since 20/11/2026 build_evidence_record recomputes the digest from the body (the fixture was
+        # {"pack_sha3": "ab" * 32}, a declared digest over no body)
+        from omega_evidence import pack as PK
+        PK.write_pack(j("p.json"), PK.build_pack("x", {"a": "1"}, "test only, NOT a conformity assessment"))
         rec = P.build_evidence_record([j("p.json")])
         cls.root = rec["archive_timestamps"][0]["merkle_root"]
         _run(EXE, "ts", "-query", "-digest", cls.root, "-sha256", "-cert", "-out", j("q.tsq"))

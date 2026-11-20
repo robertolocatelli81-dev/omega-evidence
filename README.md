@@ -418,7 +418,8 @@ registry, and only when the classical key that signed is the registered one) and
 when absent, foreign, malformed or invalid — and also when the layer was required (`require_pq`, or a pinned key)
 and could not be confirmed: a required layer that is stripped, foreign or unverifiable is a FAIL, never null. A
 downgrade to Ed25519-only is refused by the relying party's requirement, not by the file. `authenticated` is
-never true for a revoked or untrusted signer, nor when the body no longer matches `pack_sha3` (a signed identity over
+never true for a signer the given trust store revokes or does not trust, nor when the body no longer matches `pack_sha3`; without
+a trust store it says only that the producer signature verifies with the key in the sidecar (the `signed` tier: identity not checked) (a signed identity over
 content that was changed afterwards is not authenticated content). Re-establishing a revoked signer with `rotate` must
 decide its post-quantum key explicitly (`pq_pubkey=<new>` or `drop_pq=True`). The PQ private key lives on disk (PKCS#8, 0600) or in **AWS KMS**
 (`KeySpec ML_DSA_65`, `ML_DSA_SHAKE_256`, `MessageType RAW`; the Sign response's KeyId must match the key whose
@@ -430,12 +431,16 @@ very function registered) the layer is reported present-but-unverifiable (never 
 ### Unreleased — five defects still present in 0.13.0, found on 0.12.0 by two review benches (20 November 2026)
 
 Each was reproduced on 0.12.0 and on 0.13.0 before it was fixed; `tests/test_banchi_20261120.py` holds the tests (on
-0.13.0 the 13 tests that name a defect fail, the 7 that hold what must not change pass).
+0.13.0 the 16 tests that name a defect fail, the 8 that hold what must not change pass).
 
 - **`pack.sign_pack` and `pack.anchor_pack` signed and recorded the `pack_sha3` field as read.** A pack file whose field
   named another pack's body got the producer's signature, or the ledger anchor, over that other pack. Both now recompute
   the digest from the body as the verifier does and raise `ValueError` (nothing written) when the field differs — the
-  rule `pq_cosign` already applied.
+  rule `pq_cosign` already applied. The same in `preservation`: `build_evidence_record` and `renew_hash_tree` took the
+  declared field of each pack file, and `verify_evidence_record(record, pack_paths=…)` reported `data-objects-bound`
+  PASS for a pack file carrying another body under the recorded digest; the three now recompute it (`ValueError`, and
+  `data-objects-bound` FAIL). Not changed: `interop.dsse.build_statement` (`to_dsse`) still writes the `pack_sha3` a
+  dict declares as the subject's `sha3_256`, beside the `sha256` it computes from the dict.
 - **The trust store replay took a `trust` line that changes a trusted key.** `trust()` refuses another key for a trusted
   signer, but a line appended to the store with that key replaced it on reload, in the Python registry and in the Go,
   Java and Node verifiers (trusted-signer PASS for the new key); a `trust` line without `pq_pubkey` dropped the pinned
@@ -447,6 +452,8 @@ Each was reproduced on 0.12.0 and on 0.13.0 before it was fixed; `tests/test_ban
   `https://in-toto.io/Statement/v1` (in-toto attestation `docs/validation.md`: "Reject if `statement.type` !=
   `https://in-toto.io/Statement/v1`"), or a member name twice in one object, is now `verified: False` with the reason;
   `pack` is the predicate only when `predicateType` is OMEGA's, else `None` (the statement is returned as before).
+  Not read: the other members the Statement v1 specification requires (`subject`, `predicateType`) and the shape of
+  `predicate` — a payload that is only `{"_type": …}` is `verified: True` with `pack: None`.
 - **`preservation.verify_evidence_record` read any `time_source` as `asserted`.** A value other than `rfc3161` or
   `asserted`, or none, was an asserted SKIP and the record `valid: true`; it is now a FAIL (`time[i]-source`). No
   release of this toolkit has written another value.
