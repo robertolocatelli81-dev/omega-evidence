@@ -427,6 +427,34 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
+### Unreleased — five defects still present in 0.13.0, found on 0.12.0 by two review benches (20 November 2026)
+
+Each was reproduced on 0.12.0 and on 0.13.0 before it was fixed; `tests/test_banchi_20261120.py` holds the tests (on
+0.13.0 the 13 tests that name a defect fail, the 7 that hold what must not change pass).
+
+- **`pack.sign_pack` and `pack.anchor_pack` signed and recorded the `pack_sha3` field as read.** A pack file whose field
+  named another pack's body got the producer's signature, or the ledger anchor, over that other pack. Both now recompute
+  the digest from the body as the verifier does and raise `ValueError` (nothing written) when the field differs — the
+  rule `pq_cosign` already applied.
+- **The trust store replay took a `trust` line that changes a trusted key.** `trust()` refuses another key for a trusted
+  signer, but a line appended to the store with that key replaced it on reload, in the Python registry and in the Go,
+  Java and Node verifiers (trusted-signer PASS for the new key); a `trust` line without `pq_pubkey` dropped the pinned
+  post-quantum key, which `trust()` leaves in place. In the four now: another key, or another post-quantum key, in a
+  `trust` line is a broken store (`trusted-signer` FAIL); a line without `pq_pubkey` keeps the pinned one. Changing a
+  key stays `rotate`'s. The differential oracle gained three cases (0 disagreements over 209, Python 3.11.2, Go 1.27.0,
+  JDK 27, Node 22.23.2).
+- **`interop.dsse.from_dsse` read any statement as an in-toto Statement v1.** A `_type` other than
+  `https://in-toto.io/Statement/v1` (in-toto attestation `docs/validation.md`: "Reject if `statement.type` !=
+  `https://in-toto.io/Statement/v1`"), or a member name twice in one object, is now `verified: False` with the reason;
+  `pack` is the predicate only when `predicateType` is OMEGA's, else `None` (the statement is returned as before).
+- **`preservation.verify_evidence_record` read any `time_source` as `asserted`.** A value other than `rfc3161` or
+  `asserted`, or none, was an asserted SKIP and the record `valid: true`; it is now a FAIL (`time[i]-source`). No
+  release of this toolkit has written another value.
+- **`interop.aat.verify_chain`: pins on unsigned records, and digits that are not ASCII.** With `agent_kid` or
+  `recorder_kid` an unsigned record, and with `tombstone_kids` an unsigned tombstone, is now a problem (the chain was ok
+  and the pin never compared). The RFC 3339 pattern took any Unicode decimal digit (`２０２６-…`): RFC 3339 DIGIT is
+  `%x30-39`; record timestamps, `deleted_at`, `checked_at` and `anchored_at` now refuse the others.
+
 0.13.0 was released on 20 November 2026; its changes are the two 0.13.0 sections below (both of 20 November).
 
 0.12.0 was released on 19 November 2026; its changes are the three 0.12.0 sections below (18, 17 and 14 November).
