@@ -2841,7 +2841,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         # pack payloads with numeric claims held no '+' or '/' (measured: 0/300; '?' or '>' in a claim does produce them). For #2 a
         # hand-signed envelope with raw UTF-8 in its JSON statement does; its signature needs one too (285/300 do).
         for n in range(500):
-            body = json.dumps({"_type": "x", "predicate": {"n": n, "t": "\u00ff\u00fe\u00fb" * 8}}, ensure_ascii=False).encode()
+            body = json.dumps({"_type": dsse.STATEMENT_TYPE, "predicate": {"n": n, "t": "\u00ff\u00fe\u00fb" * 8}}, ensure_ascii=False).encode()
             sig = cls.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))
             env = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
                    "signatures": [{"keyid": "k", "publicKeyB64": cls.pk, "sig": sig}]}
@@ -2914,7 +2914,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         # into '-' (one alphabet per string: DSSE says standard *or* URL-safe; the Go reference rejects mixed alphabets, the
         # Python reference accepts them; NEMESIS V2 P2 / mutant N03)
         for n in range(2000):
-            body = json.dumps({"_type": "x", "n": n, "t": "\u00fb\u00ef\u00be\u00ff" * 6}, ensure_ascii=False).encode()
+            body = json.dumps({"_type": dsse.STATEMENT_TYPE, "n": n, "t": "\u00fb\u00ef\u00be\u00ff" * 6}, ensure_ascii=False).encode()
             b64 = base64.b64encode(body).decode()
             if "+" in b64 and "/" in b64:
                 break
@@ -2928,7 +2928,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
 
     def test_dsse_excess_padding_in_fours(self):   # NEMESIS V2 giro 2 Q1: '=' in multiples of 4 keep len % 4 == 0
         for n in range(2000):
-            body = json.dumps({"_type": "x", "n": n, "t": "\u00fb\u00ef\u00be\u00ff" * 6}, ensure_ascii=False).encode()
+            body = json.dumps({"_type": dsse.STATEMENT_TYPE, "n": n, "t": "\u00fb\u00ef\u00be\u00ff" * 6}, ensure_ascii=False).encode()
             body += b" " * (-len(body) % 3); b64 = base64.b64encode(body).decode()
             if "+" in b64 and "/" in b64:
                 break
@@ -2944,7 +2944,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
             self.assertFalse(dsse.from_dsse(e2)["verified"])
 
     def test_dsse_payload_type_required_and_json_constants(self):   # NEMESIS V2 giro 2 Q5, Q4
-        body = b'{"_type":"x","predicate":{}}'
+        body = b'{"_type":"https://in-toto.io/Statement/v1","predicate":{}}'
         e = {"payload": base64.b64encode(body).decode(), "signatures": [{"keyid": "k", "publicKeyB64": self.pk,
                                                                           "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
         self.assertTrue(dsse.from_dsse(dict(e, payloadType=dsse.PAYLOAD_TYPE))["verified"])   # control
@@ -2956,7 +2956,7 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         e3 = dict(e, payloadType=dsse.PAYLOAD_TYPE); e3.pop("signatures")                       # X04: signatures REQUIRED
         self.assertEqual(dsse.from_dsse(e3)["error"], "signatures missing")
         for c in (b"NaN", b"Infinity", b"-Infinity"):
-            body = b'{"_type":"x","n":' + c + b'}'
+            body = b'{"_type":"https://in-toto.io/Statement/v1","n":' + c + b'}'
             e = {"payload": base64.b64encode(body).decode(), "payloadType": dsse.PAYLOAD_TYPE,
                  "signatures": [{"keyid": "k", "publicKeyB64": self.pk, "sig": self.i.sign(dsse.pae(dsse.PAYLOAD_TYPE, body))}]}
             self.assertFalse(dsse.from_dsse(e)["verified"], c)

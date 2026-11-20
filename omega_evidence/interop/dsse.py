@@ -54,7 +54,7 @@ import json
 from typing import Any, Dict, Optional
 
 from ..canonical import canonical_json, sha256_bytes, sha3
-from ..ledger import loads_bounded
+from ..ledger import _reject_dup, loads_bounded
 from ..signing import Identity, verify_signature
 
 _ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")   # RFC 8410 §4: SubjectPublicKeyInfo of an Ed25519 key
@@ -246,7 +246,10 @@ def from_dsse(envelope: Dict[str, Any],
     (trust the key through the OMEGA trust registry). `verified` is True only when one signature verifies; every other
     answer carries `error` with the reason: no key, an unsupported key, a key that needs `cryptography` where it is not
     installed, or no signature that verifies (0.12.0; until 0.11.4 an ECDSA envelope — valid or tampered — gave
-    `verified: False` with no error)."""
+    `verified: False` with no error). The payload is a Statement v1 or the envelope is refused: a `_type` other than
+    `https://in-toto.io/Statement/v1` (in-toto docs/validation.md) or a member name twice in one object is `verified:
+    False` with the reason; `pack` is the predicate only when `predicateType` is OMEGA's (PREDICATE_TYPE), else None —
+    `statement` carries the rest (20/11/2026; until 0.13.0 none of the three was read)."""
     def _fail(why):   # a malformed envelope is a verdict, never a traceback (audit V2 #5, 30/09/2026)
         return {"verified": False, "error": why, "payload_type": None, "statement": None, "pack": None}
     if not isinstance(envelope, dict):
@@ -320,16 +323,28 @@ def from_dsse(envelope: Dict[str, Any],
             break
         reasons.append(f"signature {n}: does not verify with the key ({kind}, {src})")
     try:
-        statement = loads_bounded(payload.decode("utf-8"), parse_constant=_no_constant)   # NaN/Infinity are not JSON (NEMESIS V2 Q4)
+        # NaN/Infinity are not JSON (NEMESIS V2 Q4); a member name twice in one object is refused (20/11/2026: the last
+        # one won here, so a signed statement could read differently to another parser — RFC 8259 §4: with names that
+        # are not unique "the behavior of software that receives such an object is unpredictable")
+        statement = loads_bounded(payload.decode("utf-8"), parse_constant=_no_constant, object_pairs_hook=_reject_dup)
     except (ValueError, RecursionError) as e:
         # DSSE protocol.md: «Parse SERIALIZED_BODY according to PAYLOAD_TYPE. Reject if the parsing fails.» — a right
         # signature over an unparsable body is still a reject (NEMESIS V2 P1, 01/10/2026)
-        why = "nesting exceeds 512" if str(e).startswith("json_too_deep") else type(e).__name__
+        why = ("nesting exceeds 512" if str(e).startswith("json_too_deep") else
+               "a member name appears twice in one object" if str(e).startswith("duplicate") else type(e).__name__)
         return dict(_fail(f"payload could not be parsed as UTF-8 JSON: {why}"), payload_type=payload_type)
     if not isinstance(statement, dict):
         return dict(_fail("statement is not a JSON object"), payload_type=payload_type)
+    if statement.get("_type") != STATEMENT_TYPE:
+        # in-toto attestation docs/validation.md, Statement layer: «Reject if statement.type != https://in-toto.io/Statement/v1»
+        # (20/11/2026: any _type, or none, was read as a Statement v1)
+        return dict(_fail(f"statement _type is not {STATEMENT_TYPE}: {str(statement.get('_type'))[:80]!r}"),
+                    payload_type=payload_type)
+    # `pack` is the predicate only when the predicateType is OMEGA's (20/11/2026: the predicate of any attestation — an
+    # SLSA provenance, a statement of another kind — was handed back as `pack`); the statement is returned as before
+    pack = statement.get("predicate") if statement.get("predicateType") == PREDICATE_TYPE else None
     out = {"verified": verified, "payload_type": payload_type, "key_source": key_source,
-           "statement": statement, "pack": statement.get("predicate")}
+           "statement": statement, "pack": pack}
     if unrecognized:
         out["unrecognized_fields"] = unrecognized[:50]
     if not verified:
