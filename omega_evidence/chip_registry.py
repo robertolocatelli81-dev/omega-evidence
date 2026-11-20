@@ -38,6 +38,13 @@ Immutable safety rules a feed can NEVER bend, no matter who signs it:
     a signed update only supplies the class→service *mapping*, it can never
     declare something trustworthy.
 
+Replay (Unreleased): the update pack carries `update_seq`, an integer from 1 to 2^53-1 inside the signed body, and the
+kind is `chip_attestation_registry_update_v2`. A registry applies an update of a signer only when its `update_seq` is
+greater than the last one it applied for that signer (`last_seq()`; give it back to `ChipRegistry(last_seq=...)` to keep
+the order across restarts). Until 0.13.0 the kind `chip_attestation_registry_update` had no sequence, so an older signed
+update applied after a newer one put the old mapping back (measured 20/11/2026: `service-NEW`, then `service-OLD`);
+such a pack is now refused with its reason (re-issue it as v2).
+
 Honest scope: a trusted-signed update proves only that the class→service mapping
 comes from a source the operator chose to trust — NOT that the chip is secure.
 The chip's real security still lives in the vendor's attestation service.
@@ -75,7 +82,9 @@ _BASELINE: Dict[str, str] = {
 }
 # Never promotable to a trusted class — immutable, whatever a feed claims.
 UNTRUSTED_CLASSES = frozenset({"self-asserted", "none"})
-UPDATE_KIND = "chip_attestation_registry_update"
+UPDATE_KIND = "chip_attestation_registry_update_v2"     # carries update_seq (Unreleased)
+UPDATE_KIND_V1 = "chip_attestation_registry_update"     # no sequence: refused, a replay cannot be told from it
+MAX_UPDATE_SEQ = 2 ** 53 - 1                            # the portable integer bound of the strict JSON profile
 
 
 def _now() -> str:
@@ -93,7 +102,12 @@ def _http_get(url: str, timeout: float) -> bytes:
 class ChipRegistry:
     """Class→attestation-service registry that self-updates online, fail-closed."""
 
-    def __init__(self) -> None:
+    def __init__(self, last_seq: Optional[Dict[str, int]] = None) -> None:
+        self._last_seq: Dict[str, int] = {}
+        for sid, n in (last_seq or {}).items():
+            if not isinstance(sid, str) or isinstance(n, bool) or not isinstance(n, int) or not 0 <= n <= MAX_UPDATE_SEQ:
+                raise ValueError("last_seq: {signer_id: integer from 0 to 2^53-1}")
+            self._last_seq[sid] = n
         self._services: Dict[str, str] = dict(_BASELINE)
         self._sources: List[Dict[str, Any]] = []     # provenance of applied updates
         self._candidates: Dict[str, Dict[str, Any]] = {}   # discovered, UNVERIFIED
@@ -114,6 +128,10 @@ class ChipRegistry:
 
     def sources(self) -> List[Dict[str, Any]]:
         return list(self._sources)
+
+    def last_seq(self) -> Dict[str, int]:
+        """{signer_id: the update_seq of the last update applied from that signer}"""
+        return dict(self._last_seq)
 
     # ---- TRUST path: signed update, fail-closed -----------------------------
     def apply_signed_update(self, pack_path: str, trust_store: str) -> Dict[str, Any]:
@@ -154,17 +172,27 @@ class ChipRegistry:
         if not v["valid"] or "trusted-signed" not in auth.get("detail", ""):
             return refused("update is not trusted-signed", auth.get("detail", ""))
         pack = loads_strict(read["update.json"].decode("utf-8").strip(" \t\r\n"))   # as the verifier parsed them
+        if pack.get("kind") == UPDATE_KIND_V1:
+            return refused(f"unsequenced update (kind {UPDATE_KIND_V1}): a replay of an older update cannot be told from "
+                           f"it; re-issue it as {UPDATE_KIND} with update_seq")
         if pack.get("kind") != UPDATE_KIND:
             return refused(f"wrong kind: {pack.get('kind')}")
         classes = pack.get("chip_classes", {})
         if not isinstance(classes, dict):
             return refused("chip_classes is not a JSON object")
-        added, rejected = self._merge(classes)
+        seq = pack.get("update_seq")
+        if isinstance(seq, bool) or not isinstance(seq, int) or not 1 <= seq <= MAX_UPDATE_SEQ:
+            return refused("update_seq is not an integer from 1 to 2^53-1")
         signer = self._signer_in(read.get("update.sig.json", b""))
+        if seq <= self._last_seq.get(signer, 0):
+            return refused(f"update_seq {seq} is not after the last applied from {signer!r} "
+                           f"({self._last_seq[signer]}): an older or repeated update is not applied")
+        added, rejected = self._merge(classes)
+        self._last_seq[signer] = seq
         self._sources.append({"signer_id": signer, "pack_sha3": pack.get("pack_sha3", ""),
-                              "kind": pack["kind"], "added": added, "rejected": rejected,
+                              "kind": pack["kind"], "update_seq": seq, "added": added, "rejected": rejected,
                               "applied_utc": _now()})
-        return {"applied": True, "added": added, "rejected": rejected, "signer_id": signer}
+        return {"applied": True, "added": added, "rejected": rejected, "signer_id": signer, "update_seq": seq}
 
     def _merge(self, classes: Dict[str, Any]):
         added, rejected = [], []
@@ -238,14 +266,17 @@ class ChipRegistry:
 
 
 def publish_signed_update(path: str, chip_classes: Dict[str, str], signer: Identity,
-                          honest_scope: Optional[str] = None) -> str:
+                          honest_scope: Optional[str] = None, *, update_seq: int) -> str:
     """Build + sign a chip-registry update pack (used by a curator, and in tests).
-    The update carries only class→service mappings for NEW vendors/technologies."""
+    The update carries only class→service mappings for NEW vendors/technologies, and `update_seq` (an integer from 1 to
+    2^53-1, greater than the curator's previous update: a registry applies a signer's updates in that order only)."""
+    if isinstance(update_seq, bool) or not isinstance(update_seq, int) or not 1 <= update_seq <= MAX_UPDATE_SEQ:
+        raise ValueError("update_seq: an integer from 1 to 2^53-1")
     scope = honest_scope or (
         "class->attestation-service mapping for new AI-chip vendors/technologies; "
         "proves the mapping's provenance, NOT that any chip is secure (that stays "
         "with the vendor attestation service)")
-    pk = build_pack(UPDATE_KIND, {"chip_classes": dict(chip_classes)}, scope)
+    pk = build_pack(UPDATE_KIND, {"chip_classes": dict(chip_classes), "update_seq": update_seq}, scope)
     write_pack(path, pk)
     sign_pack(path, signer)
     return path

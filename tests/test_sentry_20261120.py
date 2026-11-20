@@ -209,7 +209,7 @@ class TestChipRegistryAppliesTheBytesItVerified(unittest.TestCase):
     def _update(self, tmp, classes, name="update.json"):
         ident = signing.Identity("curator")
         up = os.path.join(tmp, name)
-        chip_registry.publish_signed_update(up, classes, ident)
+        chip_registry.publish_signed_update(up, classes, ident, update_seq=1)
         store = os.path.join(tmp, "trust.jsonl")
         trust.TrustRegistry(store).trust(ident.name, ident.public_key_b64)
         return up, store, ident
@@ -403,7 +403,7 @@ class TestChipRegistryAppliesTheBytesItVerified(unittest.TestCase):
             # Unreleased (Decision 1): the trust store requires a signature, so the unsigned anchored update is a FAIL
             self.assertIn("required but absent", r["authenticity"])
             anybody = os.path.join(tmp, "anybody.json")
-            chip_registry.publish_signed_update(anybody, {self.FUTURE: "x"}, signing.Identity("anybody"))
+            chip_registry.publish_signed_update(anybody, {self.FUTURE: "x"}, signing.Identity("anybody"), update_seq=1)
             for no_store in ("", None):
                 r = reg.apply_signed_update(anybody, no_store)
                 self.assertEqual((r["applied"], r["reason"]), (False, "update is not trusted-signed"), r)

@@ -13,6 +13,7 @@
      domain separation and duplicated an odd node. Now FAIL, and record version 2 with the RFC 6962 Merkle Tree Hash.
 (D5) `sigstore.verify_bundle(tsa_ca_file=...)` on a bundle with no token, and `sdjwt.verify(expected_aud / expected_nonce)`
      on a credential without `cnf`, verified true without the proof the argument asks for.
+(D6) `chip_registry`: an older signed update applied after a newer one put the old mapping back.
 """
 import base64
 import hashlib
@@ -469,6 +470,87 @@ class D5ArgumentsThatAskForAProof(unittest.TestCase):
         r = sigstore.verify_bundle(b, artifact=b"artifact", tsa_ca_file=ca)
         self.assertEqual((r["verified"], r["checks"].get("rfc3161")), (False, False))
         self.assertIn("no RFC 3161 token", r["error"])
+
+
+class D6ChipRegistryOrder(unittest.TestCase):
+    def _setup(self, d):
+        from omega_evidence import chip_registry as CR
+        ident = Identity("chip-authority")
+        ts = os.path.join(d, "trust.jsonl")
+        TR.TrustRegistry(ts).trust("chip-authority", ident.public_key_b64)
+        return CR, ident, ts
+
+    def test_an_older_update_is_not_applied_after_a_newer_one(self):
+        """fails on 404b60b (there the kind had no update_seq): the old mapping came back"""
+        d = _tmp(self)
+        CR, ident, ts = self._setup(d)
+        old, new = os.path.join(d, "old.json"), os.path.join(d, "new.json")
+        CR.publish_signed_update(old, {"vendor-x-v1": "service-OLD"}, ident, update_seq=1)
+        CR.publish_signed_update(new, {"vendor-x-v1": "service-NEW"}, ident, update_seq=2)
+        reg = CR.ChipRegistry()
+        self.assertTrue(reg.apply_signed_update(new, ts)["applied"])
+        r = reg.apply_signed_update(old, ts)
+        self.assertFalse(r["applied"])
+        self.assertIn("not after the last applied", r["reason"])
+        self.assertEqual(reg.service_for("vendor-x-v1"), "service-NEW")
+        self.assertFalse(reg.apply_signed_update(new, ts)["applied"])                # the same update again
+        reg2 = CR.ChipRegistry(last_seq=reg.last_seq())                               # across a restart
+        self.assertFalse(reg2.apply_signed_update(old, ts)["applied"])
+        self.assertEqual(CR.ChipRegistry().apply_signed_update(old, ts)["applied"], True)   # in order: applied
+
+    def test_unsequenced_and_malformed_sequences_are_refused(self):
+        d = _tmp(self)
+        CR, ident, ts = self._setup(d)
+        reg = CR.ChipRegistry()
+        cases = {"v1-kind": (CR.UPDATE_KIND_V1, {}), "missing": (CR.UPDATE_KIND, {}), "zero": (CR.UPDATE_KIND, {"update_seq": 0}),
+                 "negative": (CR.UPDATE_KIND, {"update_seq": -1}), "string": (CR.UPDATE_KIND, {"update_seq": "2"}),
+                 "bool": (CR.UPDATE_KIND, {"update_seq": True}), "list": (CR.UPDATE_KIND, {"update_seq": [2]}),
+                 "beyond": (CR.UPDATE_KIND, {"update_seq": 2 ** 53})}
+        for nm, (kind, extra) in cases.items():
+            p = os.path.join(d, nm + ".json")
+            try:
+                pk = P.build_pack(kind, dict({"chip_classes": {"vendor-" + nm: "svc"}}, **extra), "a mapping, NOT more")
+                P.write_pack(p, pk)
+                P.sign_pack(p, ident)
+            except ValueError:
+                continue                                       # a value the strict profile does not write (2^53)
+            r = reg.apply_signed_update(p, ts)
+            self.assertFalse(r["applied"], nm)
+            self.assertFalse(reg.is_known("vendor-" + nm), nm)
+        for bad in (0, -1, True, "1", 2 ** 53, None):
+            with self.assertRaises((ValueError, TypeError)):
+                CR.publish_signed_update(os.path.join(d, "x.json"), {"v": "s"}, ident, update_seq=bad)
+        with self.assertRaises(ValueError):
+            CR.ChipRegistry(last_seq={"x": -1})
+
+    def test_generated_orders(self):
+        """random orders of 8 updates from 2 signers: what is applied for each signer is strictly increasing, and the
+        mapping left is the one of the highest update_seq seen per signer"""
+        d = _tmp(self)
+        from omega_evidence import chip_registry as CR
+        rnd = random.Random(13)
+        ids = [Identity("cur-a"), Identity("cur-b")]
+        ts = os.path.join(d, "trust.jsonl")
+        tr = TR.TrustRegistry(ts)
+        for i in ids:
+            tr.trust(i.name, i.public_key_b64)
+        ups = []
+        for i in ids:
+            for seq in range(1, 5):
+                p = os.path.join(d, f"{i.name}-{seq}.json")
+                CR.publish_signed_update(p, {f"cls-{i.name}": f"svc-{seq}"}, i, update_seq=seq)
+                ups.append((i.name, seq, p))
+        for _ in range(6):
+            reg = CR.ChipRegistry()
+            order = ups[:]
+            rnd.shuffle(order)
+            best = {}
+            for name, seq, p in order:
+                r = reg.apply_signed_update(p, ts)
+                self.assertEqual(r["applied"], seq > best.get(name, 0), (name, seq, best))
+                best[name] = max(best.get(name, 0), seq)
+            for name, seq in best.items():
+                self.assertEqual(reg.service_for(f"cls-{name}"), f"svc-{seq}")
 
 
 if __name__ == "__main__":

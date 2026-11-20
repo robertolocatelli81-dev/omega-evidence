@@ -532,6 +532,11 @@ Each was measured on 404b60b (the branch before these changes) and reproduced be
   `expected_nonce` given with `require_key_binding=None` requires Key Binding (RFC 9901 §7.3 step 1, Proposed Standard,
   November 2025, not updated as of 20/11/2026: the decision is the verifier's policy and "MUST NOT be based on whether
   or not a Key Binding JWT is provided"; an explicit `require_key_binding=False` still wins).
+- **`chip_registry`: updates in order.** Measured on 404b60b: an older signed update applied after a newer one put
+  `service-OLD` back. The kind is now `chip_attestation_registry_update_v2`, with `update_seq` (1 to 2^53−1) in the signed
+  body; a registry applies a signer's update only when its `update_seq` is greater than the last applied
+  (`last_seq()`, `ChipRegistry(last_seq=…)` across restarts); the old kind is refused with its reason;
+  `publish_signed_update` takes `update_seq=` (keyword, required).
 
 0.13.0 was released on 20 November 2026; its changes are the two 0.13.0 sections below (both of 20 November).
 

@@ -311,7 +311,7 @@ class TestChipRegistrySelfUpdate(unittest.TestCase):
     def _signed_update(self, tmp, classes, signer_name="curator"):
         ident = signing.Identity(signer_name)
         up = os.path.join(tmp, "update.json")
-        chip_registry.publish_signed_update(up, classes, ident)
+        chip_registry.publish_signed_update(up, classes, ident, update_seq=1)
         return up, ident
 
     def test_future_chip_unknown_until_trusted_update(self):
