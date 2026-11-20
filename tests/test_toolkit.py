@@ -807,9 +807,10 @@ class TestLTVValidationMaterial(unittest.TestCase):
                                                 "ref; NOT a conformity assessment"))
             from omega_evidence.canonical import sha256_bytes
             side = {"digest_sha256": sha256_bytes(Path(pp).read_bytes()),
-                    "tsa": "http://tsa.example", "tsr_b64": "",
-                    "validation_material": {"available": True, "cert_count": 3,
-                                            "crls_b64": [{"url": "u", "crl_b64": "AA"}]}}
+                    "tsa": "http://tsa.example", "tsr_b64": "MAMCAQA=",   # one DER SEQUENCE: the form is judged (Unreleased)
+                    "validation_material": {"available": True, "certs_der_b64": ["MAMCAQA="] * 3, "cert_count": 3,
+                                            "subjects": [], "crl_distribution_points": [],
+                                            "crls_b64": [{"url": "u", "crl_b64": "AAAA", "bytes": 3}]}}
             Path(pp[:-5] + ".tsr.json").write_text(json.dumps(side))
             v = verify_pack(pp)
             ltv = [l for l in v["layers"] if l["layer"] == "ltv-material"]
@@ -914,8 +915,9 @@ class TestNemesisRegressions(unittest.TestCase):
                 canonical.sha3({"s": "\udc00"})
             # review r3: LTV material typed (an int was a TypeError traceback); scope regexes ASCII like the three
             pp, lp = anchored("vm"); dg = hashlib.sha256(Path(pp).read_bytes()).hexdigest()
-            Path(pp[:-5] + ".tsr.json").write_text('{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "validation_material": {"available": true, "crls_b64": 1}}' % dg, encoding="utf-8")
-            r = verify_pack(pp); self.assertTrue(r["valid"])   # a verdict (PASS: anchored, timestamp SKIP), never a TypeError
+            Path(pp[:-5] + ".tsr.json").write_text('{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "MAMCAQA=", "validation_material": {"available": true, "crls_b64": 1}}' % dg, encoding="utf-8")
+            r = verify_pack(pp); self.assertFalse(r["valid"])   # a verdict, never a TypeError: FAIL since Unreleased (Decision 2:
+            self.assertIn("validation_material", [l for l in r["layers"] if l["layer"] == "rfc3161"][0]["detail"])   # closed material)
             self.assertTrue(pack._honest_scope_declares_limit("does NOT\u00e9 prove x"))          # ASCII \b: boundary before é
             self.assertTrue(pack._honest_scope_declares_limit("fully cert\u0131fied; does NOT prove x"))   # ı is not i in ASCII folding
             self.assertFalse(pack._honest_scope_declares_limit("fully certified; does NOT prove x"))

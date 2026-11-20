@@ -110,7 +110,7 @@ def build_cases(d):
     dd = json.load(open(un)); dd["pack_sha3"] = 5; json.dump(dd, open(un, "w")); cases["sig-alg-unknown-sha3-number"] = (un, [], None)
     # timestamp sidecar shapes (the token is verified by none of the four inside the verdict; shape and binding by all)
     tl = mk("tsr-list"); sign_declared(tl, idt); open(tl[:-5] + ".tsr.json", "w").write("[1]"); cases["tsr-list"] = (tl, [], None)
-    tm = mk("tsr-mismatch"); sign_declared(tm, idt); json.dump({"digest_sha256": "0" * 64, "tsa": "x", "tsr_b64": "AA=="}, open(tm[:-5] + ".tsr.json", "w")); cases["tsr-digest-mismatch"] = (tm, [], None)
+    tm = mk("tsr-mismatch"); sign_declared(tm, idt); json.dump({"digest_sha256": "0" * 64, "tsa": "x", "tsr_b64": "MAMCAQA="}, open(tm[:-5] + ".tsr.json", "w")); cases["tsr-digest-mismatch"] = (tm, [], None)
     # trust store shapes: a broken chain and a line with a duplicated key (strict profile: refused, never a pin)
     bs = mk("trust-broken"); sign_declared(bs, idt); store_b = os.path.join(d, "trust_broken.jsonl"); trust.TrustRegistry(store_b).trust("acme", idt.public_key_b64)
     ln = json.loads(open(store_b).read().splitlines()[0]); ln["ts"] = "1999-01-01T00:00:00Z"; open(store_b, "w").write(json.dumps(ln, separators=(",", ":")) + "\n")
@@ -194,7 +194,7 @@ def build_cases(d):
         cases[nm] = (mk_text(nm, dd, json.dumps(dict(dd, pack_sha3="%H"), ensure_ascii=False)), [], None)
     for nm, vm in (("tsr-vm-crls-int", '{"available": true, "crls_b64": 1}'), ("tsr-vm-crls-list-of-int", '{"available": true, "crls_b64": [1]}')):
         tp = mk(nm); anchor_declared(tp, tp[:-5] + ".ledger.jsonl"); dg = _hs.sha256(open(tp, "rb").read()).hexdigest()
-        open(tp[:-5] + ".tsr.json", "w").write('{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "validation_material": %s}' % (dg, vm)); cases[nm] = (tp, [], None)
+        open(tp[:-5] + ".tsr.json", "w").write('{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "MAMCAQA=", "validation_material": %s}' % (dg, vm)); cases[nm] = (tp, [], None)
     # review r4: the anchoring rule reads the ENTRY in the three and read `data` in Python (a top-level
     # anchored_pack_sha3: PASS in the three, FAIL in Python; data.data.anchored_pack_sha3: the reverse); a trust-store entry
     # without "data" was skipped by Python and a broken store for the three; Node's `[^.]{0,40}` counted UTF-16 units
@@ -256,8 +256,8 @@ def build_cases(d):
     # 100000 "[" a RecursionError traceback); a trust-store line that is not an object raised AttributeError in Python
     import hashlib as _hl
     cases["ledger-path-missing"] = (cases["anchored"][0], ["--ledger", os.path.join(d, "no-such.ledger.jsonl")], None)
-    for nm, body in (("tsr-float-beside-good-digest", '{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA==", "x": 1.5}'),
-                     ("tsr-dup-key-beside-good-digest", '{"digest_sha256": "%s", "digest_sha256": "%s", "tsa": "x", "tsr_b64": "AA=="}'),
+    for nm, body in (("tsr-float-beside-good-digest", '{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "MAMCAQA=", "x": 1.5}'),
+                     ("tsr-dup-key-beside-good-digest", '{"digest_sha256": "%s", "digest_sha256": "%s", "tsa": "x", "tsr_b64": "MAMCAQA="}'),
                      ("tsr-deep", "[" * 100000)):
         tp = mk(nm); anchor_declared(tp, tp[:-5] + ".ledger.jsonl"); dg = _hl.sha256(open(tp, "rb").read()).hexdigest()
         open(tp[:-5] + ".tsr.json", "w").write(body.replace("%s", dg)); cases[nm] = (tp, [], None)
@@ -504,13 +504,59 @@ def _closed_schema_cases(d, cases, mk, idt):
     # 2. RFC 3161 sidecar bound to the pack bytes, with a key nobody defined → FAIL in the timestamp layer (rfc3161 in Python)
     def tsr(path, extra):
         dg = _hc.sha256(open(path, "rb").read()).hexdigest()
-        side = {"digest_sha256": dg, "tsa": "x", "tsr_b64": "AA==", "stamped_utc": "2026-10-11T00:00:00+00:00"}; side.update(extra)
+        side = {"digest_sha256": dg, "tsa": "x", "tsr_b64": "MAMCAQA=", "stamped_utc": "2026-10-11T00:00:00+00:00"}; side.update(extra)
         with open(path[:-5] + ".tsr.json", "w", encoding="utf-8") as f:
             json.dump(side, f)
     p = signed_anchored("closed-tsr-unknown-key"); tsr(p, {KEY: "x"}); cases["closed-tsr-unknown-key"] = (p, [], None); EXPECT["closed-tsr-unknown-key"] = "FAIL"
     COMPARE_LAYERS["closed-tsr-unknown-key"] = ("timestamp",)
     p = signed_anchored("closed-tsr-known-keys"); tsr(p, {"validation_material": {"available": False}}); cases["closed-tsr-known-keys"] = (p, [], None)
     EXPECT["closed-tsr-known-keys"] = "PASS"   # positive control: every key of the closed list, the verdict of the signed, anchored pack
+    # Unreleased (Decision 2 of 20/11/2026): the token's FORM (canonical base64 of one DER SEQUENCE) and a closed
+    # validation_material, judged without a trust anchor, FAIL in the four with one text. Measured before: SKIP, exit 0.
+    import base64 as _b64m
+    def der(n, extra=b""):
+        body = b"\x04" + (bytes([n]) if n < 0x80 else b"\x82" + n.to_bytes(2, "big")) + b"\x00" * n
+        ln = len(body)
+        head = bytes([ln]) if ln < 0x80 else (b"\x81" + bytes([ln]) if ln < 256 else b"\x82" + ln.to_bytes(2, "big"))
+        return b"\x30" + head + body + extra
+    B = lambda b: _b64m.b64encode(b).decode()
+    CERT = B(der(300))
+    forms = {"garbage": "not a token at all!!", "absent": None, "int": 7, "empty": "", "der-int": B(b"\x02\x01\x00"),
+             "trailing-byte": B(der(10, b"\x00")), "indefinite": B(b"\x30\x80\x00\x00"), "long-form-short": B(b"\x30\x81\x01\x00"),
+             "leading-zero-length": B(b"\x30\x82\x00\x81" + b"\x00" * 0x81), "truncated": B(der(300)[:-1]),
+             "urlsafe": B(der(300)).replace("+", "-").replace("/", "_") if ("+" in B(der(300)) or "/" in B(der(300))) else "_" + B(der(300))[1:],
+             "whitespace": B(der(200))[:8] + "\n" + B(der(200))[8:], "bad-padding": B(der(1))[:-2] + "B=", "five-length-octets": B(b"\x30\x85\x00\x00\x00\x00\x01\x00")}
+    for nm, tok in forms.items():
+        p = signed_anchored(f"d2-tsr-{nm}"); tsr(p, {}); sp = p[:-5] + ".tsr.json"
+        edit_json(sp, (lambda sd, tok=tok: sd.pop("tsr_b64")) if tok is None else (lambda sd, tok=tok: sd.__setitem__("tsr_b64", tok)))
+        cases[f"d2-tsr-{nm}"] = (p, [], None); EXPECT[f"d2-tsr-{nm}"] = "FAIL"; COMPARE_LAYERS[f"d2-tsr-{nm}"] = ("timestamp",)
+    for nm, tok in (("short", B(der(1))), ("long", B(der(300))), ("real-shape", B(der(4000)))):
+        p = signed_anchored(f"d2-tsr-ok-{nm}"); tsr(p, {"tsr_b64": tok})
+        cases[f"d2-tsr-ok-{nm}"] = (p, [], None); EXPECT[f"d2-tsr-ok-{nm}"] = "PASS"   # SKIP texts differ by design (Python names its anchor)
+    full = {"available": True, "certs_der_b64": [CERT, CERT], "cert_count": 2, "subjects": ["CN=a", "CN=b"],
+            "crl_distribution_points": ["http://crl.example/a.crl"], "token_verified": None, "note": "n", "tsa_transport": "https",
+            "crls_b64": [{"url": "http://crl.example/a.crl", "crl_b64": B(b"crl"), "bytes": 3}, {"url": "http://x", "error": "e"}],
+            "crl_fetch": {"fetched": True, "chain_certificates": 2}}
+    vms = {"ok-full": (full, "PASS"), "ok-unavailable": ({"available": False, "note": "openssl absent", "tsa_transport": "http"}, "PASS"),
+           "ok-0.5.0-shape": ({k: full[k] for k in ("available", "certs_der_b64", "cert_count", "subjects", "crl_distribution_points")}, "PASS"),
+           "ok-crl-fetch-not": (dict(full, crl_fetch={"fetched": False, "reason": "r"}, crls_b64=[], token_verified=False), "PASS"),
+           "unknown-key": (dict(full, anything={"evil": 1}), "FAIL"), "cert-count-lots": (dict(full, cert_count="lots"), "FAIL"),
+           "cert-count-lie": (dict(full, cert_count=3), "FAIL"), "cert-count-bool": (dict(full, cert_count=True, certs_der_b64=[CERT]), "FAIL"),
+           "cert-not-der": (dict(full, certs_der_b64=[CERT, B(b"xyz")]), "FAIL"), "available-string": (dict(full, available="yes"), "FAIL"),
+           "available-missing": ({k: v for k, v in full.items() if k != "available"}, "FAIL"),
+           "unavailable-with-certs": ({"available": False, "certs_der_b64": []}, "FAIL"), "subjects-int": (dict(full, subjects=[1, 2]), "FAIL"),
+           "cdps-missing": ({k: v for k, v in full.items() if k != "crl_distribution_points"}, "FAIL"),
+           "crl-bytes-lie": (dict(full, crls_b64=[{"url": "u", "crl_b64": B(b"crl"), "bytes": 4}]), "FAIL"),
+           "crl-extra-key": (dict(full, crls_b64=[{"url": "u", "error": "e", "x": 1}]), "FAIL"), "crl-int": (dict(full, crls_b64=[1]), "FAIL"),
+           "crl-fetch-extra": (dict(full, crl_fetch={"fetched": True, "x": 1}), "FAIL"), "crl-fetch-neg": (dict(full, crl_fetch={"fetched": True, "chain_certificates": -1}), "FAIL"),
+           "token-verified-str": (dict(full, token_verified="yes"), "FAIL"), "token-verified-zero": (dict(full, token_verified=0), "FAIL"), "transport-ftp": (dict(full, tsa_transport="ftp"), "FAIL"),
+           "note-int": (dict(full, note=1), "FAIL"), "vm-null": (None, "FAIL"), "vm-list": ([], "FAIL"),
+           "proto-key": (dict(full, __proto__=1), "FAIL")}
+    for nm, (vm, want) in vms.items():
+        p = signed_anchored(f"d2-vm-{nm}"); tsr(p, {"tsr_b64": B(der(300)), "validation_material": vm})
+        cases[f"d2-vm-{nm}"] = (p, [], None); EXPECT[f"d2-vm-{nm}"] = want
+        if want == "FAIL":
+            COMPARE_LAYERS[f"d2-vm-{nm}"] = ("timestamp",)   # one reason, one text in the four
     # 3. ledger entry: a key nobody defined at the top level, self_hash recomputed over it → ledger-chain FAIL naming idx and key;
     #    the same key INSIDE data → PASS; the two anchor fields at the top level → PASS (they are in the closed list)
     def rechain(lp, fn):

@@ -249,6 +249,76 @@ public class OeVerify {
         if (s == null || s.length() != ((n + 2) / 3) * 4 || !s.matches("[A-Za-z0-9+/]*={0,2}")) return null;
         try { byte[] raw = Base64.getDecoder().decode(s); return raw.length == n && Base64.getEncoder().encodeToString(raw).equals(s) ? raw : null; } catch (Exception e) { return null; }
     }
+    // The timestamp sidecar's form, judged without a trust anchor (Unreleased, the four verifiers): the same rules and texts
+    // as omega_evidence/verifier.py (_b64_canon, _der_one_sequence, _vm_problem).
+    static final String TSR_FORM_MSG = "malformed sidecar: tsr_b64 is not canonical base64 of one DER SEQUENCE (checked without a trust anchor)";
+    static byte[] b64Canon(Object v) {
+        if (!(v instanceof String)) return null;
+        String s = (String) v;
+        if (s.isEmpty() || s.length() % 4 != 0 || !s.matches("[A-Za-z0-9+/]*={0,2}")) return null;
+        try { byte[] raw = Base64.getDecoder().decode(s); return Base64.getEncoder().encodeToString(raw).equals(s) ? raw : null; } catch (Exception e) { return null; }
+    }
+    static boolean derOneSequence(byte[] b) {
+        if (b == null || b.length < 2 || (b[0] & 0xff) != 0x30) return false;
+        int first = b[1] & 0xff; long n; int head;
+        if (first < 0x80) { n = first; head = 2; }
+        else {
+            int k = first & 0x7f;
+            if (k == 0 || k > 4 || b.length < 2 + k || b[2] == 0) return false;
+            n = 0; for (int j = 0; j < k; j++) n = (n << 8) | (b[2 + j] & 0xff);
+            if (n < 0x80) return false;
+            head = 2 + k;
+        }
+        return head + n == b.length;
+    }
+    static final Set<String> VM_KEYS = Set.of("available", "note", "tsa_transport", "certs_der_b64", "cert_count", "subjects", "crl_distribution_points", "crls_b64", "crl_fetch", "token_verified");
+    static final Set<String> VM_UNAVAILABLE_KEYS = Set.of("available", "note", "tsa_transport");
+    static final Set<String> CRL_FETCH_KEYS = Set.of("fetched", "reason", "chain_certificates");
+    static Long intOf(Object v) { if (!(v instanceof Num)) return null; try { return Long.parseLong(((Num) v).lexeme); } catch (NumberFormatException e) { return null; } }
+    static boolean strList(Object v) { if (!(v instanceof List)) return false; for (Object x : (List<?>) v) if (!(x instanceof String)) return false; return true; }
+    static String vmProblem(Object v) {
+        if (!(v instanceof Obj)) return "not a JSON object";
+        Obj vm = (Obj) v;
+        List<String> unk = unknownKeys(vm, VM_KEYS);
+        if (!unk.isEmpty()) return "field(s) outside the closed schema: " + cut(String.join(", ", unk), 120);
+        if (!(vm.vals.get("available") instanceof Boolean)) return "available is not a boolean";
+        if (vm.vals.containsKey("note") && !(vm.vals.get("note") instanceof String)) return "note is not a string";
+        if (vm.vals.containsKey("tsa_transport") && !("http".equals(vm.vals.get("tsa_transport")) || "https".equals(vm.vals.get("tsa_transport")))) return "tsa_transport is not http or https";
+        if (!(Boolean) vm.vals.get("available")) {
+            unk = unknownKeys(vm, VM_UNAVAILABLE_KEYS);
+            return unk.isEmpty() ? "" : "material not available, yet it carries: " + cut(String.join(", ", unk), 120);
+        }
+        for (String k : List.of("certs_der_b64", "cert_count", "subjects", "crl_distribution_points")) if (!vm.vals.containsKey(k)) return k + " missing";
+        Object cv = vm.vals.get("certs_der_b64");
+        boolean ok = cv instanceof List;
+        if (ok) for (Object c : (List<?>) cv) if (!derOneSequence(b64Canon(c))) { ok = false; break; }
+        if (!ok) return "certs_der_b64 is not an array of canonical base64 DER certificates";
+        Long cc = intOf(vm.vals.get("cert_count"));
+        if (cc == null || cc != ((List<?>) cv).size()) return "cert_count is not the number of certs_der_b64";
+        if (!strList(vm.vals.get("subjects")) || !strList(vm.vals.get("crl_distribution_points"))) return "subjects and crl_distribution_points must be arrays of strings";
+        if (vm.vals.containsKey("crls_b64")) {
+            Object crls = vm.vals.get("crls_b64");
+            if (!(crls instanceof List)) return "crls_b64 is not an array";
+            for (Object x : (List<?>) crls) {
+                if (!(x instanceof Obj) || !(((Obj) x).vals.get("url") instanceof String)) return "a crls_b64 entry is not an object with a url string";
+                Obj c = (Obj) x; Set<String> ks = new TreeSet<>(c.keys);
+                if (ks.equals(Set.of("url", "error"))) { if (!(c.vals.get("error") instanceof String)) return "a crls_b64 error is not a string"; }
+                else if (ks.equals(Set.of("url", "crl_b64", "bytes"))) {
+                    byte[] raw = b64Canon(c.vals.get("crl_b64")); Long nb = intOf(c.vals.get("bytes"));
+                    if (raw == null || nb == null || nb != raw.length) return "a crls_b64 entry is not canonical base64 with its byte count";
+                } else return "a crls_b64 entry has neither {url, crl_b64, bytes} nor {url, error}";
+            }
+        }
+        if (vm.vals.containsKey("crl_fetch")) {
+            Object fv = vm.vals.get("crl_fetch");
+            if (!(fv instanceof Obj) || !unknownKeys((Obj) fv, CRL_FETCH_KEYS).isEmpty() || !(((Obj) fv).vals.get("fetched") instanceof Boolean)) return "crl_fetch is not an object {fetched, reason?, chain_certificates?}";
+            Obj cf = (Obj) fv;
+            if (cf.vals.containsKey("reason") && !(cf.vals.get("reason") instanceof String)) return "crl_fetch.reason is not a string";
+            if (cf.vals.containsKey("chain_certificates")) { Long n = intOf(cf.vals.get("chain_certificates")); if (n == null || n < 0) return "crl_fetch.chain_certificates is not a non-negative integer"; }
+        }
+        if (vm.vals.containsKey("token_verified") && vm.vals.get("token_verified") != null && !(vm.vals.get("token_verified") instanceof Boolean)) return "token_verified is not true, false or null";
+        return "";
+    }
     static PublicKey key(String alg, byte[] hdr, byte[] raw) throws Exception {
         byte[] spki = new byte[hdr.length + raw.length]; System.arraycopy(hdr, 0, spki, 0, hdr.length); System.arraycopy(raw, 0, spki, hdr.length, raw.length);
         return KeyFactory.getInstance(alg).generatePublic(new X509EncodedKeySpec(spki));
@@ -487,7 +557,8 @@ public class OeVerify {
             if (ts == null) add.accept(new String[]{"timestamp", "FAIL"}, "malformed sidecar");
             else if (!unknownKeys(ts, TSR_SIDECAR_KEYS).isEmpty()) add.accept(new String[]{"timestamp", "FAIL"}, CLOSED_SIDECAR_MSG + cut(String.join(", ", unknownKeys(ts, TSR_SIDECAR_KEYS)), 120));   // closed sidecar schema (2026-10-10)
             else if (!sha("SHA-256", packBytes).equals(str(ts, "digest_sha256"))) add.accept(new String[]{"timestamp", "FAIL"}, "pack changed after stamping");
-            else if (str(ts, "tsr_b64") == null || str(ts, "tsr_b64").isEmpty()) add.accept(new String[]{"timestamp", "SKIP"}, "no RFC 3161 token recorded (tsr_b64 missing, empty or not a string): nothing to verify");
+            else if (!derOneSequence(b64Canon(ts.vals.get("tsr_b64")))) add.accept(new String[]{"timestamp", "FAIL"}, TSR_FORM_MSG);   // form before capability (Unreleased, the four): until 0.13.0 anything here was a SKIP
+            else if (ts.vals.containsKey("validation_material") && !vmProblem(ts.vals.get("validation_material")).isEmpty()) add.accept(new String[]{"timestamp", "FAIL"}, "malformed sidecar: validation_material: " + vmProblem(ts.vals.get("validation_material")));
             else add.accept(new String[]{"timestamp", "SKIP"}, "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
         }
         else add.accept(new String[]{"timestamp", "SKIP"}, "no timestamp sidecar");

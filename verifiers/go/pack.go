@@ -499,8 +499,12 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 			add("timestamp", "FAIL", closedSidecarMsg+cutRunes(strings.Join(unk, ", "), 120))
 		} else if dg, _ := str(ts, "digest_sha256"); dg != sha256Hex(packBytes) {
 			add("timestamp", "FAIL", "pack changed after stamping")
-		} else if tok, isStr := str(ts, "tsr_b64"); !isStr || tok == "" {
-			add("timestamp", "SKIP", "no RFC 3161 token recorded (tsr_b64 missing, empty or not a string): nothing to verify")
+		} else if !derOneSequence(b64Canon(ts.Vals["tsr_b64"])) {
+			// form before capability (Unreleased, the four): a token is canonical base64 of one DER SEQUENCE; until 0.13.0
+			// anything, or nothing, here was a SKIP
+			add("timestamp", "FAIL", tsrFormMsg)
+		} else if vmWhy := vmProblemIfPresent(ts); vmWhy != "" {
+			add("timestamp", "FAIL", "malformed sidecar: validation_material: "+vmWhy)
 		} else {
 			add("timestamp", "SKIP", "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator")
 		}

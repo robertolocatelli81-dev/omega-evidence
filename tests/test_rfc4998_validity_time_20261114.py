@@ -470,7 +470,7 @@ class TestSinglePackReason(unittest.TestCase):
             with open(p, "wb") as f:
                 f.write(b"{}")
             with open(os.path.join(d, "p.tsr.json"), "w") as f:
-                json.dump({"digest_sha256": hashlib.sha256(b"{}").hexdigest(), "tsa": "t", "tsr_b64": "AAAA"}, f)
+                json.dump({"digest_sha256": hashlib.sha256(b"{}").hexdigest(), "tsa": "t", "tsr_b64": "MAMCAQA="}, f)   # one DER SEQUENCE: the form passes (Unreleased), openssl decides
             for ret, status, has in (({"verified": False, "reason": "certificate has expired"}, "FAIL", True),
                                      ({"verified": True, "reason": "certificate has expired"}, "PASS", False)):
                 layers = []

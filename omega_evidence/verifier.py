@@ -192,6 +192,115 @@ def _check_ledger(path: str, ledger_path: Optional[str], layers: List, pack: Opt
     return True
 
 
+_B64_ALPHABET = _re.compile(r"[A-Za-z0-9+/]*={0,2}")
+
+
+def _b64_canon(v: Any) -> Optional[bytes]:
+    """The bytes of a non-empty string in canonical standard base64 (RFC 4648 §4: no whitespace, no URL-safe letters,
+    padding only to a multiple of 4 and re-encoding gives the same text), else None. The same rule in the four."""
+    if not isinstance(v, str) or not v or len(v) % 4 or not _B64_ALPHABET.fullmatch(v):
+        return None
+    try:
+        raw = base64.b64decode(v, validate=True)
+    except (ValueError, TypeError):
+        return None
+    return raw if base64.b64encode(raw).decode("ascii") == v else None
+
+
+def _der_one_sequence(b: bytes) -> bool:
+    """True when `b` is exactly one DER SEQUENCE: tag 0x30, a definite length in its shortest form (X.690 §10.1, at most
+    four length octets), and the value ends where the bytes end. A TimeStampResp (RFC 3161 §2.4.2) and a Certificate
+    (RFC 5280 §4.1) are each one. Read without any trust anchor: the form, not the signature."""
+    if len(b) < 2 or b[0] != 0x30:
+        return False
+    first = b[1]
+    if first < 0x80:
+        n, head = first, 2
+    else:
+        k = first & 0x7F
+        if k == 0 or k > 4 or len(b) < 2 + k or b[2] == 0:
+            return False                     # 0x80 = indefinite (not DER), or a leading zero octet
+        n = int.from_bytes(b[2:2 + k], "big")
+        if n < 0x80:
+            return False                     # the long form for a length the short form holds
+        head = 2 + k
+    return head + n == len(b)
+
+
+# validation_material (Unreleased, the four): the keys extract_validation_material and stamp_pack have written in
+# every release (0.5.0 … 0.13.0, read from each tag's timestamp.py and pack.py), each with its type; anything else FAIL
+VM_KEYS = frozenset({"available", "note", "tsa_transport", "certs_der_b64", "cert_count", "subjects",
+                     "crl_distribution_points", "crls_b64", "crl_fetch", "token_verified"})
+VM_UNAVAILABLE_KEYS = frozenset({"available", "note", "tsa_transport"})
+CRL_FETCH_KEYS = frozenset({"fetched", "reason", "chain_certificates"})
+
+
+def _is_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _str_list(v: Any) -> bool:
+    return isinstance(v, list) and all(isinstance(x, str) for x in v)
+
+
+def _vm_problem(vm: Any) -> str:
+    """"" when `validation_material` has the closed shape; else the first reason, the same text in the four."""
+    if not isinstance(vm, dict):
+        return "not a JSON object"
+    unk = _unknown(vm, VM_KEYS)
+    if unk:
+        return "field(s) outside the closed schema: " + ", ".join(unk)[:120]
+    if not isinstance(vm.get("available"), bool):
+        return "available is not a boolean"
+    if "note" in vm and not isinstance(vm["note"], str):
+        return "note is not a string"
+    if "tsa_transport" in vm and vm["tsa_transport"] not in ("http", "https"):
+        return "tsa_transport is not http or https"
+    if not vm["available"]:
+        unk = _unknown(vm, VM_UNAVAILABLE_KEYS)
+        return ("material not available, yet it carries: " + ", ".join(unk)[:120]) if unk else ""
+    for k in ("certs_der_b64", "cert_count", "subjects", "crl_distribution_points"):
+        if k not in vm:
+            return k + " missing"
+    certs = vm["certs_der_b64"]
+    if not isinstance(certs, list) or not all(_der_one_sequence(_b64_canon(c) or b"") for c in certs):
+        return "certs_der_b64 is not an array of canonical base64 DER certificates"
+    if not _is_int(vm["cert_count"]) or vm["cert_count"] != len(certs):
+        return "cert_count is not the number of certs_der_b64"
+    if not _str_list(vm["subjects"]) or not _str_list(vm["crl_distribution_points"]):
+        return "subjects and crl_distribution_points must be arrays of strings"
+    if "crls_b64" in vm:
+        crls = vm["crls_b64"]
+        if not isinstance(crls, list):
+            return "crls_b64 is not an array"
+        for c in crls:
+            if not isinstance(c, dict) or not isinstance(c.get("url"), str):
+                return "a crls_b64 entry is not an object with a url string"
+            if set(c) == {"url", "error"}:
+                if not isinstance(c["error"], str):
+                    return "a crls_b64 error is not a string"
+            elif set(c) == {"url", "crl_b64", "bytes"}:
+                raw = _b64_canon(c["crl_b64"])
+                if raw is None or not _is_int(c["bytes"]) or c["bytes"] != len(raw):
+                    return "a crls_b64 entry is not canonical base64 with its byte count"
+            else:
+                return "a crls_b64 entry has neither {url, crl_b64, bytes} nor {url, error}"
+    if "crl_fetch" in vm:
+        cf = vm["crl_fetch"]
+        if not isinstance(cf, dict) or _unknown(cf, CRL_FETCH_KEYS) or not isinstance(cf.get("fetched"), bool):
+            return "crl_fetch is not an object {fetched, reason?, chain_certificates?}"
+        if "reason" in cf and not isinstance(cf["reason"], str):
+            return "crl_fetch.reason is not a string"
+        if "chain_certificates" in cf and not (_is_int(cf["chain_certificates"]) and cf["chain_certificates"] >= 0):
+            return "crl_fetch.chain_certificates is not a non-negative integer"
+    if "token_verified" in vm and not (vm["token_verified"] is None or isinstance(vm["token_verified"], bool)):   # 0 == False
+        return "token_verified is not true, false or null"
+    return ""
+
+
+TSR_FORM_MSG = "malformed sidecar: tsr_b64 is not canonical base64 of one DER SEQUENCE (checked without a trust anchor)"
+
+
 def _check_timestamp(path: str, layers: List, pack_bytes: Optional[bytes] = None) -> str:
     ts_side = path[:-5] + ".tsr.json" if path.endswith(".json") else path + ".tsr.json"
     if not os.path.exists(ts_side):
@@ -213,17 +322,26 @@ def _check_timestamp(path: str, layers: List, pack_bytes: Optional[bytes] = None
     if current != side.get("digest_sha256"):
         layers.append(_layer("rfc3161", "FAIL", "pack changed after stamping"))
         return "FAIL"
+    # FORM BEFORE CAPABILITY (Unreleased, the four): the token is not verified here (no trust anchor reaches verify_pack),
+    # but whether it is a token at all is visible without one — canonical base64 of one DER SEQUENCE (a TimeStampResp).
+    # Until 0.13.0 any text, or none, was a SKIP "token recorded" (measured 20/11/2026: "not a token at all!!")
+    if not _der_one_sequence(_b64_canon(side.get("tsr_b64")) or b""):
+        layers.append(_layer("rfc3161", "FAIL", TSR_FORM_MSG))
+        return "FAIL"
+    vm_why = _vm_problem(side["validation_material"]) if "validation_material" in side else ""
+    if vm_why:   # Unreleased: a closed schema (until 0.13.0 any object was read and its cert_count printed as found)
+        layers.append(_layer("rfc3161", "FAIL", "malformed sidecar: validation_material: " + vm_why))
+        return "FAIL"
     from .timestamp import verify
-    r = verify(side.get("tsr_b64", ""), current)
+    r = verify(side["tsr_b64"], current)
     st = "PASS" if r.get("verified") is True else ("SKIP" if r.get("verified") is None else "FAIL")
     why = r.get("note", "") or ("" if st != "FAIL" else r.get("reason", ""))    # FAIL: openssl's reason (after 0.11.4)
     layers.append(_layer("rfc3161", st, (str(side.get("tsa", "")) + " — " + str(why)).strip(" —")))   # r6: say WHY it is SKIP
-    vm = side.get("validation_material")     # LTV material captured at stamping time
+    vm = side.get("validation_material")     # LTV material captured at stamping time (its shape checked above)
     if isinstance(vm, dict) and vm.get("available"):
-        raw_crls = vm.get("crls_b64", [])   # r3: an int here was a TypeError traceback, no verdict (the three answered)
-        crls = [c for c in (raw_crls if isinstance(raw_crls, list) else []) if isinstance(c, dict) and "crl_b64" in c]
+        crls = [c for c in vm.get("crls_b64", []) if "crl_b64" in c]
         layers.append(_layer("ltv-material", "SKIP",
-                             f"captured: {vm.get('cert_count', 0)} cert(s), {len(crls)} CRL(s) "
+                             f"captured: {len(vm['certs_der_b64'])} cert(s), {len(crls)} CRL(s) "
                              "— TSA chain preserved for long-term validation"))
     return st
 

@@ -342,7 +342,16 @@ so the named layer decides (except `non-utf8` and `ledger-raw-byte-in-key`, whic
 pack verdict: `verify_pack` checks the sidecar's shape and its digest→pack binding and reports the layer as SKIP with the
 reason (round 6: the earlier sentence "verified by the Python reference only" was not true of the code — no trust
 anchor reaches `verify_pack`); the cryptographic check exists as `timestamp.verify(tsr_b64, digest, ca_file=<TSA roots>)`
-for the operator. The ledger profile is the cryptovalid one, so cryptovalid's five verifiers also
+for the operator. What needs no trust anchor is judged (Unreleased, the same rule and text in the four): `tsr_b64` must be
+canonical standard base64 (RFC 4648 §4, re-encoding gives the same text) of exactly one DER SEQUENCE (tag 0x30, a
+definite length in its shortest form of at most four octets, nothing after it — a TimeStampResp is one), and
+`validation_material`, when present, is closed: `available` (boolean); `note` (string); `tsa_transport` (`http` or
+`https`); with `available: false` nothing else; with `available: true` also `certs_der_b64` (array of canonical base64
+DER SEQUENCEs), `cert_count` (integer, the length of `certs_der_b64`), `subjects` and `crl_distribution_points` (arrays
+of strings), and optionally `crls_b64` (array of `{url, crl_b64, bytes}` with `bytes` the decoded length, or `{url,
+error}`), `crl_fetch` (`{fetched: boolean, reason?: string, chain_certificates?: integer >= 0}`) and `token_verified`
+(true, false or null) — the members `timestamp.extract_validation_material` and `pack.stamp_pack` wrote in every release
+from 0.5.0 to 0.13.0. Anything else is a FAIL of the timestamp layer, `malformed sidecar: …`. The ledger profile is the cryptovalid one, so cryptovalid's five verifiers also
 accept omega-evidence ledgers unchanged (measured 16/09/2026).
 
 ```
@@ -488,6 +497,16 @@ Each was measured on 404b60b (the branch before these changes) and reproduced be
   those two packs are FAIL. Verdicts changed in the differential oracle: 36 of its 209 cases change `authenticated` from
   true to false and none changes its verdict; five cases are new (two with `authenticated` named, three FAIL beside a trust
   store): 0 disagreements over 214, Python 3.11.2, Go 1.27.0, JDK 27, Node 22.23.2.
+- **The timestamp sidecar's form is judged without a trust anchor** (the four verifiers; rule in *Independent
+  verifiers*). Measured on 404b60b: `tsr_b64` "not a token at all!!" was `rfc3161` SKIP "token recorded, not decoded or
+  verified" and the anchored pack exit 0; a `validation_material` with a member nobody defined and `cert_count: "lots"`
+  was read and printed as "captured: lots cert(s)". Now `tsr_b64` that is not canonical base64 of one DER SEQUENCE
+  (absent, empty, not a string included) and a `validation_material` outside the closed shape are FAIL. Three real
+  sidecars written by `stamp_pack` against public TSAs (tokens of 4 645 and 4 894 bytes, one with captured material)
+  keep their verdict. Verdicts changed in the differential oracle: 2 of its 214 cases go from PASS to FAIL
+  (`tsr-vm-crls-int`, `tsr-vm-crls-list-of-int`); the 5 cases whose token was `"AA=="` (not a DER SEQUENCE: they would
+  FAIL on the token) now carry one DER SEQUENCE so that the layer they test still decides; 43 cases are new (17 token
+  forms, 26 materials; the 36 FAIL cases also compare the FAIL text, one in the four): 0 disagreements over 257.
 
 0.13.0 was released on 20 November 2026; its changes are the two 0.13.0 sections below (both of 20 November).
 

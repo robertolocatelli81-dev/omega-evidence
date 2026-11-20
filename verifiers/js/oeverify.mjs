@@ -173,7 +173,67 @@ export const PACK_FORMAT_KEYS = new Set(["kind", "generated_utc", "honest_scope"
 const CLOSED_SIDECAR_MSG = "malformed sidecar: field(s) outside the closed schema: ";
 // the object's keys outside `allowed`, sorted by code point (Python sorted()); a LIST, so the empty key "" counts as unknown too
 export const unknownKeys = (o, allowed) => Object.keys(o).filter((k) => !allowed.has(k)).sort(cmp);
-const cut = (s, n) => [...s].slice(0, n).join("");   // at most n code points, as the reference's `[:n]` on a Python str
+const cut = (s, n) => [...s].slice(0, n).join("");
+// The timestamp sidecar's form, judged without a trust anchor (Unreleased, the four verifiers): the same rules and texts as
+// omega_evidence/verifier.py (_b64_canon, _der_one_sequence, _vm_problem).
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const TSR_FORM_MSG = "malformed sidecar: tsr_b64 is not canonical base64 of one DER SEQUENCE (checked without a trust anchor)";
+function b64Canon(v) {
+  if (typeof v !== "string" || v === "" || v.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(v)) return null;
+  const raw = Buffer.from(v, "base64");
+  return raw.toString("base64") === v ? raw : null;
+}
+function derOneSequence(b) {
+  if (!b || b.length < 2 || b[0] !== 0x30) return false;
+  const first = b[1]; let n, head;
+  if (first < 0x80) { n = first; head = 2; }
+  else {
+    const k = first & 0x7f;
+    if (k === 0 || k > 4 || b.length < 2 + k || b[2] === 0) return false;
+    n = 0; for (let j = 0; j < k; j++) n = n * 256 + b[2 + j];
+    if (n < 0x80) return false;
+    head = 2 + k;
+  }
+  return head + n === b.length;
+}
+const VM_KEYS = new Set(["available", "note", "tsa_transport", "certs_der_b64", "cert_count", "subjects", "crl_distribution_points", "crls_b64", "crl_fetch", "token_verified"]);
+const VM_UNAVAILABLE_KEYS = new Set(["available", "note", "tsa_transport"]);
+const CRL_FETCH_KEYS = new Set(["fetched", "reason", "chain_certificates"]);
+const isInt = (v) => typeof v === "number" && Number.isInteger(v);
+const strList = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
+function vmProblem(vm) {
+  if (!isObj(vm)) return "not a JSON object";
+  let unk = unknownKeys(vm, VM_KEYS);
+  if (unk.length) return "field(s) outside the closed schema: " + cut(unk.join(", "), 120);
+  if (typeof vm.available !== "boolean" || !own(vm, "available")) return "available is not a boolean";
+  if (own(vm, "note") && typeof vm.note !== "string") return "note is not a string";
+  if (own(vm, "tsa_transport") && vm.tsa_transport !== "http" && vm.tsa_transport !== "https") return "tsa_transport is not http or https";
+  if (!vm.available) { unk = unknownKeys(vm, VM_UNAVAILABLE_KEYS); return unk.length ? "material not available, yet it carries: " + cut(unk.join(", "), 120) : ""; }
+  for (const k of ["certs_der_b64", "cert_count", "subjects", "crl_distribution_points"]) if (!own(vm, k)) return k + " missing";
+  const certs = vm.certs_der_b64;
+  if (!Array.isArray(certs) || !certs.every((c) => derOneSequence(b64Canon(c)))) return "certs_der_b64 is not an array of canonical base64 DER certificates";
+  if (!isInt(vm.cert_count) || vm.cert_count !== certs.length) return "cert_count is not the number of certs_der_b64";
+  if (!strList(vm.subjects) || !strList(vm.crl_distribution_points)) return "subjects and crl_distribution_points must be arrays of strings";
+  if (own(vm, "crls_b64")) {
+    if (!Array.isArray(vm.crls_b64)) return "crls_b64 is not an array";
+    for (const c of vm.crls_b64) {
+      if (!isObj(c) || !own(c, "url") || typeof c.url !== "string") return "a crls_b64 entry is not an object with a url string";
+      const ks = Object.keys(c).sort().join(",");
+      if (ks === "error,url") { if (typeof c.error !== "string") return "a crls_b64 error is not a string"; }
+      else if (ks === "bytes,crl_b64,url") { const raw = b64Canon(c.crl_b64); if (raw === null || !isInt(c.bytes) || c.bytes !== raw.length) return "a crls_b64 entry is not canonical base64 with its byte count"; }
+      else return "a crls_b64 entry has neither {url, crl_b64, bytes} nor {url, error}";
+    }
+  }
+  if (own(vm, "crl_fetch")) {
+    const cf = vm.crl_fetch;
+    if (!isObj(cf) || unknownKeys(cf, CRL_FETCH_KEYS).length || !own(cf, "fetched") || typeof cf.fetched !== "boolean") return "crl_fetch is not an object {fetched, reason?, chain_certificates?}";
+    if (own(cf, "reason") && typeof cf.reason !== "string") return "crl_fetch.reason is not a string";
+    if (own(cf, "chain_certificates") && !(isInt(cf.chain_certificates) && cf.chain_certificates >= 0)) return "crl_fetch.chain_certificates is not a non-negative integer";
+  }
+  if (own(vm, "token_verified") && vm.token_verified !== null && typeof vm.token_verified !== "boolean") return "token_verified is not true, false or null";
+  return "";
+}   // at most n code points, as the reference's `[:n]` on a Python str
 // the reference's ledger-chain detail for entries outside the closed schema, or null when every entry is in it
 function ledgerUnknown(lp, entries) {
   let n = 0, first = null, keys = null;
@@ -328,7 +388,8 @@ function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ
     if (!ts) add("timestamp", "FAIL", "malformed sidecar");
     else if (unknownKeys(ts, TSR_SIDECAR_KEYS).length) add("timestamp", "FAIL", CLOSED_SIDECAR_MSG + cut(unknownKeys(ts, TSR_SIDECAR_KEYS).join(", "), 120));   // closed sidecar schema (2026-10-10)
     else if (ts.digest_sha256 !== sha256Hex(packBytes)) add("timestamp", "FAIL", "pack changed after stamping");
-    else if (typeof ts.tsr_b64 !== "string" || ts.tsr_b64 === "") add("timestamp", "SKIP", "no RFC 3161 token recorded (tsr_b64 missing, empty or not a string): nothing to verify");
+    else if (!derOneSequence(b64Canon(own(ts, "tsr_b64") ? ts.tsr_b64 : undefined))) add("timestamp", "FAIL", TSR_FORM_MSG);   // form before capability (Unreleased, the four): until 0.13.0 anything here was a SKIP
+    else if (own(ts, "validation_material") && vmProblem(ts.validation_material)) add("timestamp", "FAIL", "malformed sidecar: validation_material: " + vmProblem(ts.validation_material));
     else add("timestamp", "SKIP", "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
   } else add("timestamp", "SKIP", "no timestamp sidecar");
   // why: "" ordinarily; "unverified" = a signature is PRESENT with an algorithm unknown here (SKIP, said in the authenticity

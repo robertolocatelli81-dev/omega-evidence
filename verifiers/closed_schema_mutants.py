@@ -93,7 +93,7 @@ def make_sources(root):
         if tsr:
             dg = hashlib.sha256(open(p, "rb").read()).hexdigest()
             with open(p[:-5] + ".tsr.json", "w", encoding="utf-8") as f:
-                json.dump({"digest_sha256": dg, "tsa": "x", "tsr_b64": "AA==", "stamped_utc": "2026-10-11T00:00:00+00:00"}, f)
+                json.dump({"digest_sha256": dg, "tsa": "x", "tsr_b64": "MAMCAQA=", "stamped_utc": "2026-10-11T00:00:00+00:00"}, f)
         out[name] = d
     mk("signed-anchored", {"claim": "x", "n": 1})
     mk("signed-anchored-tsr", {"claim": "y", "u": "ünï ✓"}, tsr=True)
@@ -173,7 +173,7 @@ def m_sig_dup_key(rng, p, has_sig, has_tsr):
 
 def _tsr_write(p, extra, bad_digest=False):
     dg = hashlib.sha256(open(p, "rb").read()).hexdigest()
-    side = {"digest_sha256": ("0" * 64 if bad_digest else dg), "tsa": "x", "tsr_b64": "AA==", "stamped_utc": "2026-10-11T00:00:00+00:00"}
+    side = {"digest_sha256": ("0" * 64 if bad_digest else dg), "tsa": "x", "tsr_b64": "MAMCAQA=", "stamped_utc": "2026-10-11T00:00:00+00:00"}
     side.update(extra)
     with open(p[:-5] + ".tsr.json", "w", encoding="utf-8") as f:
         json.dump(side, f, ensure_ascii=False)
