@@ -79,7 +79,7 @@ import io
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ..ledger import loads_bounded
+from ..ledger import loads_bounded, read_input
 from ..canonical import _SAFE_INT          # ±(2^53-1): ONE integer bound for the whole package (0.10.0, PREREG 2)
 
 
@@ -1072,6 +1072,10 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
     if isinstance(gd0.get("recording_component_id"), str) and gd0.get("recording_mode") == "independent":
         recorders.add(gd0["recording_component_id"])
     session_independent = gd0.get("recording_mode") == "independent" or bool(recorders)
+    # The session's recorder (§5.2: one independent recorder): the genesis' recording_component_id when it is among the
+    # recorders, else the first in code point order. Chosen ONCE: it was a min() over all recorders for every record,
+    # quadratic in a chain whose records each name their own (measured 20/11/2026: 4000 records 4.13 s, 0.29 s with one)
+    session_recorder = min(recorders, key=lambda x: (x != gd0.get("recording_component_id"), x)) if recorders else None
     keys_given = keys is not None or pubkey_pem is not None
     prev_hashes_raw: List[bytes] = []
     for i, r in enumerate(records):
@@ -1179,9 +1183,9 @@ def verify_chain(records: List[Dict[str, Any]], pubkey_pem: Optional[bytes] = No
         if session_independent and "recording_component" in r and r["recording_component"] == r.get("agent_id"):
             problems.append({"i": i, "why": "independent recording declared but recording_component equals agent_id (§5.1/§5.2)"})
         if session_independent and len(recorders) > 1 and isinstance(r.get("recording_component"), str) \
-                and r["recording_component"] != min(recorders, key=lambda x: (x != gd0.get("recording_component_id"), x)):
+                and r["recording_component"] != session_recorder:
             problems.append({"i": i, "why": f"a second recording component in one session ({r['recording_component']!r}; the session's is "
-                                            f"{min(recorders, key=lambda x: (x != gd0.get('recording_component_id'), x))!r}) (§5.2: one independent recorder)"})
+                                            f"{session_recorder!r}) (§5.2: one independent recorder)"})
         if session_independent:
             if "signature" not in r:
                 problems.append({"i": i, "why": "independent recording: the recorder MUST sign every record with its own key (§5.2)"})
@@ -1721,13 +1725,18 @@ def _load_key_arg(spec: str) -> Tuple[str, Any]:
     if "=" not in spec:
         raise ValueError("--key expects kid=path")
     kid, path = spec.split("=", 1)
-    with open(path, "rb") as f:
-        data = f.read()
+    data = read_input(path)
     if data.lstrip().startswith(b"-----"):
         return kid, data
     if len(data) == 1952:
         return kid, data
     return kid, base64.b64decode(data.strip(), validate=True)
+
+
+def _text_of(data: bytes) -> str:
+    """The bytes of an input file as the text `open(path, encoding="utf-8").read()` gave: UTF-8, CR LF and CR read
+    as LF (universal newlines)."""
+    return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1738,7 +1747,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     RFC 3161 check that cannot be run here (openssl not started, no answer within the timeout, no temporary file) is
     exit 74 with one `receipt not written: cannot run openssl here: <reason>` line (`receipt not written: cannot write a
     temporary file for openssl: <reason>` without one) and nothing on stdout, never a verdict
-    on the chain (0.11.4; 0.11.3 reported the token as not verifying, exit 1)."""
+    on the chain (0.11.4; 0.11.3 reported the token as not verifying, exit 1).
+
+    Every input file (the chain, `--key`, `--pubkey`, `--epochs`) is read with `ledger.read_input`, the rule of the pack
+    verifier: a regular file only, opened without blocking, at most `ledger.MAX_INPUT_BYTES` (64 MiB), read once;
+    anything else is exit 2 with the reason. Until 0.12.0 this CLI read them with `open().read()`: a FIFO in place of
+    the chain blocked it and a file of any size was read whole (measured 20/11/2026). Line ends are read as before
+    (CR LF and CR are LF)."""
     from ..timestamp import CheckNotRun
     from ..verifier import EX_IOERR, CliParser, _say, write_receipt
 
@@ -1766,8 +1781,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     c.add_argument("chain")
     a = p.parse_args(argv)
     try:
-        with open(a.chain, encoding="utf-8") as f:
-            records = from_jsonl(f.read())
+        records = from_jsonl(_text_of(read_input(a.chain)))
     except (OSError, ValueError, UnicodeDecodeError) as ex:
         return emit(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"}) + "\n", 2)
     if a.cmd == "csv":
@@ -1776,8 +1790,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         keys = dict(_load_key_arg(k) for k in a.key)
         pub = None
         if a.pubkey:
-            with open(a.pubkey, "rb") as fk:
-                pub = fk.read()
+            pub = read_input(a.pubkey)
     except (OSError, ValueError) as ex:
         return emit(json.dumps({"ok": False, "error": f"{type(ex).__name__}: {ex}"}) + "\n", 2)
     try:
@@ -1789,8 +1802,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return emit(json.dumps({"ok": False, "error": f"verifier error: {type(ex).__name__}: {ex}"}) + "\n", 2)
     if a.epochs:
         try:
-            with open(a.epochs, encoding="utf-8") as f:
-                anchors = loads_bounded(f.read(), parse_constant=_no_constant)
+            anchors = loads_bounded(_text_of(read_input(a.epochs)), parse_constant=_no_constant)
             if not isinstance(anchors, list):
                 raise ValueError("epochs file must be a JSON array")
         except (OSError, ValueError, RecursionError) as ex:

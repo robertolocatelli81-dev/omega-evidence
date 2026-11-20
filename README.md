@@ -429,6 +429,31 @@ very function registered) the layer is reported present-but-unverifiable (never 
 
 0.12.0 was released on 19 November 2026; its changes are the three 0.12.0 sections below (18, 17 and 14 November).
 
+### Unreleased — three defects found on 0.12.0 by a security review tool, each reproduced before it was fixed (20 November 2026)
+
+Found on 20 November 2026 by running a security review tool on 0.12.0, not by an outside report. The same tool, run on
+a copy of 0.12.0 with a known defect put back (the weak-key check of Ed25519 reduced to a length check), did not find
+it: a point it does not raise is not shown to be sound. `tests/test_sentry_20261120.py` holds the tests of this section.
+
+**`aat.verify_chain` was quadratic in a chain whose records each name their own recorder.** The session's recorder
+(draft §5.2: one independent recorder; the genesis' `recording_component_id` when it is among the recorders, else the
+first in code point order) was chosen with a `min()` over all recorders for every record. Measured on this host with
+chains of 1000, 2000 and 4000 records, each naming its own `recording_component`: 0.30, 1.17 and 4.13 s on 0.12.0
+against 0.07, 0.14 and 0.29 s with one recorder; now 0.07, 0.14 and 0.27 s. It is chosen once; the verdict and every
+problem are the same: on 20 000 generated chains (13 601 with more than one recorder, 39 993 problems of this kind; none
+of the chains valid as a whole) the outputs of `verify_chain` before and after have the same SHA-256, and a copy that
+chooses the last recorder instead of the first gives another one (the control of the comparison).
+The `aat` CLI read its input files (the chain, `--key`, `--pubkey`, `--epochs`) with `open().read()`: a FIFO in place
+of any of them blocked it and a symlink to `/dev/zero` was read until memory ran out (measured). They now go through
+`ledger.read_input`, the rule of the pack verifier since 25 September 2026: a regular file only, opened without
+blocking, at most 64 MiB, read once; anything else is exit 2 with the reason. Line ends are read as before (CR LF and
+CR as LF). Declared: a chain can no longer be given as a pipe (`/dev/stdin`, `<(...)`).
+6 tests (3 000 generated chains checked against the rule computed record by record; `min` called at most once on 300
+records; a FIFO in each of the four inputs; a device and a directory; the bound and one byte less; the three line
+ends): 5 of the 6 fail on the previous commit, 3 by behaviour and 2 because they call a function that was not there.
+14 of 15 mutants on the changed lines killed; the 15th (no session recorder computed when there is only one) is
+equivalent: the value is read only when there are at least two.
+
 ### Unreleased — an AAT chain carrying an integer outside ±(2^53−1) verifies with a warning that names it (20 November 2026)
 
 `aat.verify_chain` and `aat.verify_epochs` read foreign chains the ES6 way: an integer outside ±(2^53−1) is hashed as
