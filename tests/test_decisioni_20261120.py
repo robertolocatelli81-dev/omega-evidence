@@ -323,6 +323,30 @@ class D3DsseKeyOfTheCaller(unittest.TestCase):
                 self.assertIn(r["identity_verified"], (True, False))
                 self.assertTrue(r["identity_verified"] is False or (r["verified"] is True and "public_key_b64" in kw))
 
+    def test_statement_members_are_read(self):
+        """fails on 404b60b: a Statement with only _type, a subject without digest, a predicateType that is not a string
+        were verified True; an OMEGA predicate that is not an object came back as `pack`"""
+        import base64 as b64
+        ok = {"_type": self.dsse.STATEMENT_TYPE, "subject": [{"name": "a", "digest": {"sha256": "00" * 32}}],
+              "predicateType": self.dsse.PREDICATE_TYPE, "predicate": {"k": 1}}
+
+        def check(st):
+            payload = json.dumps(st).encode()
+            env = {"payload": b64.b64encode(payload).decode(), "payloadType": self.dsse.PAYLOAD_TYPE,
+                   "signatures": [{"sig": self.ident.sign(self.dsse.pae(self.dsse.PAYLOAD_TYPE, payload))}]}
+            return self.dsse.from_dsse(env, public_key_b64=self.ident.public_key_b64)
+        r = check(ok)
+        self.assertEqual((r["verified"], r["pack"]), (True, {"k": 1}))                          # control
+        for bad in ({"subject": 7}, {"subject": [{"name": "x"}]}, {"subject": [{"digest": {}}]}, {"predicateType": 7},
+                    {"predicateType": ""}):
+            r = check(dict(ok, **bad))
+            self.assertIs(r["verified"], False, bad)
+        st = {k: v for k, v in ok.items() if k != "predicateType"}
+        self.assertIs(check(st)["verified"], False)
+        for pred in (7, [1], "x", None):
+            r = check(dict(ok, predicate=pred))
+            self.assertEqual((r["verified"], r["pack"]), (True, None), pred)
+
     def test_build_statement_recomputes_the_digest(self):
         """fails on 404b60b: a pack_sha3 naming another body was written into the signed subject"""
         other = P.build_pack("x", {"amount": "999"}, SCOPE)
@@ -351,6 +375,21 @@ class D4PreservationRecord(unittest.TestCase):
         r = PR.verify_evidence_record(rec, tsa_ca_file=self._ca(d))
         self.assertFalse(r["valid"])
         self.assertEqual(_layer(r, "time[0]-asserted")["status"], "FAIL")
+
+    def test_a_token_not_checkable_here_beside_a_trust_anchor_fails(self):
+        """fails on 404b60b: timestamp.verify answering verified None (no openssl) with tsa_ca_file gave SKIP, valid True"""
+        from unittest import mock
+        from omega_evidence import preservation as PR, timestamp as T
+        d = _tmp(self)
+        rec = PR.build_evidence_record([_pack(d, "p")])
+        rec["archive_timestamps"][0]["timestamp"] = {"time_source": "rfc3161", "tsa": "t", "tsr_b64": "MAMCAQA=",
+                                                     "stamped_utc": "2026-11-21T00:00:00+00:00"}
+        rec = PR._finalize(rec)
+        with mock.patch.object(T, "verify", return_value={"verified": None, "note": "openssl absent"}):
+            self.assertTrue(PR.verify_evidence_record(rec)["valid"])                       # control: SKIP without anchor
+            r = PR.verify_evidence_record(rec, tsa_ca_file=self._ca(d))
+        self.assertFalse(r["valid"])
+        self.assertEqual(_layer(r, "time[0]-rfc3161")["status"], "FAIL")
 
     def test_version_2_is_rfc6962(self):
         """fails on 404b60b: root[a,b,c] == root[a,b,c,c] and root[l1,l2] == root[H(l1||l2)]; new records are version 2"""
@@ -517,6 +556,8 @@ class D6ChipRegistryOrder(unittest.TestCase):
                 continue                                       # a value the strict profile does not write (2^53)
             r = reg.apply_signed_update(p, ts)
             self.assertFalse(r["applied"], nm)
+            if nm == "v1-kind":
+                self.assertIn("unsequenced update", r["reason"])
             self.assertFalse(reg.is_known("vendor-" + nm), nm)
         for bad in (0, -1, True, "1", 2 ** 53, None):
             with self.assertRaises((ValueError, TypeError)):
