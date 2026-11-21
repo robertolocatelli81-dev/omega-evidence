@@ -2524,7 +2524,7 @@ class NemesisInputsAndFaults(unittest.TestCase):
                         if field != "pq_sig_alg":   # a malformed PQ field fails its own layer; the classical signature still holds
                             self.assertFalse(r["authenticated"])
             # as produced: PASS (valid; not authenticated without a trust registry — Unreleased, Decision 1 of 20/11/2026)
-            p = self._signed(tmp); r = verify_pack(p); self.assertEqual((r["valid"], r["authenticated"]), (True, False))
+            p = self._signed(tmp, name="as-produced"); r = verify_pack(p); self.assertEqual((r["valid"], r["authenticated"]), (True, False))
             self.assertEqual(_layer_of(r, "producer-signature")["status"], "PASS")
             sp = p[:-5] + ".sig.json"; sd = json.load(open(sp)); sd.pop("fingerprint"); sd.pop("signed_utc"); json.dump(sd, open(sp, "w"))
             r = verify_pack(p); self.assertEqual(_layer_of(r, "producer-signature")["status"], "PASS")   # absent (legacy): PASS
