@@ -249,7 +249,7 @@ public class OeVerify {
         if (s == null || s.length() != ((n + 2) / 3) * 4 || !s.matches("[A-Za-z0-9+/]*={0,2}")) return null;
         try { byte[] raw = Base64.getDecoder().decode(s); return raw.length == n && Base64.getEncoder().encodeToString(raw).equals(s) ? raw : null; } catch (Exception e) { return null; }
     }
-    // The timestamp sidecar's form, judged without a trust anchor (Unreleased, the four verifiers): the same rules and texts
+    // The timestamp sidecar's form, judged without a trust anchor (0.14.0, the four verifiers): the same rules and texts
     // as omega_evidence/verifier.py (_b64_canon, _der_one_sequence, _vm_problem).
     static final String TSR_FORM_MSG = "malformed sidecar: tsr_b64 is not canonical base64 of one DER SEQUENCE (checked without a trust anchor)";
     static byte[] b64Canon(Object v) {
@@ -524,7 +524,7 @@ public class OeVerify {
     static Map<String, Object> verifyPackIn(List<Map<String, Object>> layers, String packPath, String ledgerPath, String trustStore, String expectedPQ, boolean requirePQ, boolean requireSigned) throws Exception {
         java.util.function.BiConsumer<String[], String> add = (ls, d) -> { Map<String, Object> m = new LinkedHashMap<>(); m.put("layer", ls[0]); m.put("status", ls[1]); m.put("detail", d); layers.add(m); };
         boolean required = requirePQ || !expectedPQ.isEmpty();
-        requireSigned = requireSigned || !trustStore.isEmpty();   // a trust registry asks for an identity: it requires a signature (Unreleased, the four)
+        requireSigned = requireSigned || !trustStore.isEmpty();   // a trust registry asks for an identity: it requires a signature (0.14.0, the four)
         Obj pack; byte[] packBytes;   // read ONCE: the timestamp binding hashes these bytes, not a second read
         try { packBytes = readInput(packPath); pack = objectOf(packBytes); } catch (Exception e) { add.accept(new String[]{"pack-json", "FAIL"}, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); return finish(layers, false, false, required); }
         add.accept(new String[]{"pack-json", "PASS"}, "");
@@ -557,7 +557,7 @@ public class OeVerify {
             if (ts == null) add.accept(new String[]{"timestamp", "FAIL"}, "malformed sidecar");
             else if (!unknownKeys(ts, TSR_SIDECAR_KEYS).isEmpty()) add.accept(new String[]{"timestamp", "FAIL"}, CLOSED_SIDECAR_MSG + cut(String.join(", ", unknownKeys(ts, TSR_SIDECAR_KEYS)), 120));   // closed sidecar schema (2026-10-10)
             else if (!sha("SHA-256", packBytes).equals(str(ts, "digest_sha256"))) add.accept(new String[]{"timestamp", "FAIL"}, "pack changed after stamping");
-            else if (!derOneSequence(b64Canon(ts.vals.get("tsr_b64")))) add.accept(new String[]{"timestamp", "FAIL"}, TSR_FORM_MSG);   // form before capability (Unreleased, the four): until 0.13.0 anything here was a SKIP
+            else if (!derOneSequence(b64Canon(ts.vals.get("tsr_b64")))) add.accept(new String[]{"timestamp", "FAIL"}, TSR_FORM_MSG);   // form before capability (0.14.0, the four): until 0.13.0 anything here was a SKIP
             else if (ts.vals.containsKey("validation_material") && !vmProblem(ts.vals.get("validation_material")).isEmpty()) add.accept(new String[]{"timestamp", "FAIL"}, "malformed sidecar: validation_material: " + vmProblem(ts.vals.get("validation_material")));
             else add.accept(new String[]{"timestamp", "SKIP"}, "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
         }
@@ -740,7 +740,7 @@ public class OeVerify {
         boolean passed = checked && valid && assessed && (!pqRequired || Boolean.TRUE.equals(pq));
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("valid", checked && valid); r.put("assessed", assessed); r.put("layers", layers);
-        r.put("authenticated", trusted && signed);   // Unreleased: trusted-signed only (until 0.13.0: trusted || signed)
+        r.put("authenticated", trusted && signed);   // 0.14.0: trusted-signed only (until 0.13.0: trusted || signed)
         r.put("pq_protected", pq);
         r.put("verdict", passed ? "PASS" : (assessed ? "FAIL" : "NOT_ASSESSED"));
         r.put("verifier", "OeVerify (Java, JDK stdlib)");

@@ -256,7 +256,7 @@ def from_dsse(envelope: Dict[str, Any],
     or `public_key_b64` (raw Ed25519 as before, or base64 DER) — Ed25519 or ECDSA P-256/SHA-256. DSSE (protocol.md,
     secure-systems-lab/dsse v1.0.2) verifies against the verifier's own acceptable keys, and the `keyid` an envelope
     carries "MUST NOT be used for security decisions"; the `publicKeyB64` that `to_dsse` writes is a key the envelope
-    carries, so without a caller key the envelope is NOT verified (Unreleased; until 0.13.0 it was verified with that
+    carries, so without a caller key the envelope is NOT verified (0.14.0; until 0.13.0 it was verified with that
     key, `verified: True` for an envelope anyone can make). `allow_embedded_key=True` asks for that check explicitly:
     integrity under the carried key, never identity. `identity_verified` is in every result: True only when a signature
     verified with the caller's key. `verified` is True only when one signature verifies; every other
@@ -266,7 +266,7 @@ def from_dsse(envelope: Dict[str, Any],
     other than `https://in-toto.io/Statement/v1` (in-toto docs/validation.md) or a member name twice in one object is
     `verified: False` with the reason; `pack` is the predicate only when `predicateType` is OMEGA's (PREDICATE_TYPE),
     else None — `statement` carries the rest (20/11/2026; until 0.13.0 none of the three was read). The other members
-    in-toto spec/v1/statement.md requires are read too (Unreleased): a `subject` that is not an array of objects each
+    in-toto spec/v1/statement.md requires are read too (0.14.0): a `subject` that is not an array of objects each
     carrying a `digest`, or a `predicateType` that is not a non-empty string, is `verified: False`; `pack` is None when
     the predicate is not an object."""
     def _fail(why):   # a malformed envelope is a verdict, never a traceback (audit V2 #5, 30/09/2026)

@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-// The timestamp sidecar's form, judged without a trust anchor (Unreleased, the four verifiers): tsr_b64 is canonical
+// The timestamp sidecar's form, judged without a trust anchor (0.14.0, the four verifiers): tsr_b64 is canonical
 // base64 of ONE DER SEQUENCE, and validation_material has the closed shape every release wrote. The same rules and the
 // same texts as omega_evidence/verifier.py (_b64_canon, _der_one_sequence, _vm_problem).
 

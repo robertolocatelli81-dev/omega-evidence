@@ -196,7 +196,7 @@ class TestValidityTimeOfRenewedTokens(unittest.TestCase):
         rec = self._record(["short_d", None], [1])
         self._wait_until(exp)
         res = PR.verify_evidence_record(rec, tsa_ca_file=self._p("ca.crt"))
-        self.assertEqual(self._time_layers(res), [("time[0]-rfc3161", "FAIL"), ("time[1]-asserted", "FAIL")], res)   # FAIL beside tsa_ca_file since Unreleased (Decision 4)
+        self.assertEqual(self._time_layers(res), [("time[0]-rfc3161", "FAIL"), ("time[1]-asserted", "FAIL")], res)   # FAIL beside tsa_ca_file since 0.14.0 (Decision 4)
 
     def test_asserted_between_two_tokens_keeps_the_later_trusted_time(self):
         exp = self._tsa("short_e", 4)
@@ -274,7 +274,7 @@ class TestValidityTimeOfRenewedTokens(unittest.TestCase):
             return real_verify(tok, digest, timeout=timeout, ca_file=ca_file, at_time=at_time)
         with mock.patch.object(T, "verify", skip_middle):
             got = self._time_layers(PR.verify_evidence_record(rec, tsa_ca_file=self._p("ca.crt")))
-        self.assertEqual(got, [("time[0]-rfc3161", "FAIL"), ("time[1]-rfc3161", "FAIL"), ("time[2]-rfc3161", "PASS")])   # FAIL beside tsa_ca_file since Unreleased (Decision 4)
+        self.assertEqual(got, [("time[0]-rfc3161", "FAIL"), ("time[1]-rfc3161", "FAIL"), ("time[2]-rfc3161", "PASS")])   # FAIL beside tsa_ca_file since 0.14.0 (Decision 4)
 
     def test_token_over_other_data_lends_no_time(self):
         """A timestamp renewal is checked over its prev_binding: an extra merkle_root naming the data of a foreign token
@@ -471,7 +471,7 @@ class TestSinglePackReason(unittest.TestCase):
             with open(p, "wb") as f:
                 f.write(b"{}")
             with open(os.path.join(d, "p.tsr.json"), "w") as f:
-                json.dump({"digest_sha256": hashlib.sha256(b"{}").hexdigest(), "tsa": "t", "tsr_b64": "MAMCAQA="}, f)   # one DER SEQUENCE: the form passes (Unreleased), openssl decides
+                json.dump({"digest_sha256": hashlib.sha256(b"{}").hexdigest(), "tsa": "t", "tsr_b64": "MAMCAQA="}, f)   # one DER SEQUENCE: the form passes (0.14.0), openssl decides
             for ret, status, has in (({"verified": False, "reason": "certificate has expired"}, "FAIL", True),
                                      ({"verified": True, "reason": "certificate has expired"}, "PASS", False)):
                 layers = []

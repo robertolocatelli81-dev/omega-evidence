@@ -490,7 +490,7 @@ class TestCryptoAgility(unittest.TestCase):
             sp = pp[:-5] + ".sig.json"
             side = json.loads(Path(sp).read_text()); side["sig_alg"] = "martian-sig"
             Path(sp).write_text(json.dumps(side))
-            # Unreleased (Decision 1, 20/11/2026): a trust store requires a signature, so beside one this is a FAIL
+            # 0.14.0 (Decision 1, 20/11/2026): a trust store requires a signature, so beside one this is a FAIL
             st = verify_pack(pp, trust_store=store)
             self.assertFalse(st["valid"]); self.assertEqual(_layer_of(st, "producer-signature")["status"], "FAIL")
             v = verify_pack(pp)
@@ -807,7 +807,7 @@ class TestLTVValidationMaterial(unittest.TestCase):
                                                 "ref; NOT a conformity assessment"))
             from omega_evidence.canonical import sha256_bytes
             side = {"digest_sha256": sha256_bytes(Path(pp).read_bytes()),
-                    "tsa": "http://tsa.example", "tsr_b64": "MAMCAQA=",   # one DER SEQUENCE: the form is judged (Unreleased)
+                    "tsa": "http://tsa.example", "tsr_b64": "MAMCAQA=",   # one DER SEQUENCE: the form is judged (0.14.0)
                     "validation_material": {"available": True, "certs_der_b64": ["MAMCAQA="] * 3, "cert_count": 3,
                                             "subjects": [], "crl_distribution_points": [],
                                             "crls_b64": [{"url": "u", "crl_b64": "AAAA", "bytes": 3}]}}
@@ -916,7 +916,7 @@ class TestNemesisRegressions(unittest.TestCase):
             # review r3: LTV material typed (an int was a TypeError traceback); scope regexes ASCII like the three
             pp, lp = anchored("vm"); dg = hashlib.sha256(Path(pp).read_bytes()).hexdigest()
             Path(pp[:-5] + ".tsr.json").write_text('{"digest_sha256": "%s", "tsa": "x", "tsr_b64": "MAMCAQA=", "validation_material": {"available": true, "crls_b64": 1}}' % dg, encoding="utf-8")
-            r = verify_pack(pp); self.assertFalse(r["valid"])   # a verdict, never a TypeError: FAIL since Unreleased (Decision 2:
+            r = verify_pack(pp); self.assertFalse(r["valid"])   # a verdict, never a TypeError: FAIL since 0.14.0 (Decision 2:
             self.assertIn("validation_material", [l for l in r["layers"] if l["layer"] == "rfc3161"][0]["detail"])   # closed material)
             self.assertTrue(pack._honest_scope_declares_limit("does NOT\u00e9 prove x"))          # ASCII \b: boundary before é
             self.assertTrue(pack._honest_scope_declares_limit("fully cert\u0131fied; does NOT prove x"))   # ı is not i in ASCII folding
@@ -2523,7 +2523,7 @@ class NemesisInputsAndFaults(unittest.TestCase):
                         self.assertFalse(r["valid"])
                         if field != "pq_sig_alg":   # a malformed PQ field fails its own layer; the classical signature still holds
                             self.assertFalse(r["authenticated"])
-            # as produced: PASS (valid; not authenticated without a trust registry — Unreleased, Decision 1 of 20/11/2026)
+            # as produced: PASS (valid; not authenticated without a trust registry — 0.14.0, Decision 1 of 20/11/2026)
             p = self._signed(tmp, name="as-produced"); r = verify_pack(p); self.assertEqual((r["valid"], r["authenticated"]), (True, False))
             self.assertEqual(_layer_of(r, "producer-signature")["status"], "PASS")
             sp = p[:-5] + ".sig.json"; sd = json.load(open(sp)); sd.pop("fingerprint"); sd.pop("signed_utc"); json.dump(sd, open(sp, "w"))
@@ -2804,7 +2804,7 @@ class TestSigAlg20260929(unittest.TestCase):
             good = self._pack(tmp, "g", "ed25519"); legacy = self._pack(tmp, "l", None)
             for p in (good, legacy):                                        # a verified signature satisfies the requirement
                 v = verify_pack(p, require_signed=True); self.assertTrue(v["valid"])
-                self.assertFalse(v["authenticated"])                        # no registry: not an identity (Unreleased, Decision 1)
+                self.assertFalse(v["authenticated"])                        # no registry: not an identity (0.14.0, Decision 1)
             unknown = self._pack(tmp, "u", "rsa-pss"); v = verify_pack(unknown, require_signed=True)
             self.assertFalse(v["valid"]); self.assertFalse(v["authenticated"])
             ly = self._layer(v, "producer-signature")

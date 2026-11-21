@@ -18,10 +18,10 @@ but do not derive from, this toolkit.
 
 ```bash
 # from PyPI (since 0.11.4, uploaded from the GitHub Release by Trusted Publishing, PEP 740 attestations)
-pip install omega-evidence==0.13.0
+pip install omega-evidence==0.14.0
 
 # or straight from the tagged source
-pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.13.0
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.14.0
 ```
 
 Release artifacts (`.whl` / `.tar.gz`) are attached to each
@@ -58,7 +58,7 @@ anchored        valid ledger chain (integrity/time) — an RFC 3161 token is    
 none            internal consistency only  →  rejected, cannot authenticate     authenticated: false
 ```
 
-Rule (Unreleased, the same in the four verifiers):
+Rule (0.14.0, the same in the four verifiers):
 
 - `authenticated` is true only for `trusted-signed`: a valid signature, the pack body matching `pack_sha3`, and a
   trust registry that binds this `signer_id` to this key and has not revoked it. `signer_id` is a label in the
@@ -342,7 +342,7 @@ so the named layer decides (except `non-utf8` and `ledger-raw-byte-in-key`, whic
 pack verdict: `verify_pack` checks the sidecar's shape and its digest→pack binding and reports the layer as SKIP with the
 reason (round 6: the earlier sentence "verified by the Python reference only" was not true of the code — no trust
 anchor reaches `verify_pack`); the cryptographic check exists as `timestamp.verify(tsr_b64, digest, ca_file=<TSA roots>)`
-for the operator. What needs no trust anchor is judged (Unreleased, the same rule and text in the four): `tsr_b64` must be
+for the operator. What needs no trust anchor is judged (0.14.0, the same rule and text in the four): `tsr_b64` must be
 canonical standard base64 (RFC 4648 §4, re-encoding gives the same text) of exactly one DER SEQUENCE (tag 0x30, a
 definite length in its shortest form of at most four octets, nothing after it — a TimeStampResp is one), and
 `validation_material`, when present, is closed: `available` (boolean); `note` (string); `tsa_transport` (`http` or
@@ -399,7 +399,7 @@ unless the caller's policy says otherwise. The claims SD-JWT VC -27 §2.2.2.3 ke
 `exp`, `cnf`, `vct`, `vct#integrity`, `aka_vcts`, `status`, and their subclaims) are refused in a presented Disclosure,
 and `issue()` does not write one; a Disclosure the holder withholds is invisible to any verifier, so with a credential
 from an issuer that put `cnf` or `exp` in one, only `require_key_binding=True`, or `expected_aud` / `expected_nonce`
-given (Unreleased), makes Key Binding certain.
+given (0.14.0), makes Key Binding certain.
 Not covered: the issuer's key resolution from the `x5c` chain that HAIP
 1.0 §6.1.1 mandates (the caller supplies the issuer key), the SD-JWT VC claims `vct` and `status`, and eIDAS
 qualification. So this is not a complete EUDI / HAIP verifier. PII-free by design
@@ -440,7 +440,7 @@ registry, and only when the classical key that signed is the registered one) and
 when absent, foreign, malformed or invalid — and also when the layer was required (`require_pq`, or a pinned key)
 and could not be confirmed: a required layer that is stripped, foreign or unverifiable is a FAIL, never null. A
 downgrade to Ed25519-only is refused by the relying party's requirement, not by the file. `authenticated` is
-true only for the `trusted-signed` tier (Unreleased; until 0.13.0, without a trust store, it said only that the producer
+true only for the `trusted-signed` tier (0.14.0; until 0.13.0, without a trust store, it said only that the producer
 signature verifies with the key in the sidecar): never for a signer the given trust store revokes or does not trust,
 never without a trust store, nor when the body no longer matches `pack_sha3` (a signed identity over
 content that was changed afterwards is not authenticated content). Re-establishing a revoked signer with `rotate` must
@@ -451,7 +451,9 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
-### Unreleased — five defects still present in 0.13.0, found on 0.12.0 by two review benches (20 November 2026)
+0.14.0 was released on 21 November 2026; its changes are the two 0.14.0 sections below (both of 20 November).
+
+### 0.14.0 — five defects still present in 0.13.0, found on 0.12.0 by two review benches (20 November 2026)
 
 Each was reproduced on 0.12.0 and on 0.13.0 before it was fixed; `tests/test_banchi_20261120.py` holds the tests (on
 0.13.0 the 16 tests that name a defect fail, the 8 that hold what must not change pass).
@@ -485,7 +487,7 @@ Each was reproduced on 0.12.0 and on 0.13.0 before it was fixed; `tests/test_ban
   and the pin never compared). The RFC 3339 pattern took any Unicode decimal digit (`２０２６-…`): RFC 3339 DIGIT is
   `%x30-39`; record timestamps, `deleted_at`, `checked_at` and `anchored_at` now refuse the others.
 
-### Unreleased — six behaviours 0.13.0 documented and the same review benches flagged, decided and changed (20 November 2026)
+### 0.14.0 — six behaviours 0.13.0 documented and the same review benches flagged, decided and changed (20 November 2026)
 
 Each was measured on 404b60b (the branch before these changes) and reproduced before it was changed;
 `tests/test_decisioni_20261120.py` holds the tests (those that name the old behaviour fail on 404b60b). Verdicts change.
@@ -1489,7 +1491,7 @@ p95: 518 → 694 µs); the per-run maxima by up to 71 %. Read the p95 / p99 colu
   order as the effect; the sync mode is bound by fsync and unaffected within noise.
 - **Fuzz (`tests/fuzz_toolkit.py`, stdlib, seeded)**: byte, JSON-structure, ledger-line and `sig_alg` mutations of four
   valid cases (anchored, signed, full, stamped) against `verify_pack` (plain and with `require_signed=True`) and the
-  library API. The CI smoke job, seed 20260928, 3 000 iterations, measured on 20/11/2026 on this branch (Unreleased): 0
+  library API. The CI smoke job, seed 20260928, 3 000 iterations, measured on 20/11/2026 on this branch (0.14.0): 0
   violations, 499 PASS / 2 501 FAIL, the same verdict sequence (SHA-256 `910b4635…`) on CPython 3.9.25, 3.11.2, 3.13.15
   and 3.14.8 (on 404b60b, before the six decisions below: 516 PASS / 2 484 FAIL, `0ec89796…`; on 29/09/2026: 545 /
   2 455, `2698f366…`). Positive controls on the same seed, one check of the verifier disabled at a time, measured on

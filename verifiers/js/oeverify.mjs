@@ -174,7 +174,7 @@ const CLOSED_SIDECAR_MSG = "malformed sidecar: field(s) outside the closed schem
 // the object's keys outside `allowed`, sorted by code point (Python sorted()); a LIST, so the empty key "" counts as unknown too
 export const unknownKeys = (o, allowed) => Object.keys(o).filter((k) => !allowed.has(k)).sort(cmp);
 const cut = (s, n) => [...s].slice(0, n).join("");
-// The timestamp sidecar's form, judged without a trust anchor (Unreleased, the four verifiers): the same rules and texts as
+// The timestamp sidecar's form, judged without a trust anchor (0.14.0, the four verifiers): the same rules and texts as
 // omega_evidence/verifier.py (_b64_canon, _der_one_sequence, _vm_problem).
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -362,7 +362,7 @@ export function verifyPack(packPath, opts = {}) {
 function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ = "", requirePQ = false, requireSigned = false } = {}) {
   const add = (layer, status, detail = "", assessed = true) => layers.push(assessed ? { layer, status, detail } : { layer, status, detail, assessed });
   const required = requirePQ || Boolean(expectPQ);
-  requireSigned = requireSigned || Boolean(trustStore);   // a trust registry asks for an identity: it requires a signature (Unreleased, the four)
+  requireSigned = requireSigned || Boolean(trustStore);   // a trust registry asks for an identity: it requires a signature (0.14.0, the four)
   let pack, packBytes;   // read ONCE; the timestamp binding hashes these bytes, not a second read
   try { packBytes = readInput(packPath); pack = objectOf(UTF8.decode(packBytes)); } catch (e) { add("pack-json", "FAIL", e.message); return finish(layers, false, false, required); }
   add("pack-json", "PASS");
@@ -388,7 +388,7 @@ function verifyPackIn(layers, packPath, { ledger = "", trustStore = "", expectPQ
     if (!ts) add("timestamp", "FAIL", "malformed sidecar");
     else if (unknownKeys(ts, TSR_SIDECAR_KEYS).length) add("timestamp", "FAIL", CLOSED_SIDECAR_MSG + cut(unknownKeys(ts, TSR_SIDECAR_KEYS).join(", "), 120));   // closed sidecar schema (2026-10-10)
     else if (ts.digest_sha256 !== sha256Hex(packBytes)) add("timestamp", "FAIL", "pack changed after stamping");
-    else if (!derOneSequence(b64Canon(own(ts, "tsr_b64") ? ts.tsr_b64 : undefined))) add("timestamp", "FAIL", TSR_FORM_MSG);   // form before capability (Unreleased, the four): until 0.13.0 anything here was a SKIP
+    else if (!derOneSequence(b64Canon(own(ts, "tsr_b64") ? ts.tsr_b64 : undefined))) add("timestamp", "FAIL", TSR_FORM_MSG);   // form before capability (0.14.0, the four): until 0.13.0 anything here was a SKIP
     else if (own(ts, "validation_material") && vmProblem(ts.validation_material)) add("timestamp", "FAIL", "malformed sidecar: validation_material: " + vmProblem(ts.validation_material));
     else add("timestamp", "SKIP", "RFC 3161 token present and bound to the pack: not verified by any of the four verifiers (no trust anchor); the cryptographic check is timestamp.verify(..., ca_file=) for the operator");
   } else add("timestamp", "SKIP", "no timestamp sidecar");
@@ -519,7 +519,7 @@ function finish(layers, trusted, signed, pqRequired) {
   const absent = layers.some((l) => l.assessed === false);
   const assessed = judged || !absent;                 // FAIL > NOT_ASSESSED > PASS, SKIP included
   const passed = valid && assessed && (!pqRequired || pq === true);
-  return { valid, assessed, layers, authenticated: trusted && signed && integrity /* Unreleased: trusted-signed only (until 0.13.0: trusted || signed) */, pq_protected: pq, verdict: passed ? "PASS" : (assessed ? "FAIL" : "NOT_ASSESSED"), verifier: "oeverify.mjs (Node stdlib; ML-DSA-65 " + (MLDSA_SUPPORTED ? "verified through OpenSSL >= 3.5" : "not verifiable on this Node") + ")" };
+  return { valid, assessed, layers, authenticated: trusted && signed && integrity /* 0.14.0: trusted-signed only (until 0.13.0: trusted || signed) */, pq_protected: pq, verdict: passed ? "PASS" : (assessed ? "FAIL" : "NOT_ASSESSED"), verifier: "oeverify.mjs (Node stdlib; ML-DSA-65 " + (MLDSA_SUPPORTED ? "verified through OpenSSL >= 3.5" : "not verifiable on this Node") + ")" };
 }
 
 function main(argv) {

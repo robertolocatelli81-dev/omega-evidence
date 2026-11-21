@@ -35,7 +35,7 @@ class TestClosedSchema(unittest.TestCase):
     def test_intact_is_valid_and_reports_body_keys(self):
         r = VF.verify_pack(self.path, self.led)
         self.assertTrue(r["valid"]); self.assertEqual(self.layers(r)["producer-signature"]["status"], "PASS")
-        self.assertFalse(r["authenticated"])   # no trust registry: not an identity (Unreleased, Decision 1 of 20/11/2026)
+        self.assertFalse(r["authenticated"])   # no trust registry: not an identity (0.14.0, Decision 1 of 20/11/2026)
         pf = self.layers(r)["pack-fields"]
         self.assertEqual(pf["status"], "SKIP"); self.assertIn("records", pf["detail"]); self.assertIn("subject", pf["detail"])
 

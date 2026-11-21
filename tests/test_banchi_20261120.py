@@ -88,7 +88,7 @@ class TestSignAndAnchorTheBodysDigest(unittest.TestCase):
         e = P.anchor_pack(p, os.path.join(d, "a.ledger.jsonl"))
         digest = _rj(p)["pack_sha3"]
         self.assertEqual((side["signed_pack_sha3"], e["anchored_pack_sha3"]), (digest, digest))
-        r = verify_pack(p)   # signed and anchored: PASS; `authenticated` needs a trust registry (Unreleased, Decision 1)
+        r = verify_pack(p)   # signed and anchored: PASS; `authenticated` needs a trust registry (0.14.0, Decision 1)
         self.assertEqual((r["valid"], next(ly for ly in r["layers"] if ly["layer"] == "producer-signature")["status"]), (True, "PASS"))
 
     def test_declared_digest_of_another_pack_is_neither_signed_nor_anchored(self):
@@ -142,7 +142,7 @@ class TestSignAndAnchorTheBodysDigest(unittest.TestCase):
         _wt(p, json.dumps(body))
         self.assertEqual(_layer(verify_pack(p), "pack-sha3")["status"], "PASS")
         P.sign_pack(p, Identity("producer"))
-        r = verify_pack(p)   # signed and anchored: PASS; `authenticated` needs a trust registry (Unreleased, Decision 1)
+        r = verify_pack(p)   # signed and anchored: PASS; `authenticated` needs a trust registry (0.14.0, Decision 1)
         self.assertEqual((r["valid"], next(ly for ly in r["layers"] if ly["layer"] == "producer-signature")["status"]), (True, "PASS"))
 
     def test_a_pack_the_verifier_refuses_to_read_is_not_signed(self):

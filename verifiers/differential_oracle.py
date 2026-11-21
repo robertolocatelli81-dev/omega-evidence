@@ -69,7 +69,7 @@ CASE_ENV = {}   # name -> extra environment (the internal-error injection hook)
 HAZARD = set()  # names whose input used to block or exhaust memory: run with a memory cap (prlimit) and a short timeout
 DETAILS = {}    # name -> {verifier command: {layer: (status, detail)}} — every layer, the RFC 3161 one under its Go/Java/Node name `timestamp`
 DETAIL_LAYERS = ("producer-signature", "authenticity")   # compared on the sig-alg- cases (29/09/2026)
-EXPECT_AUTH = {}   # name -> the `authenticated` EVERY verifier must give (Unreleased: true for trusted-signed only)
+EXPECT_AUTH = {}   # name -> the `authenticated` EVERY verifier must give (0.14.0: true for trusted-signed only)
 COMPARE_LAYERS = {}   # name -> layers whose (status, detail) must be one in the four (11/10/2026: the closed-schema cases)
 
 
@@ -445,7 +445,7 @@ def _sigalg_cases(d, cases, mk, idt, store):
         p = anchored_signed(f"sigalg-unknown-{nm}", alg)
         cases[f"sig-alg-unknown-{nm}-anchored"] = (p, [], None); EXPECT[f"sig-alg-unknown-{nm}-anchored"] = "PASS"
         cases[f"sig-alg-unknown-{nm}-required-signed"] = (p, ["--require-signed"], None); EXPECT[f"sig-alg-unknown-{nm}-required-signed"] = "FAIL"
-    # Unreleased (Decision 1 of 20/11/2026): `authenticated` is trusted-signed only, and a trust store requires a signature
+    # 0.14.0 (Decision 1 of 20/11/2026): `authenticated` is trusted-signed only, and a trust store requires a signature
     # (no sidecar, or an algorithm that cannot be checked here: FAIL, as --require-signed). Measured before: exit 0 for both.
     s, a, store = cases["signed"][0], cases["anchored"][0], cases["signed-trusted"][1][1]
     cases["d1-signed-no-store"] = (s, [], None); EXPECT["d1-signed-no-store"] = "PASS"; EXPECT_AUTH["d1-signed-no-store"] = False
@@ -511,7 +511,7 @@ def _closed_schema_cases(d, cases, mk, idt):
     COMPARE_LAYERS["closed-tsr-unknown-key"] = ("timestamp",)
     p = signed_anchored("closed-tsr-known-keys"); tsr(p, {"validation_material": {"available": False}}); cases["closed-tsr-known-keys"] = (p, [], None)
     EXPECT["closed-tsr-known-keys"] = "PASS"   # positive control: every key of the closed list, the verdict of the signed, anchored pack
-    # Unreleased (Decision 2 of 20/11/2026): the token's FORM (canonical base64 of one DER SEQUENCE) and a closed
+    # 0.14.0 (Decision 2 of 20/11/2026): the token's FORM (canonical base64 of one DER SEQUENCE) and a closed
     # validation_material, judged without a trust anchor, FAIL in the four with one text. Measured before: SKIP, exit 0.
     import base64 as _b64m
     def der(n, extra=b""):

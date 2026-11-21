@@ -400,14 +400,14 @@ class TestChipRegistryAppliesTheBytesItVerified(unittest.TestCase):
             pack.anchor_pack(up, up[:-5] + ".ledger.jsonl")
             r = reg.apply_signed_update(up, store)
             self.assertEqual((r["applied"], r["reason"]), (False, "update is not trusted-signed"), r)
-            # Unreleased (Decision 1): the trust store requires a signature, so the unsigned anchored update is a FAIL
+            # 0.14.0 (Decision 1): the trust store requires a signature, so the unsigned anchored update is a FAIL
             self.assertIn("required but absent", r["authenticity"])
             anybody = os.path.join(tmp, "anybody.json")
             chip_registry.publish_signed_update(anybody, {self.FUTURE: "x"}, signing.Identity("anybody"), update_seq=1)
             for no_store in ("", None):
                 r = reg.apply_signed_update(anybody, no_store)
                 self.assertEqual((r["applied"], r["reason"]), (False, "update is not trusted-signed"), r)
-                self.assertIn("NOT checked against a registry", r["authenticity"])   # wording of Unreleased (Decision 1)
+                self.assertIn("NOT checked against a registry", r["authenticity"])   # wording of 0.14.0 (Decision 1)
             self.assertFalse(reg.is_known(self.FUTURE))
             other = os.path.join(tmp, "other.json")
             chip_registry.write_pack(other, chip_registry.build_pack("something_else", {"chip_classes": {self.FUTURE: "x"}},

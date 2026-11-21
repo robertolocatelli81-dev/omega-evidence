@@ -88,7 +88,7 @@ class TestKeyBinding(unittest.TestCase):
         self.assertEqual((r["verified"], r["key_binding"]), (True, "not_required"))
         r = sdjwt.verify(self.kb(self.sd(cnf=False)), self.ipub, now=NOW)   # a KB-JWT nobody asked for (no aud/nonce)
         self.assertIs(r["verified"], False); self.assertIn("not accepted unchecked", r["error"])
-        r = self.v(self.kb(self.sd(cnf=False)))   # aud/nonce given ask for Key Binding (Unreleased, Decision 5): no cnf.jwk
+        r = self.v(self.kb(self.sd(cnf=False)))   # aud/nonce given ask for Key Binding (0.14.0, Decision 5): no cnf.jwk
         self.assertIs(r["verified"], False); self.assertIn("cnf.jwk", r["error"])
         r = self.v(self.kb(self.sd(cnf=False)), require_key_binding=True)   # required, no cnf.jwk: no holder key
         self.assertIs(r["verified"], False); self.assertIn("cnf.jwk", r["error"])
@@ -169,7 +169,7 @@ class TestKeyBinding(unittest.TestCase):
             withheld = jws + "~" + "".join(d + "~" for d in kept)
             r = sdjwt.verify(withheld, self.ipub, now=NOW)              # invisible to a verifier with no policy (README)
             self.assertIs(r["verified"], True, (name, r))
-            if name == "cnf":   # a caller that gives aud/nonce asks for Key Binding (Unreleased, Decision 5): refused
+            if name == "cnf":   # a caller that gives aud/nonce asks for Key Binding (0.14.0, Decision 5): refused
                 self.assertIs(self.v(withheld)["verified"], False)
         nested = E.token(self.issuer, E.H, plain={"iss": "https://issuer.example", "vct": "urn:eudi:pid:1",
                                                   "cnf": {"_sd": ["x" * 43]}})
@@ -188,7 +188,7 @@ class TestKeyBinding(unittest.TestCase):
         d = sdjwt._disclosure("salt-n", "exp", NOW - 1)                 # "exp" as the name of a nested claim: not the JWT's
         tok = E.token(self.issuer, E.H, plain={"iss": "https://issuer.example", "vct": "urn:eudi:pid:1",
                                                "card": {"_sd": [sdjwt._digest(d)]}}) + d + "~"
-        r = sdjwt.verify(tok, self.ipub, now=NOW)   # no aud/nonce: they would ask for Key Binding (Unreleased, Decision 5)
+        r = sdjwt.verify(tok, self.ipub, now=NOW)   # no aud/nonce: they would ask for Key Binding (0.14.0, Decision 5)
         self.assertIs(r["verified"], True, r); self.assertEqual(r["plain_claims"]["card"], {"_sd": [sdjwt._digest(d)]})
         other = {"alg": "ES256", "typ": "example+sd-jwt"}               # another SD-JWT type: RFC 9901 alone, allowed
         tok = E.token(self.issuer, other, claims={"given_name": "Ada", "exp": NOW + 3600})

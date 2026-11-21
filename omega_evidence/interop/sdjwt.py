@@ -282,7 +282,7 @@ def verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float] = None,
     Key Binding (RFC 9901 §4.3, §7.3; 0.12.0): `require_key_binding` is the verifier's policy (§7.3 step 1: never decided
     by whether a KB-JWT came). None, the default, means: required when the processed payload carries `cnf` (OpenID4VC
     HAIP 1.0 §6.1.1.1: a credential with holder binding is presented with a KB-JWT) or when the caller gives
-    `expected_aud` or `expected_nonce` (Unreleased: the caller's policy asks for a check they only make sense in), not
+    `expected_aud` or `expected_nonce` (0.14.0: the caller's policy asks for a check they only make sense in), not
     required otherwise; with the
     SD-JWT VC `typ`, a presented Disclosure of a claim SD-JWT VC -27 §2.2.2.3 keeps in clear (SD_JWT_VC_IN_CLEAR: cnf,
     exp, nbf, ...) or of one of their subclaims is a reject, and one the holder withholds cannot be seen here. Required
@@ -471,7 +471,7 @@ def _verify(sdjwt: str, issuer_public_key_b64: Any, now: Optional[float], expect
                 raise _Reject(f"{claim} is not a finite number")   # 1e400 parses to inf: a token that would never expire
             if bad(v):
                 raise _Reject(f"{claim} check failed (step 6)")
-    # §7.3 step 1 (the verifier's policy, never whether a KB-JWT came), HAIP §6.1.1.1. Unreleased (Decision 5): with
+    # §7.3 step 1 (the verifier's policy, never whether a KB-JWT came), HAIP §6.1.1.1. 0.14.0 (Decision 5): with
     # require_key_binding=None, an expected_aud or expected_nonce given is the caller's policy asking for Key Binding, so
     # it is required (until 0.13.0 both were ignored on a credential without cnf: verified True, "not_required")
     asked = kbp["aud"] is not None or kbp["nonce"] is not None

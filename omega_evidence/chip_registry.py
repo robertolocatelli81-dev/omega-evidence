@@ -38,7 +38,7 @@ Immutable safety rules a feed can NEVER bend, no matter who signs it:
     a signed update only supplies the class→service *mapping*, it can never
     declare something trustworthy.
 
-Replay (Unreleased): the update pack carries `update_seq`, an integer from 1 to 2^53-1 inside the signed body, and the
+Replay (0.14.0): the update pack carries `update_seq`, an integer from 1 to 2^53-1 inside the signed body, and the
 kind is `chip_attestation_registry_update_v2`. A registry applies an update only when its `update_seq` is greater than
 the last one it applied from the same signing key (`last_seq()`, keyed by the `public_key_b64` that verified; give it
 back to `ChipRegistry(last_seq=...)` to keep the order across restarts). The order is kept per key, not per `signer_id`:
@@ -85,7 +85,7 @@ _BASELINE: Dict[str, str] = {
 }
 # Never promotable to a trusted class — immutable, whatever a feed claims.
 UNTRUSTED_CLASSES = frozenset({"self-asserted", "none"})
-UPDATE_KIND = "chip_attestation_registry_update_v2"     # carries update_seq (Unreleased)
+UPDATE_KIND = "chip_attestation_registry_update_v2"     # carries update_seq (0.14.0)
 UPDATE_KIND_V1 = "chip_attestation_registry_update"     # no sequence: refused, a replay cannot be told from it
 MAX_UPDATE_SEQ = 2 ** 53 - 1                            # the portable integer bound of the strict JSON profile
 

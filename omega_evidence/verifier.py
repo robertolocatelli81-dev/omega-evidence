@@ -35,7 +35,7 @@ A signature sidecar whose `sig_alg` is a non-canonical spelling of a supported n
   falls to the tier its other layers earn, and both the producer-signature and the authenticity layer say that a
   signature is present and was not verified. `require_signed` makes either a FAIL (fail-closed).
 
-`authenticated` is true only for trusted-signed (Unreleased; until 0.13.0 also for signed). A `trust_store` given
+`authenticated` is true only for trusted-signed (0.14.0; until 0.13.0 also for signed). A `trust_store` given
   requires a signature, as `require_signed` does: no sidecar, or an algorithm this verifier cannot check, is FAIL.
 
 A bare fabricated pack (no ledger, no signature) cannot pass. A SELF-MADE ledger anchor,
@@ -227,7 +227,7 @@ def _der_one_sequence(b: bytes) -> bool:
     return head + n == len(b)
 
 
-# validation_material (Unreleased, the four): the keys extract_validation_material and stamp_pack have written in
+# validation_material (0.14.0, the four): the keys extract_validation_material and stamp_pack have written in
 # every release (0.5.0 … 0.13.0, read from each tag's timestamp.py and pack.py), each with its type; anything else FAIL
 VM_KEYS = frozenset({"available", "note", "tsa_transport", "certs_der_b64", "cert_count", "subjects",
                      "crl_distribution_points", "crls_b64", "crl_fetch", "token_verified"})
@@ -322,14 +322,14 @@ def _check_timestamp(path: str, layers: List, pack_bytes: Optional[bytes] = None
     if current != side.get("digest_sha256"):
         layers.append(_layer("rfc3161", "FAIL", "pack changed after stamping"))
         return "FAIL"
-    # FORM BEFORE CAPABILITY (Unreleased, the four): the token is not verified here (no trust anchor reaches verify_pack),
+    # FORM BEFORE CAPABILITY (0.14.0, the four): the token is not verified here (no trust anchor reaches verify_pack),
     # but whether it is a token at all is visible without one — canonical base64 of one DER SEQUENCE (a TimeStampResp).
     # Until 0.13.0 any text, or none, was a SKIP "token recorded" (measured 20/11/2026: "not a token at all!!")
     if not _der_one_sequence(_b64_canon(side.get("tsr_b64")) or b""):
         layers.append(_layer("rfc3161", "FAIL", TSR_FORM_MSG))
         return "FAIL"
     vm_why = _vm_problem(side["validation_material"]) if "validation_material" in side else ""
-    if vm_why:   # Unreleased: a closed schema (until 0.13.0 any object was read and its cert_count printed as found)
+    if vm_why:   # 0.14.0: a closed schema (until 0.13.0 any object was read and its cert_count printed as found)
         layers.append(_layer("rfc3161", "FAIL", "malformed sidecar: validation_material: " + vm_why))
         return "FAIL"
     from .timestamp import verify
@@ -445,7 +445,7 @@ def _check_signature_and_trust(path: str, trust_store: Optional[str], layers: Li
     downgrade to "anchored"); "required" when `require_signed` was not met (no sidecar, or a signature that could not
     be verified) — then the layer is FAIL, fail-closed, like a required post-quantum layer."""
     sig_side = path[:-5] + ".sig.json" if path.endswith(".json") else path + ".sig.json"
-    # a trust registry asks for an identity, which only a verified signature can give: it requires one (Unreleased,
+    # a trust registry asks for an identity, which only a verified signature can give: it requires one (0.14.0,
     # the four; until 0.13.0 a pack with no signature, or an unknown algorithm, was exit 0 beside a trust store)
     require_signed = bool(require_signed or trust_store)
     if not os.path.exists(sig_side):
@@ -654,7 +654,7 @@ def _verify_pack(layers, path, ledger_path, trust_store, expected_pq_public_key_
     # requires the pack-sha3 integrity layer to PASS. The same three booleans as Go/Java/JS (0.10.0: it was read off
     # the wording of the authenticity layer, which now carries a note about an unverified signature).
     integrity = next((ly for ly in layers if ly["layer"] == "pack-sha3"), {}).get("status") == "PASS"
-    # Unreleased: only a registry binds signer_id to the key, so `authenticated` is trusted-signed only (until 0.13.0
+    # 0.14.0: only a registry binds signer_id to the key, so `authenticated` is trusted-signed only (until 0.13.0
     # it was true for a signature by any key under any signer_id, with no registry — measured 20/11/2026)
     roll["authenticated"] = integrity and sig_status == "PASS" and trusted and not trust_failed
     return roll

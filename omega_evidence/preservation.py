@@ -41,7 +41,7 @@ RECORD FORMAT — two versions, both verified (the version is part of what recor
     `leaves` hashes the concatenation of two child digests, with no prefix, and an odd node is paired with itself.
     Two weaknesses (measured 20/11/2026): root[a, b, c] == root[a, b, c, c] (a data object listed once more gives the
     same root), and root[l1, l2] == root[H(l1 || l2)] (an inner node reads as a leaf).
-  * version 2 (`"record_version": 2`, written from Unreleased on): the root is the Merkle Tree Hash of RFC 6962 §2.1,
+  * version 2 (`"record_version": 2`, written from 0.14.0 on): the root is the Merkle Tree Hash of RFC 6962 §2.1,
     unchanged in RFC 9162 §2.1.1 (Certificate Transparency 2.0, Experimental, December 2021, which obsoletes RFC 6962;
     rfc-editor.org read 20/11/2026), with HASH = the entry's `hash_alg` and d[i] = the bytes of leaves[i]:
         MTH({}) = HASH(),  MTH({d[0]}) = HASH(0x00 || d[0]),
@@ -50,7 +50,7 @@ RECORD FORMAT — two versions, both verified (the version is part of what recor
     its renewals (`renew_timestamp`, `renew_hash_tree`); a version 1 record becomes version 2 only by building a new one.
   * any other `record_version` (or a non-integer) is a FAIL of the layer `record-version`.
 
-TIME WITH A TRUST ANCHOR (Unreleased): `verify_evidence_record(..., tsa_ca_file=...)` asks for trusted time, so every
+TIME WITH A TRUST ANCHOR (0.14.0): `verify_evidence_record(..., tsa_ca_file=...)` asks for trusted time, so every
 entry's time must be an RFC 3161 token that verifies: an `asserted` time, or a token this host cannot check (no
 openssl: verified None), is a FAIL. Without `tsa_ca_file` (None) they stay SKIP, as before; a `tsa_ca_file` that is
 given and is not a non-empty string (`""`, as an unset variable reads) is a FAIL of the layer `tsa-ca-file`.
@@ -261,7 +261,7 @@ def verify_evidence_record(record: Dict[str, Any],
     without `tsa_ca_file`: the claim of trusted time has no proof to verify, now or later (RFC 4998 §4.1).
     A pack of `pack_paths` that cannot be read as an evidence pack is a FAIL of
     `data-objects-bound`, not of the record. An
-    `asserted` time is reported as NOT trusted-time, and with `tsa_ca_file` it is a FAIL (Unreleased); a `time_source` that is neither `rfc3161` nor `asserted` (or none) is a
+    `asserted` time is reported as NOT trusted-time, and with `tsa_ca_file` it is a FAIL (0.14.0); a `time_source` that is neither `rfc3161` nor `asserted` (or none) is a
     FAIL (20/11/2026). A malformed record (missing
     or unsupported hash_alg, wrong types) is `valid: false` with a FAIL layer, never
     an exception (audit V2 #6, 30/09/2026)."""
@@ -381,7 +381,7 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
             # True / False = verified. Until 0.10.0 this read a "status" key that verify() never returns, so every
             # record with an RFC 3161 token was FAIL (audit V2 final round, 02/10/2026).
             if r.get("verified") is None:
-                if tsa_ca_file:   # Unreleased: a trust anchor given asks for verified time; not checkable here = FAIL
+                if tsa_ca_file:   # 0.14.0: a trust anchor given asks for verified time; not checkable here = FAIL
                     time_layers.append((f"time[{i}]-rfc3161", False, "tsa_ca_file given but the token could not be "
                                         "verified here: " + str(r.get("note", ""))[:120], False))
                 else:
@@ -412,7 +412,7 @@ def _verify_evidence_record(record: Dict[str, Any], pack_paths: Optional[List[st
             time_layers.append((f"time[{i}]-rfc3161", ok, detail, False))
             later_gen = gen if ok else None
         elif ts.get("time_source") == "asserted":
-            if tsa_ca_file:   # Unreleased (Decision 4): until 0.13.0 a SKIP beside a trust anchor, and the record valid
+            if tsa_ca_file:   # 0.14.0 (Decision 4): until 0.13.0 a SKIP beside a trust anchor, and the record valid
                 time_layers.append((f"time[{i}]-asserted", False, "asserted time — NOT trusted time, and tsa_ca_file "
                                     "asks for trusted time", False))
             else:

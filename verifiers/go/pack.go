@@ -417,7 +417,7 @@ func InternalError(layers []Layer, what string) Receipt {
 func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string, requirePQ, requireSigned bool) Receipt {
 	r := rp
 	add := func(l, s, d string) { r.Layers = append(r.Layers, Layer{l, s, d, nil}) }
-	// a trust registry asks for an identity, which only a verified signature gives: it requires one (Unreleased, the four)
+	// a trust registry asks for an identity, which only a verified signature gives: it requires one (0.14.0, the four)
 	requireSigned = requireSigned || trustStore != ""
 	packBytes, err := readInput(packPath) // read ONCE: the timestamp binding hashes these bytes, not a second read
 	var pack *Object
@@ -500,7 +500,7 @@ func verifyPack(rp *Receipt, packPath, ledgerPath, trustStore, expectedPQ string
 		} else if dg, _ := str(ts, "digest_sha256"); dg != sha256Hex(packBytes) {
 			add("timestamp", "FAIL", "pack changed after stamping")
 		} else if !derOneSequence(b64Canon(ts.Vals["tsr_b64"])) {
-			// form before capability (Unreleased, the four): a token is canonical base64 of one DER SEQUENCE; until 0.13.0
+			// form before capability (0.14.0, the four): a token is canonical base64 of one DER SEQUENCE; until 0.13.0
 			// anything, or nothing, here was a SKIP
 			add("timestamp", "FAIL", tsrFormMsg)
 		} else if vmWhy := vmProblemIfPresent(ts); vmWhy != "" {
@@ -759,7 +759,7 @@ func finish(r Receipt, digest string, trusted, signed bool, force string, pqRequ
 			integrity = true
 		}
 	}
-	// Unreleased: only a registry binds signer_id to the key — authenticated is trusted-signed only (until 0.13.0: || signed)
+	// 0.14.0: only a registry binds signer_id to the key — authenticated is trusted-signed only (until 0.13.0: || signed)
 	r.Authenticated = trusted && signed && integrity
 	var pq *bool
 	for _, l := range r.Layers {
