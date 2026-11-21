@@ -651,17 +651,29 @@ def run(cmd, path, flags, go_style, name=""):
 
 
 def main():
-    """The cases (about 450 MB with the bound cases) live in one temporary directory that is removed whatever happens:
-    an exception, Ctrl-C or SIGTERM included (21/11/2026: a run that stopped on an exception left 450 MB in /tmp,
-    measured; the removal was the last line of the function)."""
+    """The cases (about 450 MB with the bound cases) live in one temporary directory that is removed when the run ends
+    by a return, an exception, Ctrl-C, SIGTERM or SIGHUP; a signal that arrives while it is being removed is ignored
+    (21/11/2026: a run that stopped on an exception left 450 MB in /tmp, measured; the removal was the last line of the
+    function. Measured the same day on the first correction: SIGHUP, and a second SIGTERM during the removal, left the
+    directory). SIGKILL, which no process can handle, leaves it."""
     import signal
-    tmp = tempfile.mkdtemp(prefix="oe-oracle-")
-    previous = signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+    stops = [s for s in (signal.SIGTERM, getattr(signal, "SIGHUP", None)) if s is not None]
+
+    def _stop(signum, frame):
+        sys.exit(128 + signum)
+    previous = {s: signal.signal(s, _stop) for s in stops}
+    previous[signal.SIGINT] = signal.getsignal(signal.SIGINT)
+    tmp = None
     try:
+        tmp = tempfile.mkdtemp(prefix="oe-oracle-")
         return _main(tmp)
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-        signal.signal(signal.SIGTERM, previous)
+        for s in previous:
+            signal.signal(s, signal.SIG_IGN)
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+        for s, handler in previous.items():
+            signal.signal(s, handler)
 
 
 def _main(tmp):

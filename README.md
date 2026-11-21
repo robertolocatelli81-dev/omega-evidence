@@ -520,7 +520,8 @@ Each was measured on 404b60b (the branch before these changes) and reproduced be
   relied on the carried key now pass `allow_embedded_key=True`; fixtures with a declared digest over no body are real packs.
 - **`preservation`: trusted time when a trust anchor is given; evidence record version 2.** With `tsa_ca_file`, an
   `asserted` time, or a token this host cannot check, is a FAIL (measured on 404b60b: `time[0]-asserted` SKIP, `valid:
-  true`). New records carry `"record_version": 2` and their Merkle root is the Merkle Tree Hash of RFC 6962 §2.1 (unchanged
+  true`); a `tsa_ca_file` given that is not a non-empty string (`""`) is a FAIL too (`tsa-ca-file`), as in
+  `interop.sigstore.verify_bundle`. New records carry `"record_version": 2` and their Merkle root is the Merkle Tree Hash of RFC 6962 §2.1 (unchanged
   in RFC 9162 §2.1.1, which obsoletes it; rfc-editor.org, read 20/11/2026): leaves and inner nodes in separate domains
   (0x00 / 0x01), no node duplicated. Measured on 404b60b: root[a, b, c] == root[a, b, c, c], and root[l1, l2] ==
   root[H(l1 ‖ l2)]. Records without `record_version` (every record written up to 0.13.0) verify as before and keep their
@@ -534,15 +535,19 @@ Each was measured on 404b60b (the branch before these changes) and reproduced be
   or not a Key Binding JWT is provided"; an explicit `require_key_binding=False` still wins).
 - **`chip_registry`: updates in order.** Measured on 404b60b: an older signed update applied after a newer one put
   `service-OLD` back. The kind is now `chip_attestation_registry_update_v2`, with `update_seq` (1 to 2^53−1) in the signed
-  body; a registry applies a signer's update only when its `update_seq` is greater than the last applied
-  (`last_seq()`, `ChipRegistry(last_seq=…)` across restarts); the old kind is refused with its reason;
+  body; a registry applies an update only when its `update_seq` is greater than the last applied from the same signing
+  key (`last_seq()`, keyed by the public key, and `ChipRegistry(last_seq=…)` across restarts; per key and not per
+  `signer_id`, an unsigned label: with one key under two labels in the trust store, the older update re-labelled was
+  applied after the newer, measured 21/11/2026); the old kind is refused with its reason;
   `publish_signed_update` takes `update_seq=` (keyword, required).
 - **Temporary files.** Measured on 21/11/2026: a run of `verifiers/differential_oracle.py` that stopped on an
   exception left its cases, about 450 MB, in the temporary directory (the removal was the last line of `main`), and
   `tests/test_toolkit.py` left 5 directories and one file there on every run (284 KB). The oracle now removes its
-  directory in a `finally`, also on SIGTERM; the tests remove theirs (`addCleanup`). `tests/fuzz_toolkit.py` left its
-  corpus directory (48 KB) on every run with `--findings-dir` (as CI runs it) or `--ablate`: now removed on every exit,
-  kept only when violations were found and no `--findings-dir` was given. Tested with a private `TMPDIR`.
+  directory in a `finally`, also on SIGTERM and SIGHUP (a signal that arrives during the removal is ignored); the tests
+  remove theirs (`addCleanup`). `tests/fuzz_toolkit.py` left its corpus directory (48 KB) on every run with
+  `--findings-dir` (as CI runs it) or `--ablate`: now removed when the run ends by a return, an exception, Ctrl-C,
+  SIGTERM or SIGHUP, kept only when violations were found and no `--findings-dir` was given. SIGKILL leaves both.
+  Tested with a private `TMPDIR`.
 
 0.13.0 was released on 20 November 2026; its changes are the two 0.13.0 sections below (both of 20 November).
 

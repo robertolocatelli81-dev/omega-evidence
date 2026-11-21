@@ -52,7 +52,8 @@ RECORD FORMAT — two versions, both verified (the version is part of what recor
 
 TIME WITH A TRUST ANCHOR (Unreleased): `verify_evidence_record(..., tsa_ca_file=...)` asks for trusted time, so every
 entry's time must be an RFC 3161 token that verifies: an `asserted` time, or a token this host cannot check (no
-openssl: verified None), is a FAIL. Without `tsa_ca_file` they stay SKIP, as before.
+openssl: verified None), is a FAIL. Without `tsa_ca_file` (None) they stay SKIP, as before; a `tsa_ca_file` that is
+given and is not a non-empty string (`""`, as an unset variable reads) is a FAIL of the layer `tsa-ca-file`.
 
 Self-contained: Python stdlib (+ optional openssl via `timestamp`). Apache-2.0.
 The structural verification (Merkle roots + renewal chaining) is fully OFFLINE.
@@ -198,6 +199,7 @@ def renew_timestamp(record: Dict[str, Any], tsa_url: Optional[str] = None) -> Di
     """Timestamp Renewal (RFC 4998): re-timestamp the previous entry with a fresh
     token, BEFORE the old token's algorithm/TSA weakens. Same hash algorithm —
     it renews the TIME, chaining the new token over the old one."""
+    _version_of(record)                      # a record of a version nobody defined is not renewed (ValueError), as in renew_hash_tree
     prev = record["archive_timestamps"][-1]
     alg = prev["hash_alg"]
     binding = _prev_binding(prev, alg)
@@ -266,6 +268,11 @@ def verify_evidence_record(record: Dict[str, Any],
     if not isinstance(record, dict):
         return {"valid": False, "layers": [{"layer": "record-malformed", "status": "FAIL",
                                              "detail": "record is not a JSON object"}], "verified_utc": _now()}
+    if tsa_ca_file is not None and (not isinstance(tsa_ca_file, str) or not tsa_ca_file):
+        # given, and not a path: never read as "no trust anchor" (an empty string from an unset variable was an asserted
+        # time SKIP and valid true, measured 21/11/2026); the rule interop.sigstore.verify_bundle already applies
+        return {"valid": False, "layers": [{"layer": "tsa-ca-file", "status": "FAIL",
+                                             "detail": "tsa_ca_file must be the path of a PEM file"}], "verified_utc": _now()}
     try:
         return _verify_evidence_record(record, pack_paths, tsa_ca_file)
     except (KeyError, TypeError, AttributeError, ValueError, IndexError, RecursionError) as e:

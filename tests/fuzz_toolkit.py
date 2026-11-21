@@ -656,16 +656,33 @@ UNVERIFIED_PREFIX = "signature present, algorithm unsupported, not verified"
 
 
 def run(args):
-    """The corpus directory is removed on every exit (21/11/2026: with --findings-dir, which CI passes, or with
-    --ablate, it was left in the temporary directory on every run, 48 KB each, measured: 75 of them in /tmp); it is
-    kept only when violations were found and no --findings-dir was given (the findings are then inside it)."""
-    root = tempfile.mkdtemp(prefix="oe-fuzz-")
+    """The corpus directory is removed when the run ends by a return, an exception, Ctrl-C, SIGTERM or SIGHUP
+    (21/11/2026: with --findings-dir, which CI passes, or with --ablate, it was left in the temporary directory on
+    every run, 48 KB each, measured: 75 of them in /tmp; and a run stopped by SIGTERM or SIGHUP left it, measured the
+    same day); it is kept only when violations were found and no --findings-dir was given (the findings are then
+    inside it). SIGKILL leaves it."""
+    import signal
+    import threading
+    previous = {}
+    if threading.current_thread() is threading.main_thread():      # signal handlers can be set in the main thread only
+        def _stop(signum, frame):
+            sys.exit(128 + signum)
+        for s in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+            if s is not None:
+                previous[s] = signal.signal(s, _stop)
+        previous[signal.SIGINT] = signal.getsignal(signal.SIGINT)
+    root = None
     keep = []
     try:
+        root = tempfile.mkdtemp(prefix="oe-fuzz-")
         return _run(args, root, keep)
     finally:
-        if not keep:
+        for s in previous:
+            signal.signal(s, signal.SIG_IGN)                     # the removal is not interrupted by a second signal
+        if root is not None and not keep:
             shutil.rmtree(root, ignore_errors=True)
+        for s, handler in previous.items():
+            signal.signal(s, handler)
 
 
 def _run(args, root, keep):

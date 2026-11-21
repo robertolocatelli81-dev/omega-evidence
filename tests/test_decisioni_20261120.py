@@ -226,6 +226,19 @@ class D2TimestampSidecarForm(unittest.TestCase):
                 self.assertFalse(r["valid"])
                 self.assertTrue(_layer(r, "rfc3161")["detail"].startswith("malformed sidecar: validation_material: "))
 
+    def test_a_crl_entry_needs_a_url_string(self):
+        """the type of `url` in a crls_b64 entry (a mutant that dropped it passed every Python suite, 21/11/2026)"""
+        good = {"available": True, "certs_der_b64": [], "cert_count": 0, "subjects": [], "crl_distribution_points": []}
+        self.assertEqual(V._vm_problem(dict(good, crls_b64=[{"url": "http://c", "error": "x"}])), "")          # control
+        for url in (5, None, ["http://c"], True):
+            for entry in ({"url": url, "error": "x"}, {"url": url, "crl_b64": "AAAA", "bytes": 3}):
+                self.assertEqual(V._vm_problem(dict(good, crls_b64=[entry])),
+                                 "a crls_b64 entry is not an object with a url string", entry)
+        # chain_certificates is a count: zero is one, a negative number is not
+        self.assertEqual(V._vm_problem(dict(good, crl_fetch={"fetched": True, "chain_certificates": 0})), "")
+        self.assertEqual(V._vm_problem(dict(good, crl_fetch={"fetched": True, "chain_certificates": -1})),
+                         "crl_fetch.chain_certificates is not a non-negative integer")
+
     def test_shapes_every_release_wrote(self):
         """the members extract_validation_material and stamp_pack wrote from 0.5.0 to 0.13.0 (read from each tag's source),
         and tokens of the size real TSAs return (4 645 and 4 894 bytes, three real sidecars measured 20/11/2026)"""
@@ -259,6 +272,9 @@ class D2TimestampSidecarForm(unittest.TestCase):
         self.assertFalse(V._der_one_sequence(b"\x30\x82\x00\x81" + b"\x00" * 0x81))
         self.assertFalse(V._der_one_sequence(b"\x30\x85\x00\x00\x00\x00\x01\x00"))
         self.assertIsNone(V._b64_canon("MAMEAQB="))          # non-zero pad bits: decodes, does not re-encode the same
+        # every cut of a header is a verdict, never an IndexError (30 80 alone: the indefinite form with nothing after it)
+        for head in (b"", b"\x30", b"\x30\x80", b"\x30\x81", b"\x30\x82\x01", b"\x30\x84\x00\x00\x00", b"\x30\x80\x00\x00"):
+            self.assertIs(V._der_one_sequence(head), False, head)
 
     def test_generated_validation_material_mutations(self):
         """each member of a good material replaced by a value of another type or removed, and a new member added at each
@@ -376,6 +392,31 @@ class D4PreservationRecord(unittest.TestCase):
         self.assertFalse(r["valid"])
         self.assertEqual(_layer(r, "time[0]-asserted")["status"], "FAIL")
 
+    def test_a_trust_anchor_given_and_empty_is_not_read_as_absent(self):
+        """fails on 1e2896e: tsa_ca_file="" (an unset variable) was an asserted time SKIP and the record valid"""
+        from omega_evidence import preservation as PR
+        d = _tmp(self)
+        rec = PR.build_evidence_record([_pack(d, "a")])
+        self.assertIs(PR.verify_evidence_record(rec)["valid"], True)                    # control: no anchor asked
+        for bad in ("", 0, False, b"", [], b"ca.pem"):
+            r = PR.verify_evidence_record(rec, tsa_ca_file=bad)
+            self.assertIs(r["valid"], False, repr(bad))
+            self.assertEqual([(ly["layer"], ly["status"]) for ly in r["layers"]], [("tsa-ca-file", "FAIL")], repr(bad))
+
+    def test_renew_timestamp_refuses_an_unknown_version(self):
+        """fails on 1e2896e: renew_timestamp wrote a renewal on a record of version 7 (renew_hash_tree refused it)"""
+        from omega_evidence import preservation as PR
+        d = _tmp(self)
+        p = _pack(d, "a")
+        rec = PR.build_evidence_record([p])
+        self.assertEqual(len(PR.renew_timestamp(dict(rec, archive_timestamps=list(rec["archive_timestamps"])))["archive_timestamps"]), 2)   # control
+        rec["record_version"] = 7
+        with self.assertRaises(ValueError):
+            PR.renew_timestamp(rec)
+        with self.assertRaises(ValueError):
+            PR.renew_hash_tree(rec, [p], "sha3_512")
+        self.assertEqual(len(rec["archive_timestamps"]), 1)
+
     def test_a_token_not_checkable_here_beside_a_trust_anchor_fails(self):
         """fails on 404b60b: timestamp.verify answering verified None (no openssl) with tsa_ca_file gave SKIP, valid True"""
         from unittest import mock
@@ -437,6 +478,13 @@ class D4PreservationRecord(unittest.TestCase):
         # a version 1 root under a version 2 label (and the reverse) is refused
         swap = PR._finalize(dict(json.loads(json.dumps(v1)), record_version=2))
         self.assertFalse(PR.verify_evidence_record(swap)["valid"])
+        # under a version nobody defined no root is recomputed: the Merkle layers are FAIL whatever root the record carries
+        for base in (v1r, v2r):
+            unk = PR._finalize(dict(json.loads(json.dumps(base)), record_version=7))
+            r = PR.verify_evidence_record(unk)
+            self.assertEqual([_layer(r, n)["status"] for n in ("record-version", "initial-merkle-root")], ["FAIL", "FAIL"])
+            tree = [ly["status"] for ly in r["layers"] if ly["layer"].endswith("-hash-tree")]
+            self.assertEqual(tree, ["FAIL"], r["layers"])
 
     def test_generated_trees(self):
         """random lists of 0..70 leaves and every hash_alg: version 2 equals an independent RFC 6962 implementation (the
@@ -565,6 +613,38 @@ class D6ChipRegistryOrder(unittest.TestCase):
         with self.assertRaises(ValueError):
             CR.ChipRegistry(last_seq={"x": -1})
 
+    def test_the_order_is_per_signing_key_not_per_label(self):
+        """fails on 1e2896e: signer_id is a label the signature does not cover; with one key under two labels in the
+        trust store, the older update re-labelled was applied after the newer one (service-OLD came back)"""
+        d = _tmp(self)
+        from omega_evidence import chip_registry as CR
+        ident = Identity("cur-a")
+        ts = os.path.join(d, "trust.jsonl")
+        tr = TR.TrustRegistry(ts)
+        tr.trust("cur-a", ident.public_key_b64)
+        tr.trust("cur-b", ident.public_key_b64)
+        old, new = os.path.join(d, "old.json"), os.path.join(d, "new.json")
+        CR.publish_signed_update(old, {"vendor-x-v1": "service-OLD"}, ident, update_seq=1)
+        CR.publish_signed_update(new, {"vendor-x-v1": "service-NEW"}, ident, update_seq=2)
+        reg = CR.ChipRegistry()
+        self.assertTrue(reg.apply_signed_update(new, ts)["applied"])
+        side = _rj(old[:-5] + ".sig.json")
+        side["signer_id"] = "cur-b"
+        _wj(old[:-5] + ".sig.json", side)
+        self.assertEqual(verify_pack(old, trust_store=ts)["authenticated"], True)      # control: trusted-signed as cur-b
+        r = reg.apply_signed_update(old, ts)
+        self.assertFalse(r["applied"], r)
+        self.assertIn("not after the last applied", r["reason"])
+        self.assertEqual(reg.service_for("vendor-x-v1"), "service-NEW")
+        self.assertEqual(reg.last_seq(), {ident.public_key_b64: 2})                    # keyed by the key that verified
+        reg.last_seq()[ident.public_key_b64] = 0                                       # a copy: the registry's own is not touched
+        self.assertEqual(reg.last_seq(), {ident.public_key_b64: 2})
+        reg2 = CR.ChipRegistry(last_seq=reg.last_seq())                                # across a restart
+        self.assertFalse(reg2.apply_signed_update(old, ts)["applied"])
+        for bad in ([("k", 1)], "k", 5, {"k": "1"}, {"k": 1.0}, {1: 1}, {"k": True}, {"k": 2 ** 53}):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                CR.ChipRegistry(last_seq=bad)
+
     def test_generated_orders(self):
         """random orders of 8 updates from 2 signers: what is applied for each signer is strictly increasing, and the
         mapping left is the one of the highest update_seq seen per signer"""
@@ -613,7 +693,8 @@ class TemporaryFilesAreRemoved(unittest.TestCase):
             "tempfile.tempdir = sys.argv[2]\n"
             "import differential_oracle as O\n"
             "def fake(tmp):\n"
-            "    open(os.path.join(tmp, 'case.json'), 'w').write('x' * 1000)\n"
+            "    for i in range(3000 if sys.argv[3] == 'many' else 1):\n"
+            "        open(os.path.join(tmp, 'case%d.json' % i), 'w').write('x' * 1000)\n"
             "    print('ready', flush=True)\n"
             "    if sys.argv[3] == 'raise':\n"
             "        raise RuntimeError('stopped')\n"
@@ -631,6 +712,20 @@ class TemporaryFilesAreRemoved(unittest.TestCase):
         p.wait(timeout=30)
         p.stdout.close()
         self.assertEqual(os.listdir(probe), [])
+        # fails on 1e2896e: SIGHUP, and a second SIGTERM while the directory is being removed, left it
+        import signal
+        import time
+        for sigs in ([signal.SIGHUP], [signal.SIGTERM, signal.SIGTERM], [signal.SIGTERM, signal.SIGINT]):
+            p = subprocess.Popen([sys.executable, "-c", script, ROOT, probe, "many"], stdout=subprocess.PIPE, text=True)
+            self.assertEqual(p.stdout.readline().strip(), "ready")
+            self.assertEqual(len(os.listdir(probe)), 1)
+            for n, s in enumerate(sigs):
+                if n:
+                    time.sleep(0.02)
+                p.send_signal(s)
+            p.wait(timeout=60)
+            p.stdout.close()
+            self.assertEqual(os.listdir(probe), [], sigs)
 
     def test_the_toolkit_suite_leaves_nothing_in_the_temporary_directory(self):
         """fails on 56de8cb: 4 directories of r.json, one of .ots.json files and dup_kat.jsonl stayed"""
@@ -654,6 +749,21 @@ class TemporaryFilesAreRemoved(unittest.TestCase):
                                 "--iterations", "60"] + extra, capture_output=True, text=True, timeout=600, env=env, cwd=ROOT)
             self.assertIn(r.returncode, (0, 1), r.stderr[-300:])
             self.assertEqual(sorted(os.listdir(probe)), [], extra)
+        # fails on 1e2896e: a run stopped by SIGTERM or SIGHUP left the corpus directory
+        import signal
+        import time
+        for s in (signal.SIGTERM, signal.SIGHUP):
+            p = subprocess.Popen([sys.executable, os.path.join(ROOT, "tests", "fuzz_toolkit.py"), "--seed", "1", "--iterations",
+                                  "500000"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, cwd=ROOT)
+            for _ in range(600):
+                if os.listdir(probe):
+                    break
+                time.sleep(0.05)
+            self.assertEqual(len(os.listdir(probe)), 1)                # control: the corpus is there while it runs
+            time.sleep(0.5)
+            p.send_signal(s)
+            p.wait(timeout=60)
+            self.assertEqual(os.listdir(probe), [], s)
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
