@@ -16,8 +16,9 @@ reproduced before it was fixed.
 (5) `interop.aat.verify_chain` left `agent_kid` / `recorder_kid` / `tombstone_kids` uncompared on unsigned records (ok
     True), and its RFC 3339 pattern took any Unicode decimal digit.
 
-Positive control: on 6176841 the tests whose docstring says "fails on 6176841" fail; the others hold what must not
-change and pass there too.
+Positive control: on 6176841 17 of the 24 tests fail: the 16 whose docstring says "fails on 6176841" and
+test_subject_and_predicate_type_are_read (Decision 3 of 20 November: "fails on 404b60b", and on 6176841 too); the
+other 7 hold what must not change and pass there too.
 """
 import base64
 import copy
@@ -146,8 +147,8 @@ class TestSignAndAnchorTheBodysDigest(unittest.TestCase):
         self.assertEqual((r["valid"], next(ly for ly in r["layers"] if ly["layer"] == "producer-signature")["status"]), (True, "PASS"))
 
     def test_a_pack_the_verifier_refuses_to_read_is_not_signed(self):
-        """the file is read as the verifier reads it: a member name twice, or a float, is refused by the verifier and
-        is not signed either, although the declared digest is the one a last-wins reading would compute"""
+        """fails on 6176841: the file is read as the verifier reads it: a member name twice, or a float, is refused by the
+        verifier and is not signed either, although the declared digest is the one a last-wins reading would compute"""
         from omega_evidence import canonical
         d = _tmp(self)
         base = {"kind": "x", "generated_utc": "2026-11-20T00:00:00+00:00", "honest_scope": SCOPE}

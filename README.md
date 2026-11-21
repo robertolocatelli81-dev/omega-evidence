@@ -451,12 +451,14 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
-0.14.0 was released on 21 November 2026; its changes are the two 0.14.0 sections below (both of 20 November).
+0.14.0 was released on 21 November 2026; its changes are the two 0.14.0 sections below (dated 20 November, the day of
+the benches and of the decisions; they also hold the changes of 21 November).
 
 ### 0.14.0 — five defects still present in 0.13.0, found on 0.12.0 by two review benches (20 November 2026)
 
 Each was reproduced on 0.12.0 and on 0.13.0 before it was fixed; `tests/test_banchi_20261120.py` holds the tests (on
-0.13.0 the 16 tests that name a defect fail, the 8 that hold what must not change pass).
+0.13.0, 17 of its 24 tests fail — the 16 that name one of these defects and the one that names Decision 3 of the next
+section — and the 7 that hold what must not change pass).
 
 - **`pack.sign_pack` and `pack.anchor_pack` signed and recorded the `pack_sha3` field as read.** A pack file whose field
   named another pack's body got the producer's signature, or the ledger anchor, over that other pack. Both now recompute
@@ -1491,11 +1493,11 @@ p95: 518 → 694 µs); the per-run maxima by up to 71 %. Read the p95 / p99 colu
   order as the effect; the sync mode is bound by fsync and unaffected within noise.
 - **Fuzz (`tests/fuzz_toolkit.py`, stdlib, seeded)**: byte, JSON-structure, ledger-line and `sig_alg` mutations of four
   valid cases (anchored, signed, full, stamped) against `verify_pack` (plain and with `require_signed=True`) and the
-  library API. The CI smoke job, seed 20260928, 3 000 iterations, measured on 20/11/2026 on this branch (0.14.0): 0
+  library API. The CI smoke job, seed 20260928, 3 000 iterations, measured on 21/11/2026 on the tree of 0.14.0: 0
   violations, 499 PASS / 2 501 FAIL, the same verdict sequence (SHA-256 `910b4635…`) on CPython 3.9.25, 3.11.2, 3.13.15
-  and 3.14.8 (on 404b60b, before the six decisions below: 516 PASS / 2 484 FAIL, `0ec89796…`; on 29/09/2026: 545 /
+  and 3.14.8 (on 404b60b, before the six decisions of 0.14.0 above: 516 PASS / 2 484 FAIL, `0ec89796…`; on 29/09/2026: 545 /
   2 455, `2698f366…`). Positive controls on the same seed, one check of the verifier disabled at a time, measured on
-  20/11/2026 on this branch: producer signature 2 violations, pack-sha3 recomputation 181, ledger chain 308, strict JSON
+  21/11/2026 on the same tree: producer signature 2 violations, pack-sha3 recomputation 181, ledger chain 308, strict JSON
   profile 59, the canonical-name rule of `sig_alg` 15, the `require_signed` requirement 151 — the fuzzer sees each (on
   404b60b: 2 / 181 / 308 / 59 / 22 / 160; the last two fell because a signature with no trust store is no longer
   `authenticated`, Decision 1; until this measurement the README gave the figures of 29/09/2026, 2 / 181 / 312 / 60 /
