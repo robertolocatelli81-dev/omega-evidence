@@ -2,9 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]   # every branch: release-0.14.1 is checked before it reaches main
   pull_request:
     branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   test:

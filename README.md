@@ -458,9 +458,9 @@ where a name goes — must not appear in what the toolkit writes or prints. `tes
 in every input that takes a key, a URL or a token (the Ed25519 seed of `Identity`, the ML-DSA-65 key file, the AWS KMS
 key id and the errors of its client, the ES256 key of `interop.aat`, every TSA URL, the OpenTimestamps calendars, the
 two URLs of `chip_registry`, attestation values, a key file where a pack, ledger, trust store, AAT chain or public key
-goes) and searches the return values, the files written, standard output and error of the two CLIs, the exceptions and
+goes, the holder key in `cnf` of `interop.sdjwt.issue`) and searches the return values, the files written, standard output and error of the two CLIs, the exceptions and
 the argv of openssl, raw, as any 12-character piece, in hex, decimal, base64 and base64url at each offset. On 0.14.0
-(the files of the package in the PyPI wheel are those of the tag) 6 of its 16 tests fail (82 cases); with the changes below all pass.
+(the files of the package in the PyPI wheel are those of the tag) 8 of its 18 tests fail (91 cases); with the changes below all pass.
 
 - **A URL that is refused was repeated.** `ots.submit` (and so `ots.stamp_pack`, which writes the `.ots.json` sidecar)
   recorded each refused calendar URL as given in `calendar_errors`: `https://user:password@host` was refused before the
@@ -476,8 +476,9 @@ the argv of openssl, raw, as any 12-character piece, in hex, decimal, base64 and
   a `chip_registry` candidate are the scheme, host, port and path (`_crl_fetch.url_for_record`). The request still goes
   to the URL as given.
 - **A network error is named by its type and errno, never by its text** (`_crl_fetch.reason`: `URLError (ECONNREFUSED)`;
-  a refusal of `_crl_fetch` keeps its reason, which repeats nothing of the URL), in `stamp`, `ots.submit` and
-  `chip_registry`. Measured with an exception whose text holds the canary, standing for a library's message; no such
+  a refusal of `_crl_fetch` keeps its reason, which repeats nothing of the URL; a TLS failure is named by the type of
+  its `ssl` error, `URLError (SSLCertVerificationError)`, since its errno is an OpenSSL code and not a POSIX one), in
+  `stamp`, `ots.submit` and `chip_registry`. Measured with an exception whose text holds the canary, standing for a library's message; no such
   message of urllib was measured here.
 - **`AwsKmsMlDsaSigner`** repeated the KeyId given and 200 characters of the client's exception, chained as its cause.
   Now `AWS KMS GetPublicKey failed: <type> (<AWS error code>)`, the code only when it is 1 to 64 ASCII letters or digits,
@@ -485,7 +486,11 @@ the argv of openssl, raw, as any 12-character piece, in hex, decimal, base64 and
 - **`interop.sdjwt.verify` refuses a JWK with a private or symmetric key member** (`d`, `p`, `q`, `dp`, `dq`, `qi`,
   `oth`, `k`: RFC 7518 §6.2.2.1, §6.3.2, §6.4.1 and RFC 8037 §2, read at rfc-editor.org on 27/11/2026; RFC 7518 is
   updated by RFC 9864, which defines algorithm identifiers, not key members), as the issuer's key and as the holder's in `cnf`, without
-  repeating it. 0.14.0 took it as the public key and the private member was not written anywhere.
+  repeating it. 0.14.0 took it as the public key: as the issuer's key, its private member was not written anywhere; as
+  the holder's in `cnf`, the credential verified (Key Binding included) and the result repeated the whole `cnf.jwk`,
+  private member included, in `plain_claims` and `processed_payload`.
+- **`interop.sdjwt.issue` refuses a `cnf.jwk` with one of those members** in `plain_claims`, without repeating it.
+  0.14.0 signed it into the SD-JWT in clear, so the holder's private key went wherever the credential went.
 
 Measured and unchanged: the seed, the ML-DSA-65 key file, the ES256 key and the attestation values are not in any
 output; a key file given in place of a pack, a ledger, a trust store, an AAT chain or a public key is not printed by

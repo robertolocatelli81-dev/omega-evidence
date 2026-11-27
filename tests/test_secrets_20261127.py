@@ -13,7 +13,8 @@ the exception, the argv of openssl. The inputs (counted with grep on 0.14.0, 27/
            chip_registry.discover_online and the update of fetch_signed_update_online
   values   attestation.attest attribute values; agent device_attestation service token
   misuse   a key file where a pack, a ledger, a trust store, an AAT chain or public key goes (verifier CLI, aat CLI,
-           sign_pack, anchor_pack); a private JWK where sdjwt.verify takes the issuer's public key
+           sign_pack, anchor_pack); a private JWK where sdjwt.verify takes the issuer's public key, and as the holder key in
+           the cnf of sdjwt.issue
 
 Searched raw, as any 12-character piece (a message cut at a length), in hex, HEX, decimal, base64 and base64url at each
 of the three offsets. Positive control: the search finds each form, and a producer that leaks is found. On 0.14.0
@@ -407,6 +408,82 @@ class KeyWhereSomethingElseGoes(Base):
         self.assertIs(r["verified"], False, r)
         self.assertIn("private", r["error"])
         self.none("cnf", json.dumps(r))
+
+    def test_issue_does_not_write_a_private_holder_key(self):
+        """fails on 0.14.0 and on 4d7869f: issue() signed a cnf.jwk with its private member into the SD-JWT, in clear"""
+        holder = {"kty": "OKP", "crv": "Ed25519", "x": KEYNAME}
+        ok = sdjwt.issue({"a": 1}, Identity("i", SEED), plain_claims={"iss": "x", "cnf": {"jwk": holder}})   # control
+        self.assertIn(KEYNAME[:12], base64.urlsafe_b64decode(ok.split(".")[1] + "==").decode())
+        for m in ("d", "p", "q", "dp", "dq", "qi", "oth", "k"):
+            with self.subTest(member=m):
+                r = self.run_and_catch(sdjwt.issue, {"a": 1}, Identity("i", SEED),
+                                       plain_claims={"iss": "x", "cnf": {"jwk": dict(holder, **{m: PASSWORD})}})
+                self.assertTrue(str(r[0]).startswith("ValueError"), r)
+                self.none("issue", *r)
+
+
+class Kept(Base):
+    def test_a_refusal_keeps_its_reason_and_stamp_refuses_before_openssl(self):
+        """kills two mutants of 4d7869f that leak nothing: reason() dropping the text of a Refused, and stamp() sending a
+        URL to openssl and the network before check_url"""
+        url = "http://u:%s@127.0.0.1:1/" % PASSWORD
+        with mock.patch.object(TS.subprocess, "run") as run, mock.patch("urllib.request.build_opener") as net:
+            r = TS.stamp("ab" * 32, url)
+            o = ots.submit("ab" * 32, [url])
+        self.assertFalse(run.called or net.called)
+        self.assertEqual(r, {"anchored": False, "note": "TSA URL refused: userinfo in the URL"})
+        self.assertEqual(o["errors"], [{"calendar": "", "error": "Refused: userinfo in the URL"}])
+
+    def test_the_kms_error_code_is_named_only_when_it_is_a_name_and_the_cause_is_not_chained(self):
+        """kills two mutants of 4d7869f: the AWS error code taken whatever it holds, and the client's error chained as
+        the cause (the traceback printed it)"""
+        import traceback
+
+        class Err(Exception):
+            def __init__(self, code):
+                super().__init__("denied: " + PASSWORD)
+                self.response = {"Error": {"Code": code}}
+
+        class Client:
+            def __init__(self, code):
+                self.code = code
+
+            def get_public_key(self, KeyId):
+                raise Err(self.code)
+
+        for code, named in (("AccessDeniedException", "Err (AccessDeniedException)"), ("x " + PASSWORD, "Err"),
+                            ("x" * 65, "Err"), ("", "Err"), (7, "Err")):
+            with self.subTest(code=str(code)[:20]):
+                with self.assertRaises(RuntimeError) as cm:
+                    mldsa.AwsKmsMlDsaSigner(KEYNAME, client=Client(code))
+                self.assertEqual(str(cm.exception), "AWS KMS GetPublicKey failed: " + named)
+                self.assertIsNone(cm.exception.__cause__)
+                tb = "".join(traceback.format_exception(type(cm.exception), cm.exception, cm.exception.__traceback__))
+                self.assertEqual(found(PASSWORD.encode(), tb), [])
+
+        class Signs:
+            def sign(self, **k):
+                raise Err("AccessDeniedException")
+        s = object.__new__(mldsa.AwsKmsMlDsaSigner)   # sign() alone, without a real ML-DSA public key
+        s._key_id, s._client, s.key_arn = KEYNAME, Signs(), KEYNAME
+        with self.assertRaises(RuntimeError) as cm:
+            s.sign(b"m")
+        self.assertEqual(str(cm.exception), "AWS KMS Sign failed: Err (AccessDeniedException)")
+        self.assertIsNone(cm.exception.__cause__)
+
+
+class NetworkReasons(unittest.TestCase):
+    def test_a_tls_failure_is_not_named_by_a_posix_errno(self):
+        """fails on 4d7869f: ssl errno 1 (an OpenSSL code) was printed as EPERM"""
+        import errno
+        import ssl
+        import urllib.error
+        from omega_evidence import _crl_fetch as F
+        tls = urllib.error.URLError(ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] " + PASSWORD))
+        self.assertEqual(F.reason(tls), "URLError (SSLCertVerificationError)")
+        self.assertEqual(F.reason(ssl.SSLError(1, PASSWORD)), "SSLError")
+        refused = urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, PASSWORD))   # control: a POSIX errno keeps its name
+        self.assertEqual(F.reason(refused), "URLError (ECONNREFUSED)")
 
 
 if __name__ == "__main__":

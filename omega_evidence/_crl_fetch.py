@@ -180,9 +180,13 @@ def reason(e: BaseException) -> str:
     or else the exception's type and errno name, never str(e), which a library may fill with the URL it was given."""
     if isinstance(e, Refused):
         return f"Refused: {e}"
+    inner = getattr(e, "reason", None)   # urllib.error.URLError wraps the OSError
+    x = inner if isinstance(inner, BaseException) else e
+    if isinstance(x, ssl.SSLError):   # its errno is an OpenSSL code, not a POSIX one (1 is not EPERM)
+        return type(e).__name__ + (f" ({type(x).__name__})" if x is not e else "")
     n = getattr(e, "errno", None)
     if not isinstance(n, int):
-        n = getattr(getattr(e, "reason", None), "errno", None)   # urllib.error.URLError wraps the OSError
+        n = getattr(x, "errno", None)
     return type(e).__name__ + (f" ({errno.errorcode.get(n, n)})" if isinstance(n, int) else "")
 
 

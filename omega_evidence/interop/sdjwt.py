@@ -234,6 +234,10 @@ def issue(claims: Dict[str, Any], identity: Identity,
             raise ValueError(f"claim name {name!r} cannot be selectively disclosed (RFC 9901 {rule})")
         if name in SD_JWT_VC_IN_CLEAR:   # issue() writes typ dc+sd-jwt: an SD-JWT VC
             raise ValueError(f"claim name {name!r} cannot be selectively disclosed in an SD-JWT VC (SD-JWT VC -27 §2.2.2.3)")
+    cnf = plain.get("cnf")
+    if isinstance(cnf, dict) and isinstance(cnf.get("jwk"), dict) and any(m in cnf["jwk"] for m in _PRIVATE_JWK_MEMBERS):
+        raise ValueError("cnf.jwk holds a private or symmetric key member: the holder's public key goes there "
+                         "(RFC 7800 §3.2), and verify() refuses it")   # not repeated (0.14.1)
     json.dumps([claims, plain], allow_nan=False)   # NaN / Infinity are not JSON (RFC 8259): ValueError
     disclosures: List[str] = []
     digests: List[str] = []
