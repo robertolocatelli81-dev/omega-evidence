@@ -766,7 +766,7 @@ class TemporaryFilesAreRemoved(unittest.TestCase):
             p = subprocess.Popen([sys.executable, os.path.join(ROOT, "tests", "fuzz_toolkit.py"), "--seed", "1", "--iterations",
                                   "500000"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, cwd=ROOT,
                                  creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if win else 0)
-            for _ in range(600):
+            for _ in range(2400):                                       # up to 120 s: a macOS runner took over 30 s to start it
                 if os.listdir(probe):
                     break
                 time.sleep(0.05)

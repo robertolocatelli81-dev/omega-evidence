@@ -2154,7 +2154,7 @@ class TestMlDsaHybrid(unittest.TestCase):
             self.assertEqual(rec["sddl"], [("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)", 1)])   # CPython 3.13's 0o700
             self.assertEqual(rec["sd_at_create"], [0x5D5D] * 3)      # the descriptor is given AT creation (2 names taken)
             self.assertEqual(rec["freed"], [0x5D5D])
-            self.assertEqual(calls, [("k.key", 10)])                  # icacls only on the key at its name, none on a folder
+            self.assertEqual(calls, [("k.key", len(("SECRETKEY" + os.linesep).encode()))])   # text mode: "\r\n" on Windows
             self.assertEqual(os.listdir(tmp), ["k.key"])              # the private folder is removed
             with self.assertRaises(FileExistsError):
                 self.m._write_owner_only_windows(target, "OTHER\n")
