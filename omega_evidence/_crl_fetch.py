@@ -121,7 +121,8 @@ def _inet_aton(h: str) -> Optional[ipaddress.IPv4Address]:
     """The IPv4 forms of glibc's inet_aton, read here rather than by socket.inet_aton, whose answer depends on the
     system (0.14.1: Windows' inet_addr refuses every spelling of 255.255.255.255, so `4294967295` was a NAME there and
     was resolved and connected to). One to four parts; each decimal, octal (a leading 0) or hexadecimal (0x, at least
-    one digit); the last part fills the bytes the others leave. 300 000 generated strings: identical to glibc 2.36."""
+    one digit); the last part fills the bytes the others leave. 300 000 generated strings without white space:
+    identical to glibc 2.36 (glibc also reads what comes before a white space; address_of takes such a host for a name)."""
     parts = h.split(".")
     if len(parts) > 4:
         return None

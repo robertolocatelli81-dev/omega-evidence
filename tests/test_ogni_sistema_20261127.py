@@ -37,7 +37,8 @@ class Ipv4LiteralOnEverySystem(unittest.TestCase):
              "2130706433": "127.0.0.1", "0x7f000001": "127.0.0.1", "0177.0.0.1": "127.0.0.1", "0": "0.0.0.0",
              "10.0x10.020.1": "10.16.16.1"}
     NAMES = ["", "0x", "0x.1", "08", "1..2", "256.1", "1.2.3.256", "1.2.65536", "4294967296", "0x100000000",
-             "1.2.3.4.5", "0xg", "example.org", "1e3"]
+             "1.2.3.4.5", "0xg", "example.org", "1e3",
+             "1.2.3.4.0", "0.0.0.0.0", "1.256.1", "1.2.256.4"]   # five parts; a part before the last over 255
 
     def test_the_table_is_read_the_same_here(self):
         for h, want in self.TABLE.items():

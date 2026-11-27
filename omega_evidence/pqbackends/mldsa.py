@@ -38,9 +38,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import json
 import os
 import subprocess
+import tempfile
 from typing import Any, Dict, Optional
 
 from .. import signing
@@ -202,16 +204,13 @@ class MlDsaFileSigner:
         from cryptography.hazmat.primitives import serialization as ser
         sk = m.MLDSA65PrivateKey.generate()
         der = sk.private_bytes(ser.Encoding.DER, ser.PrivateFormat.PKCS8, ser.NoEncryption())
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            if os.name == "nt":   # 0o600 is ignored there; the ACL is set on the empty file, before the key is written
-                try:
-                    _owner_only_acl(path)
-                except Exception:
-                    f.close()
-                    os.remove(path)
-                    raise
-            f.write(base64.b64encode(der).decode() + "\n")
+        text = base64.b64encode(der).decode() + "\n"
+        if os.name == "nt":
+            _write_owner_only_windows(path, text)
+        else:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
         return {"path": path, "alg": ALG, "public_key_b64": base64.b64encode(sk.public_key().public_bytes_raw()).decode()}
 
     def sign(self, message: bytes) -> bytes:
@@ -221,16 +220,47 @@ class MlDsaFileSigner:
         return {"pq_backend": "file", "alg": ALG, "key_in_process_memory": True}
 
 
-def _owner_only_acl(path: str) -> None:
-    """Windows equivalent of mode 0o600 (0.14.1; before, the key file kept the ACL inherited from its folder): inheritance
-    removed and full control granted to the current user, SYSTEM and Administrators only — the set CPython 3.13 itself
-    applies on Windows for mode 0o700 (os.mkdir), SYSTEM and Administrators being able to take any file anyway. icacls
-    ships with every Windows since Vista. A failure raises, and keygen removes the file: a private key is never left
-    readable by others."""
+def _write_owner_only_windows(path: str, text: str) -> None:
+    """Windows: the key is never in a file another account could open. A private folder is made beside the target
+    (owner-only from its creation: CPython 3.13+ gives mkdtemp's 0o700 that ACL; before 3.13 icacls sets it on the
+    still empty folder, inheritable), the key file is created INSIDE it and so inherits the owner-only ACL at its
+    creation, then it is moved to its name (a move on one volume keeps the ACL; os.rename refuses an existing target,
+    as O_EXCL does) and given the same ACL explicitly, so that a later change to the parent folder does not reach it.
+    Any failure removes what was made and raises. (0.14.1 first set the ACL on the created file: a handle opened by
+    another account between creation and icacls kept its access.)"""
+    target = os.path.abspath(path)
+    if os.path.lexists(target):
+        raise FileExistsError(errno.EEXIST, "the key file already exists")
+    folder = tempfile.mkdtemp(prefix=".mldsa-key-", dir=os.path.dirname(target))
+    tmp = os.path.join(folder, "key")
+    try:
+        _owner_only_acl(folder, folder=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.rename(tmp, target)
+        try:
+            _owner_only_acl(target)
+        except Exception:
+            os.remove(target)
+            raise
+    finally:
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+        os.rmdir(folder)
+
+
+def _owner_only_acl(path: str, folder: bool = False) -> None:
+    """Windows equivalent of mode 0o600 / 0o700 (0.14.1; before, the key file kept the ACL inherited from its folder):
+    inheritance removed and full control granted to the current user, SYSTEM and Administrators only — the set CPython
+    3.13 itself applies on Windows for mode 0o700 (os.mkdir), SYSTEM and Administrators being able to take any file
+    anyway; on a folder the grants are inherited by what is created in it ((OI)(CI)). icacls ships with every Windows
+    since Vista. A failure raises."""
     dom, name = os.environ.get("USERDOMAIN"), os.environ["USERNAME"]
     user = f"{dom}\\{name}" if dom else name
-    r = subprocess.run(["icacls", path, "/inheritance:r", "/grant:r", user + ":F", "*S-1-5-18:F", "*S-1-5-32-544:F"],
-                       capture_output=True, text=True)
+    inh = "(OI)(CI)" if folder else ""
+    r = subprocess.run(["icacls", path, "/inheritance:r", "/grant:r", user + ":" + inh + "F", "*S-1-5-18:" + inh + "F",
+                        "*S-1-5-32-544:" + inh + "F"], capture_output=True, text=True)
     if r.returncode != 0:
         raise OSError(f"{path}: icacls could not make the key file owner-only: {(r.stdout + r.stderr).strip()[-300:]}")
 

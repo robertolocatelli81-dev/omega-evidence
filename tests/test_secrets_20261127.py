@@ -479,7 +479,7 @@ class NetworkReasons(unittest.TestCase):
         from unittest import mock
         from urllib.parse import SplitResult
         from omega_evidence import _crl_fetch as F
-        for netloc in ("[" + PASSWORD, "[::1", "[zz]", "a]b"):
+        for netloc in ("[" + PASSWORD, "[::1", "[zz]", "a]b", "[::1]" + PASSWORD, "[1.2.3.4]"):
             with mock.patch.object(F, "urlsplit", lambda u, n=netloc: SplitResult("http", n, "/", "", "")):
                 with self.assertRaises(F.Refused) as c:
                     F.check_url("x")

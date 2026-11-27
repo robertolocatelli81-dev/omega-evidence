@@ -2100,10 +2100,38 @@ class TestMlDsaHybrid(unittest.TestCase):
         idt = signing.Identity("acme"); pack.sign_pack(pp, idt)
         kf = os.path.join(tmp, "pq.key"); kg = self.m.MlDsaFileSigner.keygen(kf)
         self.assert_owner_only(kf)
+        self.assertEqual([n for n in os.listdir(tmp) if n.startswith(".mldsa-key-")], [])   # the private folder is gone
+        with self.assertRaises(FileExistsError):
+            self.m.MlDsaFileSigner.keygen(kf)                                                # an existing key is never replaced
         signer = self.m.MlDsaFileSigner(kf)
         side = pack.pq_cosign(pp, signer)
         self.assertEqual(side["pq_sig_alg"], "ml-dsa-65"); self.assertEqual(side["pq_public_key_b64"], kg["public_key_b64"])
         return pp, idt, signer
+
+    def test_windows_key_is_born_in_an_owner_only_folder(self):
+        """0.14.1 (final review): the ACL was set on the key file after its creation, so a handle opened by another
+        account in between kept its access. _write_owner_only_windows makes the file inside a folder already owner-only
+        (inheritable), moves it to its name and sets the ACL again. Played on every system with icacls recorded."""
+        calls = []
+        def rec(path, folder=False):
+            calls.append((os.path.basename(path), folder, os.path.exists(os.path.join(path, "key")) if folder else os.path.getsize(path)))
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(self.m, "_owner_only_acl", rec):
+            target = os.path.join(tmp, "k.key")
+            self.m._write_owner_only_windows(target, "SECRETKEY\n")
+            self.assertEqual(open(target, encoding="utf-8").read(), "SECRETKEY\n")
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(calls[0][0].startswith(".mldsa-key-") and calls[0][1] is True and calls[0][2] is False, calls)
+            self.assertEqual(calls[1][:2], ("k.key", False))                  # explicit ACL on the file at its name
+            self.assertEqual(os.listdir(tmp), ["k.key"])                      # the private folder is removed
+            with self.assertRaises(FileExistsError):
+                self.m._write_owner_only_windows(target, "OTHER\n")
+            self.assertEqual(open(target, encoding="utf-8").read(), "SECRETKEY\n")
+        def fail(path, folder=False):
+            raise OSError("icacls refused")
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(self.m, "_owner_only_acl", fail):
+            with self.assertRaises(OSError):
+                self.m._write_owner_only_windows(os.path.join(tmp, "k.key"), "SECRETKEY\n")
+            self.assertEqual(os.listdir(tmp), [])                             # fail-closed: nothing left behind
 
     def test_file_signer_pinned_tri_state(self):
         with tempfile.TemporaryDirectory() as tmp:
