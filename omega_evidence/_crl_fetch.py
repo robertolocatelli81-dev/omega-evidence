@@ -67,6 +67,7 @@ from __future__ import annotations
 import errno
 import http.client
 import ipaddress
+import re
 import socket
 import ssl
 import threading
@@ -158,6 +159,14 @@ def check_url(url) -> Tuple[str, str, int, str]:
         raise Refused("the scheme is not http or https")   # not repeated: a password typed in its place (0.14.1)
     if "@" in u.netloc:
         raise Refused("userinfo in the URL")
+    if "[" in u.netloc or "]" in u.netloc:
+        # 0.14.1: an IP literal is checked here, not left to urlsplit: Python 3.9.13 (the 3.9 of macOS and Windows
+        # runners) took "http://[text" without a closing bracket, and the text went on into the record
+        m = re.fullmatch(r"\[([0-9A-Fa-f:.]+)\](?::[0-9]*)?", u.netloc)
+        try:
+            ipaddress.IPv6Address(m.group(1) if m else "")
+        except ValueError:
+            raise Refused("brackets in the host that are not one IPv6 address") from None
     if not host:
         raise Refused("no host")
     if "%" in host:

@@ -473,6 +473,21 @@ class Kept(Base):
 
 
 class NetworkReasons(unittest.TestCase):
+    def test_an_ip_literal_is_checked_on_every_python(self):
+        """fails on 310194c: Python 3.9.13 (macOS and Windows runners) splits "http://[text" without a closing bracket
+        and the text became the host; the check no longer depends on urlsplit refusing it"""
+        from unittest import mock
+        from urllib.parse import SplitResult
+        from omega_evidence import _crl_fetch as F
+        for netloc in ("[" + PASSWORD, "[::1", "[zz]", "a]b"):
+            with mock.patch.object(F, "urlsplit", lambda u, n=netloc: SplitResult("http", n, "/", "", "")):
+                with self.assertRaises(F.Refused) as c:
+                    F.check_url("x")
+                self.assertNotIn(PASSWORD, str(c.exception))
+                self.assertNotIn(PASSWORD.lower(), str(c.exception))
+        with mock.patch.object(F, "urlsplit", lambda u: SplitResult("http", "[::1]:8080", "/", "", "")):
+            self.assertEqual(F.check_url("x")[:3], ("http", "::1", 8080))   # control: a real IPv6 literal passes
+
     def test_a_tls_failure_is_not_named_by_a_posix_errno(self):
         """fails on 4d7869f: ssl errno 1 (an OpenSSL code) was printed as EPERM"""
         import errno
@@ -483,7 +498,7 @@ class NetworkReasons(unittest.TestCase):
         self.assertEqual(F.reason(tls), "URLError (SSLCertVerificationError)")
         self.assertEqual(F.reason(ssl.SSLError(1, PASSWORD)), "SSLError")
         refused = urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, PASSWORD))   # control: a POSIX errno keeps its name
-        self.assertEqual(F.reason(refused), "URLError (ECONNREFUSED)")
+        self.assertEqual(F.reason(refused), "URLError (%s)" % errno.errorcode[errno.ECONNREFUSED])   # WSAECONNREFUSED on Windows
 
 
 if __name__ == "__main__":
