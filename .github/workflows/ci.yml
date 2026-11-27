@@ -64,7 +64,9 @@ jobs:
           # made BEFORE the volume is full (a full HFS+ volume creates no file): `out` empty (every write fails); `short*`
           # 24 bytes short of a whole block (a short write of 24 bytes, then ENOSPC); `room*` 1 byte (bs - 1 bytes of room)
           open(os.path.join(d, "out"), "wb").close()
-          for i in range(33):
+          # Windows: not made — a file there with room left in its cluster took 0 bytes, ENOSPC (run 45992750653), so a
+          # short write cannot be built on that volume
+          for i in range(33 if os.name != "nt" else 0):
               for name, size in (("short%d" % i, bs - 24), ("room%d" % i, 1)):
                   with open(os.path.join(d, name), "wb") as f:
                       f.write(b"x" * size)
@@ -91,9 +93,13 @@ jobs:
                           n += k
                   except OSError as e:
                       return n, errno.errorcode.get(e.errno, str(e.errno))
-          o, s, r = took("out"), took("short32"), took("room32")   # 32: the spares; the tests use 0 to 31
-          print("allocation unit", bs, "bytes; taken before ENOSPC: out", o, "short", s, "room", r)
-          assert o == (0, "ENOSPC") and s[1] == r[1] == "ENOSPC" and 0 < s[0] < 100 and s[0] < r[0] < 1 << 20, (o, s, r)
+          o = took("out")
+          assert o == (0, "ENOSPC"), o
+          if os.name != "nt":
+              s, r = took("short32"), took("room32")   # 32: the spares; the tests use 0 to 31
+              print("allocation unit", bs, "bytes; taken before ENOSPC: short", s, "room", r)
+              assert s[1] == r[1] == "ENOSPC" and 0 < s[0] < 100 and s[0] < r[0] < 1 << 20, (s, r)
+          print("full volume ready:", d)
           PY
           echo "OE_FULL_DIR=$d" >> "$GITHUB_ENV"
       - name: Install package

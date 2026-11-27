@@ -291,8 +291,11 @@ stdout closed at start (`>&-`), Node and Go reopen fd 1 on `/dev/null` before th
 the JVM opens one of its own files read-only on the free fd 1 (measured: `lib/modules` on JDK 27), so Java's write fails
 (EBADF) and the exit is 74 too. A usage error is exit 2 with its message on stderr, also when stderr is full, closed or its
 reader gone (nothing goes to stdout); the AAT CLI's `-h` prints the help as its output, so a help not written whole is 74.
-Measured on Linux only. Not measured on Windows or macOS; on Windows Python's `select` waits on sockets only, so there a full
-non-blocking pipe would be reported as 74 (declared, not measured).
+Measured for the Python CLIs on Linux, macOS and Windows since 0.14.1 (the CI's test matrix; Node, Go and Java on Linux).
+On Windows `select` waits on sockets only: a full non-blocking stdout is waited for there by a 10 ms sleep and another
+try, measured on Python 3.12 to 3.14. Not covered: Windows with Python 3.9 to 3.11, where a full non-blocking pipe answers
+a write with ENOSPC (measured), which no writer can tell from a full disk, so it is exit 74; a short write to a file on
+Windows, which has no file-size limit (on a full FAT volume a file with room left in its cluster took 0 bytes).
 
 This holds whether the check was **required or optional**. Measured 24/09/2026: with the PQ layer optional and a
 co-signature present but unverifiable here, a runtime without the backend used to answer `PASS` / exit 0 on the very
@@ -498,6 +501,25 @@ output; a key file given in place of a pack, a ledger, a trust store, an AAT cha
 in the six TSA paths (`stamp`, `pack.stamp_pack`, the three of `preservation`, `aat.anchor_epoch`) holds no canary. Not
 covered: the environment inherited by openssl is the caller's, passed as it is; what a process keeps in memory, in a
 core dump or in swap.
+
+The whole test suite now runs in CI on Linux, macOS and Windows, on Python 3.9 to 3.14, with and without `cryptography`
+(before: Linux only; on macOS arm64 and Windows, 3.9 is 3.9.13, the only 3.9 `setup-python` offers there). Where a
+system lacks a function the test uses its equivalent (`tests/_ogni_sistema.py`). It found five defects of the product
+on Windows, fixed with a test each:
+
+- **The ledger had no cross-process lock on Windows** (no `fcntl`): 4 processes appending 60 entries each to one ledger
+  left 6 lines of 241, the chain broken and every worker stopped (`TestConcurrentAppend20260928`, run 45964908377). Now
+  `msvcrt.locking` of one byte far past the data, waited for; exclusive for readers too.
+- **An IPv4 literal was read by the system's `inet_aton`**, and Windows refuses every spelling of 255.255.255.255: the
+  CRL fetch of `_crl_fetch` took `https://4294967295/a.crl` for a name and resolved it. Now the package reads the forms
+  itself, identically to glibc 2.36 on 300 023 generated strings (100 000 of them in `tests/test_ogni_sistema_20261127.py`).
+- **The ML-DSA-65 key file of `MlDsaFileSigner.keygen` was readable by others on Windows**: mode `0o600` is ignored
+  there, the file got `0o666`. Now inheritance removed and full control for the current user,
+  SYSTEM and Administrators only (the set CPython 3.13 applies for mode `0o700`), set before the key is written.
+- **A full non-blocking stdout was exit 74 on Windows** (declared, not measured, in 0.14.0): now it is waited for (above,
+  "receipt not written").
+- **A directory given as an input was refused on Windows with `PermissionError`**, not `not a regular file` as
+  elsewhere: Windows refuses to open it before `fstat` can tell. Now the same message.
 
 0.14.0 was released on 21 November 2026; its changes are the two 0.14.0 sections below (dated 20 November, the day of
 the benches and of the decisions; they also hold the changes of 21 November).
@@ -1200,7 +1222,8 @@ release. The fixes are in this release; the description of what was wrong is thi
   gave 401 lines and 200 duplicates. 0.10.0 holds an exclusive advisory `fcntl.flock` on the open ledger file for each
   append (shared for a load); under it the instance first replays what other writers appended since its last write, so
   every entry links to the last hash on disk and carries the next `idx`. POSIX only: on Windows there is no `fcntl` and
-  the ledger has one writer process, advisory only, not reliable on NFS — all stated in `ledger.py` and below. The test
+  the ledger has one writer process (until 0.14.1, which locks with `msvcrt.locking` there), advisory only, not reliable
+  on NFS — all stated in `ledger.py` and below. The test
   suite now has N threads and N processes appending to one ledger, plus a positive control that disables the lock and
   must break the chain. Cost and the full measurement: "Performance and robustness" below.
 - **(b) The AAT export (`aat.jcs`, strict mode) accepted exactly ±2^53.** `omega_evidence/interop/aat.py` refused
@@ -1564,8 +1587,8 @@ p95: 518 → 694 µs); the per-run maxima by up to 71 %. Read the p95 / p99 colu
 The figures above are from CPython 3.11.2 only. The test suite (137 tests) was run on 29/09/2026 on CPython 3.9.25,
 3.11.2 and 3.13.15, each with `cryptography` 50.0.1, all green; the differential oracle over the four pack verifiers
 (Python 3.11.2, Go 1.27.1, JDK 27, Node 22.23) was run the same day on this tree: 0 disagreements over 193 cases, every
-runtime ML-DSA capable. The oracle exercises the pack verifiers, not the AAT module. Not measured here: Windows (no `fcntl`: the ledger has no cross-process
-lock there), NFS, other hardware.
+runtime ML-DSA capable. The oracle exercises the pack verifiers, not the AAT module. Since 0.14.1 the whole test suite runs in
+CI on Linux, macOS and Windows, Python 3.9 to 3.14, with and without `cryptography`. Not measured here: NFS, other hardware.
 
 ## Tests
 
@@ -1579,6 +1602,7 @@ python3 tests/test_nist_acvp_vectors_20261117.py    # ML-DSA-65 vectors: every N
 python3 tests/test_uso_reale_20261118.py           # DSSE in ECDSA P-256, RFC 3161 tokens without certificate, sigstore bundles, the Quick start
 python3 tests/test_nemesis_20261118.py             # the same, review of 18/11/2026: unpadded base64, key hint, caller key, valid_for, media types
 python3 tests/test_secrets_20261127.py             # a secret given (key, URL password, token) is in no output, in 10 encodings or in part
+python3 tests/test_ogni_sistema_20261127.py         # what the suite found on macOS and Windows: IPv4 literals, the key file's ACL
 OMEGA_EVIDENCE_REAL_GITHUB=1 python3 tests/test_real_github_20261118.py   # the same on 25 real bundles from GitHub (network, gh)
 python3 tests/fuzz_toolkit.py --iterations 3000     # seeded mutation fuzz of the verifier and the ledger (exit 1 on a violation)
 python3 tests/fuzz_toolkit.py --ablate signature    # positive control: the sabotaged verifier must make the fuzzer red (6 ablations)

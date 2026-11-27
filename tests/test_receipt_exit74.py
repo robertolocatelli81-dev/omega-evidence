@@ -162,8 +162,9 @@ def _argv(runtime, pack):
 
 
 FSIZE_FILLED = 1000
-NO_FSIZE = ("no byte-exact file-size limit here (Windows has none, macOS's ulimit -f is not byte-exact) and no filled "
-            "volume in OE_FULL_DIR (the CI makes one on macOS and Windows)")
+NO_FSIZE = ("no short write to a file can be made here: Windows has no file-size limit, and on a full FAT volume a file "
+            "with room left in its cluster took 0 bytes (ENOSPC, run 45992750653); macOS's ulimit -f is not byte-exact, "
+            "so there the CI's filled volume in OE_FULL_DIR is needed")
 
 
 def why_not_here(mode, argv=None):
@@ -172,7 +173,7 @@ def why_not_here(mode, argv=None):
     Python that closes its fd 1 and runs the module in process (what a start with fd 1 closed gives it)."""
     if mode in ("devfull", "devfull-both") and OS.full_file() is None:
         return OS.FULL_WHY
-    if mode in ("fsize", "fsize_cut") and not sys.platform.startswith("linux") and not os.environ.get("OE_FULL_DIR"):
+    if mode in ("fsize", "fsize_cut") and (OS.WINDOWS or not sys.platform.startswith("linux") and not os.environ.get("OE_FULL_DIR")):
         return NO_FSIZE
     if mode == "closed" and OS.WINDOWS and not (argv and argv[0] == sys.executable and argv[1:2] == ["-m"]):
         return "Windows: stdout closed at start is made for a Python module only (no bash redirection there)"

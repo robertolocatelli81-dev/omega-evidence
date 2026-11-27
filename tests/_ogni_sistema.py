@@ -12,7 +12,7 @@ macOS and Windows). Each one names what it stands for; where a system has none, 
   a device that is full   /dev/full (Linux)           | a filled volume named by OE_FULL_DIR (CI: an HFS+ RAM disk on
                                                         macOS, a FAT VHD on Windows)
   a file-size limit       ulimit -f (Linux)           | a file on that volume with a few bytes of room left in its last
-                                                        block (macOS, Windows)
+                                                        block (macOS); Windows: none (skipped, the reason in the test)
   FIFO                    os.mkfifo                   | Windows named pipe \\\\.\\pipe\\<name>
 """
 import os
