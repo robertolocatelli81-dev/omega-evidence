@@ -18,10 +18,10 @@ but do not derive from, this toolkit.
 
 ```bash
 # from PyPI (since 0.11.4, uploaded from the GitHub Release by Trusted Publishing, PEP 740 attestations)
-pip install omega-evidence==0.14.0
+pip install omega-evidence==0.14.1
 
 # or straight from the tagged source
-pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.14.0
+pip install git+https://github.com/robertolocatelli81-dev/omega-evidence@v0.14.1
 ```
 
 Release artifacts (`.whl` / `.tar.gz`) are attached to each
@@ -451,7 +451,7 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
-### 0.14.1 (unreleased) — a secret given to the toolkit does not come out of it (27 November 2026)
+### 0.14.1 — a secret given to the toolkit does not come out of it (27 November 2026)
 
 A review of 0.14.0 for one class: a value that can be a secret — a key, a password in a URL, a token, a value typed
 where a name goes — must not appear in what the toolkit writes or prints. `tests/test_secrets_20261127.py` puts a canary
