@@ -54,11 +54,13 @@ jobs:
           python - "$d" <<'PY'
           import errno, os, sys
           d = sys.argv[1]
-          with open(os.path.join(d, "filler"), "wb") as f:
+          with open(os.path.join(d, "filler"), "wb", buffering=0) as f:   # raw: no buffer left for close() to flush
               for size in (1 << 20, 1 << 12, 1 << 9, 1):
                   while True:
                       try:
-                          f.write(b"\0" * size); f.flush(); os.fsync(f.fileno())
+                          if not f.write(b"\0" * size):
+                              break
+                          os.fsync(f.fileno())
                       except OSError as e:
                           if e.errno != errno.ENOSPC:
                               raise
