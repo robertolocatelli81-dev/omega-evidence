@@ -516,10 +516,12 @@ on Windows, fixed with a test each:
   `tests/test_ogni_sistema_20261127.py`); a host with white space is refused by the URL check, as before.
 - **The ML-DSA-65 key file of `MlDsaFileSigner.keygen` was not owner-only on Windows**: mode `0o600` is ignored
   there, so the file kept the entries its folder passes on: in a folder that grants others read, they could
-  open it. Now inheritance removed and full control for the current user, SYSTEM and Administrators only (the
-  set CPython 3.13 applies for mode `0o700`). The key file is created inside a folder that already has that ACL,
-  inheritable, so it is owner-only from its creation; it is then moved to its name and given the ACL explicitly
-  (`_write_owner_only_windows`; an existing key is never replaced, a failure leaves nothing behind).
+  open it. Now inheritance removed and full control for the file's owner (OWNER RIGHTS, from the process token,
+  not from `USERNAME`), SYSTEM and Administrators only (the set CPython 3.13 applies for mode `0o700`). The key file is created inside a private folder that has that ACL,
+  inheritable, from the call that creates it (CreateDirectoryW with CPython 3.13's descriptor before Python 3.13,
+  `mkdtemp` from 3.13), so it is owner-only from its creation; it is then moved to its name and given the ACL
+  explicitly (`_write_owner_only_windows`; an existing key is never replaced; on a failure what was made is removed).
+  Not covered: an account with full control of the key's folder can move entries in it.
 - **A full non-blocking stdout was exit 74 on Windows** (declared, not measured, in 0.14.0): now it is waited for (above,
   "receipt not written").
 - **A directory given as an input was refused on Windows with `PermissionError`**, not `not a regular file` as

@@ -188,6 +188,6 @@ def owner_only_problems(path):
     me = os.environ["USERNAME"].lower()
     allowed = ("nt authority\\system:", "builtin\\administrators:", "owner rights:")
     bad = [a for a in aces if "(I)" in a or not (me in a.lower().split(":")[0] or a.lower().startswith(allowed))]
-    if not any(me in a.lower() and "(F)" in a for a in aces):
-        bad.append("no full control for " + me)
+    if not any((me in a.lower() or a.lower().startswith("owner rights:")) and "(F)" in a for a in aces):
+        bad.append("no full control for " + me + " nor for OWNER RIGHTS")
     return bad

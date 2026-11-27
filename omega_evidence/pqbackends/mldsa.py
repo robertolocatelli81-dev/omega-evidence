@@ -42,6 +42,7 @@ import errno
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from typing import Any, Dict, Optional
 
@@ -221,20 +222,20 @@ class MlDsaFileSigner:
 
 
 def _write_owner_only_windows(path: str, text: str) -> None:
-    """Windows: the key is never in a file another account could open. A private folder is made beside the target
-    (owner-only from its creation: CPython 3.13+ gives mkdtemp's 0o700 that ACL; before 3.13 icacls sets it on the
-    still empty folder, inheritable), the key file is created INSIDE it and so inherits the owner-only ACL at its
-    creation, then it is moved to its name (a move on one volume keeps the ACL; os.rename refuses an existing target,
-    as O_EXCL does) and given the same ACL explicitly, so that a later change to the parent folder does not reach it.
-    Any failure removes what was made and raises. (0.14.1 first set the ACL on the created file: a handle opened by
-    another account between creation and icacls kept its access.)"""
+    """Windows: the key is never in a file another account could open. A private folder is made beside the target,
+    owner-only FROM ITS CREATION on every Python (`_private_folder_windows`), the key file is created INSIDE it and so
+    inherits that ACL at its creation, then it is moved to its name (a move on one volume keeps the ACL; os.rename
+    refuses an existing target, as O_EXCL does) and given the ACL explicitly, so that a later change to the parent
+    folder does not reach it. A failure removes what was made and raises. (0.14.1 first set the ACL on the created file:
+    a handle opened by another account between creation and icacls kept its access; then the folder got its ACL from
+    icacls after mkdtemp, a window in which, before Python 3.13, an account with Modify on the parent could put a
+    junction in its place.) Not covered: an account with full control of the key's folder can move entries in it."""
     target = os.path.abspath(path)
     if os.path.lexists(target):
         raise FileExistsError(errno.EEXIST, "the key file already exists")
-    folder = tempfile.mkdtemp(prefix=".mldsa-key-", dir=os.path.dirname(target))
+    folder = _private_folder_windows(os.path.dirname(target))
     tmp = os.path.join(folder, "key")
     try:
-        _owner_only_acl(folder, folder=True)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(text)
@@ -245,22 +246,65 @@ def _write_owner_only_windows(path: str, text: str) -> None:
             os.remove(target)
             raise
     finally:
-        if os.path.lexists(tmp):
-            os.remove(tmp)
-        os.rmdir(folder)
+        try:
+            if os.path.lexists(tmp):
+                os.remove(tmp)
+        finally:
+            os.rmdir(folder)
 
 
-def _owner_only_acl(path: str, folder: bool = False) -> None:
-    """Windows equivalent of mode 0o600 / 0o700 (0.14.1; before, the key file kept the ACL inherited from its folder):
-    inheritance removed and full control granted to the current user, SYSTEM and Administrators only — the set CPython
-    3.13 itself applies on Windows for mode 0o700 (os.mkdir), SYSTEM and Administrators being able to take any file
-    anyway; on a folder the grants are inherited by what is created in it ((OI)(CI)). icacls ships with every Windows
-    since Vista. A failure raises."""
-    dom, name = os.environ.get("USERDOMAIN"), os.environ["USERNAME"]
-    user = f"{dom}\\{name}" if dom else name
-    inh = "(OI)(CI)" if folder else ""
-    r = subprocess.run(["icacls", path, "/inheritance:r", "/grant:r", user + ":" + inh + "F", "*S-1-5-18:" + inh + "F",
-                        "*S-1-5-32-544:" + inh + "F"], capture_output=True, text=True)
+# the security descriptor CPython 3.13 gives os.mkdir(path, 0o700) on Windows (Modules/posixmodule.c): protected DACL,
+# full control to SYSTEM, Administrators and OWNER RIGHTS, inherited by files and folders made inside
+_SDDL_0700 = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+
+
+def _private_folder_windows(parent: str) -> str:
+    """A new folder in `parent`, owner-only from its creation. Python 3.13+: mkdtemp (its 0o700 is that ACL). Before
+    3.13 mkdtemp's folder takes the inherited ACL until changed, so it is made by CreateDirectoryW with the descriptor
+    above: there is no moment in which another account has rights on it."""
+    if sys.version_info >= (3, 13):
+        return tempfile.mkdtemp(prefix=".mldsa-key-", dir=parent)
+    import ctypes
+    import secrets
+    from ctypes import wintypes
+
+    class _SecurityAttributes(ctypes.Structure):
+        _fields_ = [("nLength", wintypes.DWORD), ("lpSecurityDescriptor", ctypes.c_void_p),
+                    ("bInheritHandle", wintypes.BOOL)]
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+    adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    k32.CreateDirectoryW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(_SecurityAttributes)]
+    k32.CreateDirectoryW.restype = wintypes.BOOL
+    k32.LocalFree.argtypes = [ctypes.c_void_p]
+    sd = ctypes.c_void_p()
+    if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(_SDDL_0700, 1, ctypes.byref(sd), None):   # SDDL_REVISION_1
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        sa = _SecurityAttributes(ctypes.sizeof(_SecurityAttributes), sd, False)
+        for _ in range(100):
+            folder = os.path.join(parent, ".mldsa-key-" + secrets.token_hex(8))
+            if k32.CreateDirectoryW(folder, ctypes.byref(sa)):
+                return folder
+            err = ctypes.get_last_error()
+            if err != 183:   # ERROR_ALREADY_EXISTS: another name
+                raise ctypes.WinError(err)
+        raise FileExistsError(errno.EEXIST, "no free name for the private folder of the key")
+    finally:
+        k32.LocalFree(sd)
+
+
+def _owner_only_acl(path: str) -> None:
+    """Windows equivalent of mode 0o600 (0.14.1; before, the key file kept the ACL inherited from its folder):
+    inheritance removed and full control granted to the file's owner (OWNER RIGHTS, S-1-3-4), SYSTEM and Administrators
+    only — the set CPython 3.13 itself applies on Windows for mode 0o700 (os.mkdir: OW, SY, BA), SYSTEM and Administrators
+    being able to take any file anyway. The owner is the account that created the file, read by Windows from the
+    process token: not from USERNAME/USERDOMAIN, which the environment can set to another account. icacls ships with
+    every Windows since Vista. A failure raises."""
+    r = subprocess.run(["icacls", path, "/inheritance:r", "/grant:r", "*S-1-3-4:F", "*S-1-5-18:F", "*S-1-5-32-544:F"],
+                       capture_output=True, text=True)
     if r.returncode != 0:
         raise OSError(f"{path}: icacls could not make the key file owner-only: {(r.stdout + r.stderr).strip()[-300:]}")
 

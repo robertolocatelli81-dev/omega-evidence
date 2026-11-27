@@ -2108,30 +2108,101 @@ class TestMlDsaHybrid(unittest.TestCase):
         self.assertEqual(side["pq_sig_alg"], "ml-dsa-65"); self.assertEqual(side["pq_public_key_b64"], kg["public_key_b64"])
         return pp, idt, signer
 
+    def _fake_win(self, fail_first=0, fail_with=None):
+        """kernel32/advapi32 played: CreateDirectoryW records the descriptor it was given and makes the folder."""
+        import ctypes, types
+        rec = {"sddl": [], "sd_at_create": [], "freed": [], "last": 0, "fail_first": fail_first}
+        def convert(sddl, rev, psd, size):
+            rec["sddl"].append((sddl, rev)); psd._obj.value = 0x5D5D; return 1
+        def create(path, psa):
+            rec["sd_at_create"].append(psa._obj.lpSecurityDescriptor)
+            if fail_with:
+                rec["last"] = fail_with; return 0
+            if rec["fail_first"]:
+                rec["fail_first"] -= 1; rec["last"] = 183; return 0
+            os.mkdir(path, 0o700); return 1
+        def free(p):
+            rec["freed"].append(p.value if hasattr(p, "value") else p)
+        class Fn:
+            def __init__(self, f): self.f = f
+            def __call__(self, *a): return self.f(*a)
+        dlls = {"kernel32": types.SimpleNamespace(CreateDirectoryW=Fn(create), LocalFree=Fn(free)),
+                "advapi32": types.SimpleNamespace(ConvertStringSecurityDescriptorToSecurityDescriptorW=Fn(convert))}
+        patches = [unittest.mock.patch.object(ctypes, "WinDLL", lambda name, use_last_error=False: dlls[name], create=True),
+                   unittest.mock.patch.object(ctypes, "get_last_error", lambda: rec["last"], create=True),
+                   unittest.mock.patch.object(ctypes, "WinError", lambda e: OSError(e, "winerror"), create=True),
+                   unittest.mock.patch.object(self.m, "sys", types.SimpleNamespace(version_info=(3, 12, 0)))]
+        return rec, patches
+
     def test_windows_key_is_born_in_an_owner_only_folder(self):
         """0.14.1 (final review): the ACL was set on the key file after its creation, so a handle opened by another
-        account in between kept its access. _write_owner_only_windows makes the file inside a folder already owner-only
-        (inheritable), moves it to its name and sets the ACL again. Played on every system with icacls recorded."""
+        account in between kept its access; then the folder got its ACL from icacls after mkdtemp, a window in which,
+        before Python 3.13, an account with Modify on the parent could put a junction in its place (played on Linux with
+        a symlink: the key file was created in the other account's folder). Now the folder is made with CPython 3.13's
+        0o700 descriptor in the call that creates it; the key file is made inside, moved to its name, given the ACL."""
+        import contextlib
         calls = []
-        def rec(path, folder=False):
-            calls.append((os.path.basename(path), folder, os.path.exists(os.path.join(path, "key")) if folder else os.path.getsize(path)))
-        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(self.m, "_owner_only_acl", rec):
+        def rec_acl(path):
+            calls.append((os.path.basename(path), os.path.getsize(path)))
+        rec, patches = self._fake_win(fail_first=2)
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            for p in patches: st.enter_context(p)
+            st.enter_context(unittest.mock.patch.object(self.m, "_owner_only_acl", rec_acl))
             target = os.path.join(tmp, "k.key")
             self.m._write_owner_only_windows(target, "SECRETKEY\n")
             self.assertEqual(open(target, encoding="utf-8").read(), "SECRETKEY\n")
-            self.assertEqual(len(calls), 2)
-            self.assertTrue(calls[0][0].startswith(".mldsa-key-") and calls[0][1] is True and calls[0][2] is False, calls)
-            self.assertEqual(calls[1][:2], ("k.key", False))                  # explicit ACL on the file at its name
-            self.assertEqual(os.listdir(tmp), ["k.key"])                      # the private folder is removed
+            self.assertEqual(rec["sddl"], [("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)", 1)])   # CPython 3.13's 0o700
+            self.assertEqual(rec["sd_at_create"], [0x5D5D] * 3)      # the descriptor is given AT creation (2 names taken)
+            self.assertEqual(rec["freed"], [0x5D5D])
+            self.assertEqual(calls, [("k.key", 10)])                  # icacls only on the key at its name, none on a folder
+            self.assertEqual(os.listdir(tmp), ["k.key"])              # the private folder is removed
             with self.assertRaises(FileExistsError):
                 self.m._write_owner_only_windows(target, "OTHER\n")
             self.assertEqual(open(target, encoding="utf-8").read(), "SECRETKEY\n")
-        def fail(path, folder=False):
-            raise OSError("icacls refused")
-        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(self.m, "_owner_only_acl", fail):
+        rec, patches = self._fake_win(fail_with=5)                    # ERROR_ACCESS_DENIED: raised, nothing made
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            for p in patches: st.enter_context(p)
             with self.assertRaises(OSError):
                 self.m._write_owner_only_windows(os.path.join(tmp, "k.key"), "SECRETKEY\n")
-            self.assertEqual(os.listdir(tmp), [])                             # fail-closed: nothing left behind
+            self.assertEqual((os.listdir(tmp), rec["freed"]), ([], [0x5D5D]))
+        def fail(path):
+            raise OSError("icacls refused")
+        rec, patches = self._fake_win()
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            for p in patches: st.enter_context(p)
+            st.enter_context(unittest.mock.patch.object(self.m, "_owner_only_acl", fail))
+            with self.assertRaises(OSError):
+                self.m._write_owner_only_windows(os.path.join(tmp, "k.key"), "SECRETKEY\n")
+            self.assertEqual(os.listdir(tmp), [])                     # fail-closed: nothing left behind
+        rec, patches = self._fake_win()                               # the move refused (a target made meanwhile)
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            for p in patches: st.enter_context(p)
+            st.enter_context(unittest.mock.patch.object(self.m.os, "rename", unittest.mock.Mock(side_effect=FileExistsError(17, "exists"))))
+            with self.assertRaises(FileExistsError):
+                self.m._write_owner_only_windows(os.path.join(tmp, "k.key"), "SECRETKEY\n")
+            self.assertEqual(os.listdir(tmp), [])                     # the key in the private folder is removed with it
+
+    def test_windows_private_folder_from_python_313_is_mkdtemp(self):
+        import types
+        with tempfile.TemporaryDirectory() as tmp, \
+                unittest.mock.patch.object(self.m, "sys", types.SimpleNamespace(version_info=(3, 13, 0))), \
+                unittest.mock.patch.object(self.m.tempfile, "mkdtemp", wraps=tempfile.mkdtemp) as mk:
+            d = self.m._private_folder_windows(tmp)
+            mk.assert_called_once_with(prefix=".mldsa-key-", dir=tmp)   # CPython 3.13+ gives its 0o700 the owner-only ACL
+            self.assertTrue(os.path.isdir(d)); os.rmdir(d)
+
+    def test_windows_acl_names_the_owner_not_the_environment(self):
+        """0.14.1 (final review): the full-control entry went to USERNAME/USERDOMAIN of the environment, which can name
+        another account; it is now OWNER RIGHTS (S-1-3-4), SYSTEM and Administrators, as CPython 3.13 for 0o700."""
+        import types
+        seen = []
+        fake = types.SimpleNamespace(run=lambda argv, **kw: seen.append(argv) or types.SimpleNamespace(returncode=0, stdout="", stderr=""))
+        env = {"USERNAME": "intruder", "USERDOMAIN": "EVIL"}
+        with unittest.mock.patch.object(self.m, "subprocess", fake), unittest.mock.patch.dict(os.environ, env):
+            self.m._owner_only_acl("C:\\k.key")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][1:], ["C:\\k.key", "/inheritance:r", "/grant:r", "*S-1-3-4:F", "*S-1-5-18:F", "*S-1-5-32-544:F"])
+        self.assertNotIn("intruder", " ".join(seen[0]))
 
     def test_file_signer_pinned_tri_state(self):
         with tempfile.TemporaryDirectory() as tmp:
