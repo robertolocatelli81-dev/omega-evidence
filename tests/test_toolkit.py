@@ -141,7 +141,7 @@ class TestPackVerify(unittest.TestCase):
             ]:
                 pk = {"kind": "x", "body": {}, "honest_scope": scope}
                 pk["pack_sha3"] = canonical.sha3({k: v for k, v in pk.items() if k != "pack_sha3"})
-                fp = os.path.join(tmp, "p.json"); open(fp, "w").write(_json.dumps(pk))
+                fp = os.path.join(tmp, "p.json"); open(fp, "w", encoding="utf-8").write(_json.dumps(pk))
                 hs = next(l for l in verify_pack(fp)["layers"] if l["layer"] == "honest-scope")
                 self.assertEqual(hs["status"], want, f"scope={scope!r}")
 
@@ -1882,7 +1882,7 @@ class TestAAT04(unittest.TestCase):
             with self.assertRaises(ValueError):
                 aat.from_jsonl('{"a": 1e999}\n')
             import subprocess, sys as _sys
-            open(os.path.join(tmp, "c.jsonl"), "w").write(aat.to_jsonl(es)); open(os.path.join(tmp, "deep.json"), "w").write("[" * 100000)
+            open(os.path.join(tmp, "c.jsonl"), "w", encoding="utf-8").write(aat.to_jsonl(es)); open(os.path.join(tmp, "deep.json"), "w", encoding="utf-8").write("[" * 100000)
             r = subprocess.run([_sys.executable, "-m", "omega_evidence.interop.aat", "verify", os.path.join(tmp, "c.jsonl"), "--epochs", os.path.join(tmp, "deep.json")],
                                capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             self.assertEqual(r.returncode, 2); self.assertIn('"ok": false', r.stdout); self.assertNotIn("Traceback", r.stderr)
@@ -2090,17 +2090,9 @@ class TestMlDsaHybrid(unittest.TestCase):
         self.assertTrue(autoload()["mldsa"]["registered"], autoload())
 
     def assert_owner_only(self, kf):
-        """POSIX: mode 0o600. Windows: the equivalent, an ACL with one entry (the current user, full control) and nothing
-        inherited — failed on 0.14.0, whose key file kept the ACL of its folder."""
-        if os.name != "nt":
-            self.assertEqual(oct(os.stat(kf).st_mode & 0o777), "0o600")
-            return
-        out = subprocess.run(["icacls", kf], capture_output=True, text=True, check=True).stdout
-        aces = [ln.replace(kf, "").strip() for ln in out.splitlines() if ":(" in ln]
-        self.assertEqual(len(aces), 1, out)
-        self.assertIn(os.environ["USERNAME"].lower(), aces[0].lower(), out)
-        self.assertIn("(F)", aces[0], out)
-        self.assertNotIn("(I)", aces[0], out)
+        """POSIX: mode 0o600; Windows: the ACL equivalent (tests/_ogni_sistema.owner_only_problems); on 0.14.0 the key
+        file on Windows kept its folder's entries, inherited"""
+        self.assertEqual(OS.owner_only_problems(kf), [])
 
     def _hybrid(self, tmp):
         pp = os.path.join(tmp, "p.json")
@@ -2130,17 +2122,17 @@ class TestMlDsaHybrid(unittest.TestCase):
     def test_stripped_and_tampered_layer(self):
         with tempfile.TemporaryDirectory() as tmp:
             pp, idt, signer = self._hybrid(tmp)
-            side_path = pp[:-5] + ".sig.json"; side = json.load(open(side_path)); good = dict(side)
+            side_path = pp[:-5] + ".sig.json"; side = json.load(open(side_path, encoding="utf-8")); good = dict(side)
             for k in ("pq_sig_alg", "pq_public_key_b64", "pq_signature_b64"):
                 side.pop(k)
-            json.dump(side, open(side_path, "w"))
+            json.dump(side, open(side_path, "w", encoding="utf-8"))
             self.assertTrue(verify_pack(pp)["valid"])                                                   # classical still fine
             v = verify_pack(pp, expected_pq_public_key_b64=signer.public_key_b64)                       # required -> stripped = FAIL
             self.assertFalse(v["valid"]); self.assertIs(v["pq_protected"], False)
             raw = bytearray(base64.b64decode(good["pq_signature_b64"])); raw[7] ^= 1
-            json.dump(dict(good, pq_signature_b64=base64.b64encode(bytes(raw)).decode()), open(side_path, "w"))
+            json.dump(dict(good, pq_signature_b64=base64.b64encode(bytes(raw)).decode()), open(side_path, "w", encoding="utf-8"))
             self.assertFalse(verify_pack(pp)["valid"])                                                  # present but invalid = FAIL
-            json.dump(dict(good, pq_signature_b64=good["pq_signature_b64"][:10] + " " + good["pq_signature_b64"][10:]), open(side_path, "w"))
+            json.dump(dict(good, pq_signature_b64=good["pq_signature_b64"][:10] + " " + good["pq_signature_b64"][10:]), open(side_path, "w", encoding="utf-8"))
             self.assertFalse(verify_pack(pp)["valid"])                                                  # lenient base64 refused
 
     def test_kms_signer_shape_with_stub(self):
@@ -2178,7 +2170,7 @@ class TestMlDsaHybrid(unittest.TestCase):
             with self.assertRaises(RuntimeError):                                                        # no classical sidecar
                 pack.pq_cosign(pp, self.m.MlDsaFileSigner(kf))
             idt = signing.Identity("a"); pack.sign_pack(pp, idt)
-            pack.add_pq_signature(pp, "ed25519", idt.public_key_b64, json.load(open(pp[:-5] + ".sig.json"))["signature_b64"])
+            pack.add_pq_signature(pp, "ed25519", idt.public_key_b64, json.load(open(pp[:-5] + ".sig.json", encoding="utf-8"))["signature_b64"])
             v = verify_pack(pp, expected_pq_public_key_b64=idt.public_key_b64)
             self.assertFalse(v["valid"]); self.assertIsNot(v["pq_protected"], True)
 
@@ -2192,20 +2184,20 @@ class TestMlDsaHybrid(unittest.TestCase):
         self.assertNotIn("ml-dsa-65", signing.SIG_ALGS); self.assertIn("ml-dsa-65", signing.PQ_SIG_ALGS)
         with tempfile.TemporaryDirectory() as tmp:
             pp, idt, signer = self._hybrid(tmp)
-            sp = pp[:-5] + ".sig.json"; side = json.load(open(sp))
+            sp = pp[:-5] + ".sig.json"; side = json.load(open(sp, encoding="utf-8"))
             digest = side["signed_pack_sha3"]
             pq_only = {"signer_id": "acme", "sig_alg": "ml-dsa-65", "signed_pack_sha3": digest,
                        "public_key_b64": side["pq_public_key_b64"], "signature_b64": side["pq_signature_b64"]}
-            json.dump(pq_only, open(sp, "w"))
+            json.dump(pq_only, open(sp, "w", encoding="utf-8"))
             v = verify_pack(pp)
             self.assertEqual(self._layer(v, "producer-signature")["status"], "SKIP")
             self.assertFalse(v["authenticated"]); self.assertFalse(v["valid"])
             for bad in (5, ["x"], None, {"a": 1}):                                                        # not a string → malformed
-                json.dump(dict(side, sig_alg=bad), open(sp, "w"))
+                json.dump(dict(side, sig_alg=bad), open(sp, "w", encoding="utf-8"))
                 v = verify_pack(pp)
                 self.assertEqual(self._layer(v, "producer-signature")["status"], "FAIL"); self.assertFalse(v["authenticated"])
-            json.dump(dict(side, sig_alg="rsa-pss"), open(sp, "w"))                                      # unknown string + odd pack_sha3: no crash
-            body = json.load(open(pp)); body["pack_sha3"] = 5; json.dump(body, open(pp, "w"))
+            json.dump(dict(side, sig_alg="rsa-pss"), open(sp, "w", encoding="utf-8"))                                      # unknown string + odd pack_sha3: no crash
+            body = json.load(open(pp, encoding="utf-8")); body["pack_sha3"] = 5; json.dump(body, open(pp, "w", encoding="utf-8"))
             v = verify_pack(pp); self.assertFalse(v["valid"]); self.assertIs(v["pq_protected"], False)
 
     def test_foreign_classical_key_under_trusted_id_is_not_pq_protected(self):
@@ -2234,7 +2226,7 @@ class TestMlDsaHybrid(unittest.TestCase):
             pp, idt, signer = self._hybrid(tmp)
             store = os.path.join(tmp, "trust.jsonl"); trust.TrustRegistry(store).trust("acme", idt.public_key_b64, pq_pubkey=signer.public_key_b64)
             good = open(store).read()
-            ln = json.loads(good.splitlines()[0]); ln["ts"] = "1999-01-01T00:00:00Z"; open(store, "w").write(json.dumps(ln, separators=(",", ":")) + "\n")
+            ln = json.loads(good.splitlines()[0]); ln["ts"] = "1999-01-01T00:00:00Z"; open(store, "w", encoding="utf-8").write(json.dumps(ln, separators=(",", ":")) + "\n")
             v = verify_pack(pp, trust_store=store, require_pq=True)
             self.assertFalse(v["valid"]); self.assertFalse(v["authenticated"]); self.assertIs(v["pq_protected"], False)
             self.assertIn("trust store", self._layer(v, "trusted-signer")["detail"])
@@ -2244,7 +2236,7 @@ class TestMlDsaHybrid(unittest.TestCase):
             txt = good.replace('"pubkey":"' + idt.public_key_b64 + '"', '"pubkey":"' + idt.public_key_b64 + '","pubkey":"' + mallory.public_key_b64 + '"', 1)
             e = json.loads(txt); e2 = {k: v for k, v in e.items() if k != "self_hash"}
             import hashlib as _h; fixed = _h.sha256(json.dumps(e2, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            open(store, "w").write(txt.replace(json.loads(good)["self_hash"], fixed))
+            open(store, "w", encoding="utf-8").write(txt.replace(json.loads(good)["self_hash"], fixed))
             pack.sign_pack(pp, mallory); pack.pq_cosign(pp, signer)
             v = verify_pack(pp, trust_store=store)
             self.assertFalse(v["authenticated"]); self.assertEqual(self._layer(v, "trusted-signer")["status"], "FAIL")
@@ -2286,7 +2278,7 @@ class TestMlDsaHybrid(unittest.TestCase):
     def test_pq_cosign_recomputes_the_digest_from_the_pack_body(self):
         with tempfile.TemporaryDirectory() as tmp:
             pp, idt, signer = self._hybrid(tmp)
-            body = json.load(open(pp)); body["x"] = 2; json.dump(body, open(pp, "w"))                      # stale pack_sha3 + sidecar
+            body = json.load(open(pp, encoding="utf-8")); body["x"] = 2; json.dump(body, open(pp, "w", encoding="utf-8"))                      # stale pack_sha3 + sidecar
             with self.assertRaises(RuntimeError):
                 pack.pq_cosign(pp, signer)
 
@@ -2311,7 +2303,7 @@ class TestMlDsaHybrid(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pp, idt, signer = self._hybrid(tmp)
             store = os.path.join(tmp, "trust.jsonl"); trust.TrustRegistry(store).trust("acme", idt.public_key_b64, pq_pubkey=signer.public_key_b64)
-            body = json.load(open(pp)); body["x"] = 2; json.dump(body, open(pp, "w"))
+            body = json.load(open(pp, encoding="utf-8")); body["x"] = 2; json.dump(body, open(pp, "w", encoding="utf-8"))
             v = verify_pack(pp, trust_store=store, require_pq=True)
             self.assertFalse(v["valid"]); self.assertFalse(v["authenticated"])
             self.assertEqual(self._layer(v, "trusted-signer")["status"], "PASS")                       # identity held, content did not
@@ -2320,12 +2312,12 @@ class TestMlDsaHybrid(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pp, idt, signer = self._hybrid(tmp)
             store = os.path.join(tmp, "trust.jsonl"); trust.TrustRegistry(store).trust("acme", idt.public_key_b64)
-            sp = pp[:-5] + ".sig.json"; side = json.load(open(sp))
+            sp = pp[:-5] + ".sig.json"; side = json.load(open(sp, encoding="utf-8"))
             for bad in (["acme"], "", 5, None):
-                sd = dict(side); sd["signer_id"] = bad; json.dump(sd, open(sp, "w"))
+                sd = dict(side); sd["signer_id"] = bad; json.dump(sd, open(sp, "w", encoding="utf-8"))
                 v = verify_pack(pp, trust_store=store)
                 self.assertEqual(self._layer(v, "producer-signature")["status"], "FAIL"); self.assertFalse(v["authenticated"])
-            json.dump({k: v for k, v in side.items() if k != "signer_id"}, open(sp, "w"))
+            json.dump({k: v for k, v in side.items() if k != "signer_id"}, open(sp, "w", encoding="utf-8"))
             v = verify_pack(pp, trust_store=store); self.assertEqual(self._layer(v, "producer-signature")["status"], "FAIL")
             os.chmod(sp, 0)                                                                              # unreadable: FAIL, not a crash
             try:
@@ -2342,7 +2334,7 @@ class TestMlDsaHybrid(unittest.TestCase):
             for edit in (lambda e: e.__setitem__("data", [1]), lambda e: e["data"].__setitem__("signer_id", ["acme"]),
                          lambda e: e["data"].__setitem__("pubkey", 5), lambda e: e["data"].__setitem__("pq_pubkey", "")):
                 e = json.loads(json.dumps(good)); edit(e); e["self_hash"] = _hash_entry(e)
-                open(store, "w").write(json.dumps(e, separators=(",", ":")) + "\n")
+                open(store, "w", encoding="utf-8").write(json.dumps(e, separators=(",", ":")) + "\n")
                 with self.assertRaises(ValueError):
                     trust.TrustRegistry(store)
                 v = verify_pack(pp, trust_store=store, require_pq=True)
@@ -2390,7 +2382,7 @@ class TestMlDsaHybrid(unittest.TestCase):
     def test_timestamp_sidecar_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             pp, idt, signer = self._hybrid(tmp)
-            open(pp[:-5] + ".tsr.json", "w").write("[1]")
+            open(pp[:-5] + ".tsr.json", "w", encoding="utf-8").write("[1]")
             v = verify_pack(pp); self.assertEqual(self._layer(v, "rfc3161")["status"], "FAIL"); self.assertFalse(v["valid"])
 
 
@@ -2496,14 +2488,16 @@ class NemesisInputsAndFaults(unittest.TestCase):
                     read_input(fifo)                                        # returns at once: O_NONBLOCK + not regular
             finally:
                 close()
-            z = os.path.join(tmp, "z"); os.symlink(DEVICE, z)
+            z = DEVICE if OS.WINDOWS else os.path.join(tmp, "z")   # Windows: NUL itself (a link to it does not open)
+            if not OS.WINDOWS:
+                os.symlink(DEVICE, z)
             with self.assertRaises(OSError):
                 read_input(z)
             with self.assertRaises(OSError):
                 read_input(tmp)                                             # a directory
 
     def test_non_regular_file_in_every_position_is_a_prompt_fail(self):
-        for kind in ("fifo", "devzero"):
+        for kind in ("fifo", "devzero", "dir"):   # dir: the non-regular file every system can put at any path
             for where in ("pack", "sig", "ledger", "tsr", "trust"):
                 with self.subTest(kind=kind, where=where), tempfile.TemporaryDirectory() as tmp:
                     p = self._signed(tmp, anchored=where in ("sig", "tsr"))
@@ -2511,9 +2505,21 @@ class NemesisInputsAndFaults(unittest.TestCase):
                               "tsr": p[:-5] + ".tsr.json", "trust": os.path.join(tmp, "t.jsonl")}[where]
                     if os.path.lexists(target):
                         os.remove(target)
-                    if kind == "fifo" and OS.WINDOWS:   # a named pipe lives in \\.\pipe\ only: a symbolic link to it here
-                        pipe, close = OS.win_pipe_server(f"oe-{os.getpid()}-{where}")
-                        os.symlink(pipe, target)
+                    if kind == "dir":
+                        os.mkdir(target); close = lambda: None  # noqa: E731
+                    elif OS.WINDOWS and where in ("sig", "ledger", "tsr"):
+                        # a sidecar's path is the pack's name with another ending; Windows has no FIFO or device node in
+                        # the file system (named pipes live in \\.\pipe\ only, and a symbolic link to one or to NUL does
+                        # not open: EINVAL, measured in CI on 27/11/2026), so nothing non-regular can stand there
+                        self.skipTest("Windows: no FIFO or device can be put at a sidecar's path (the dir case runs)")
+                    elif kind == "fifo" and OS.WINDOWS:   # pack or trust store: the path is given, a listening named pipe
+                        target, close = OS.win_pipe_server(f"oe-{os.getpid()}-{where}")
+                        if where == "pack":
+                            p = target
+                    elif kind == "devzero" and OS.WINDOWS:
+                        target, close = DEVICE, (lambda: None)
+                        if where == "pack":
+                            p = target
                     elif kind == "fifo":
                         os.mkfifo(target); close = lambda: None  # noqa: E731
                     else:
@@ -2551,7 +2557,7 @@ class NemesisInputsAndFaults(unittest.TestCase):
                 for v in values:
                     with self.subTest(field=field, value=v):
                         p = self._signed(tmp, anchored=True, idt=idt); sp = p[:-5] + ".sig.json"   # anchored: a SKIP would read PASS
-                        sd = json.load(open(sp)); sd[field] = v; json.dump(sd, open(sp, "w"))
+                        sd = json.load(open(sp, encoding="utf-8")); sd[field] = v; json.dump(sd, open(sp, "w", encoding="utf-8"))
                         r = verify_pack(p)
                         self.assertFalse(r["valid"])
                         if field != "pq_sig_alg":   # a malformed PQ field fails its own layer; the classical signature still holds
@@ -2559,7 +2565,7 @@ class NemesisInputsAndFaults(unittest.TestCase):
             # as produced: PASS (valid; not authenticated without a trust registry — 0.14.0, Decision 1 of 20/11/2026)
             p = self._signed(tmp, name="as-produced"); r = verify_pack(p); self.assertEqual((r["valid"], r["authenticated"]), (True, False))
             self.assertEqual(_layer_of(r, "producer-signature")["status"], "PASS")
-            sp = p[:-5] + ".sig.json"; sd = json.load(open(sp)); sd.pop("fingerprint"); sd.pop("signed_utc"); json.dump(sd, open(sp, "w"))
+            sp = p[:-5] + ".sig.json"; sd = json.load(open(sp, encoding="utf-8")); sd.pop("fingerprint"); sd.pop("signed_utc"); json.dump(sd, open(sp, "w", encoding="utf-8"))
             r = verify_pack(p); self.assertEqual(_layer_of(r, "producer-signature")["status"], "PASS")   # absent (legacy): PASS
 
     def test_internal_error_is_not_assessed_never_fail(self):
@@ -2571,7 +2577,7 @@ class NemesisInputsAndFaults(unittest.TestCase):
             self.assertEqual(r["layers"][-1]["layer"], "internal"); self.assertIs(r["layers"][-1]["assessed"], False)
             out = self._cli([p], env={"OEVERIFY_INJECT_INTERNAL_ERROR": "1"})
             self.assertEqual((json.loads(out.stdout)["verdict"], out.returncode), ("NOT_ASSESSED", 77))
-            dd = json.load(open(p)); dd["claim"] = "y"; json.dump(dd, open(p, "w"))   # a finding before the fault still wins
+            dd = json.load(open(p, encoding="utf-8")); dd["claim"] = "y"; json.dump(dd, open(p, "w", encoding="utf-8"))   # a finding before the fault still wins
             out = self._cli([p], env={"OEVERIFY_INJECT_INTERNAL_ERROR": "1"})
             self.assertEqual((json.loads(out.stdout)["verdict"], out.returncode), ("FAIL", 1))
 
@@ -2585,10 +2591,10 @@ class WeakEd25519Keys20260925(unittest.TestCase):
             p = os.path.join(d, "p.json")
             P.write_pack(p, P.build_pack("demo", {"claim": "anything"}, "Proves integrity; does NOT prove the claim."))
             P.sign_pack(p, signing.Identity("acme"))
-            sp = p[:-5] + ".sig.json"; sd = json.load(open(sp))
+            sp = p[:-5] + ".sig.json"; sd = json.load(open(sp, encoding="utf-8"))
             sd["public_key_b64"] = base64.b64encode(bytes([1]) + bytes(31)).decode()
             sd["signature_b64"] = base64.b64encode(bytes([1]) + bytes(63)).decode(); sd.pop("fingerprint", None)
-            json.dump(sd, open(sp, "w"))
+            json.dump(sd, open(sp, "w", encoding="utf-8"))
             st = os.path.join(d, "t.jsonl"); trust.TrustRegistry(st).trust("acme", sd["public_key_b64"])
             r = verifier.verify_pack(p, trust_store=st)
             self.assertFalse(r["valid"]); self.assertFalse(r.get("authenticated"))
@@ -2624,7 +2630,7 @@ class TestLedgerLines20260926(unittest.TestCase):
         from omega_evidence.ledger import BAD_KEPT
         with tempfile.TemporaryDirectory() as d:
             gov = agent.AgentEvidenceLog(os.path.join(d, "l.jsonl"), runtime_id="t")   # opens a valid (empty) ledger
-            open(os.path.join(d, "l.jsonl"), "w").write("{}\n" * (BAD_KEPT + 5))     # then it is corrupted on disk
+            open(os.path.join(d, "l.jsonl"), "w", encoding="utf-8").write("{}\n" * (BAD_KEPT + 5))     # then it is corrupted on disk
             v = gov.verify()
             self.assertFalse(v["chain_ok"])
             self.assertTrue(v.get("bad_entries_truncated"))
@@ -2782,7 +2788,7 @@ class TestSigAlg20260929(unittest.TestCase):
         if anchored:
             pack.anchor_pack(p, p[:-5] + ".ledger.jsonl")
         if signed:
-            pack.sign_pack(p, signing.Identity("acme")); sp = p[:-5] + ".sig.json"; sd = json.load(open(sp))
+            pack.sign_pack(p, signing.Identity("acme")); sp = p[:-5] + ".sig.json"; sd = json.load(open(sp, encoding="utf-8"))
             if alg is None:
                 sd.pop("sig_alg")
             else:
@@ -3195,8 +3201,8 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         pack.write_pack(pp, pack.build_pack("k", {"a": 1}, "does NOT prove x"))
         rec = P.build_evidence_record([pp])
         other = os.path.join(d, "o.json"); pack.write_pack(other, pack.build_pack("k", {"a": 2}, "does NOT prove x"))
-        notpack = os.path.join(d, "n.json"); open(notpack, "w").write('{"x": 1}')
-        broken = os.path.join(d, "b.json"); open(broken, "w").write("{")
+        notpack = os.path.join(d, "n.json"); open(notpack, "w", encoding="utf-8").write('{"x": 1}')
+        broken = os.path.join(d, "b.json"); open(broken, "w", encoding="utf-8").write("{")
         names = lambda r: {x["layer"]: (x["status"], x["detail"]) for x in r["layers"]}
         self.assertTrue(P.verify_evidence_record(rec, [pp])["valid"])                    # control
         r = P.verify_evidence_record(rec, [other])
@@ -3212,15 +3218,15 @@ class TestAuditV2MalformedInput(unittest.TestCase):
         r = ots.verify(os.path.join(d, "none.ots.json"))                 # no sidecar at all
         self.assertEqual((r["status"], r["confirmed"]), ("absent", False))
         for body in ("{}", '{"x": 1}'):                                   # K14: no status recorded is not malformed
-            f = os.path.join(d, f"nostatus{len(body)}.ots.json"); open(f, "w").write(body)
+            f = os.path.join(d, f"nostatus{len(body)}.ots.json"); open(f, "w", encoding="utf-8").write(body)
             self.assertEqual((ots.verify(f)["status"], ots.verify(f)["confirmed"]), ("pending-unverified", False))
-        f = os.path.join(d, "deep.ots.json"); open(f, "w").write("[" * 100000 + "]" * 100000)   # X03: nested too deep
+        f = os.path.join(d, "deep.ots.json"); open(f, "w", encoding="utf-8").write("[" * 100000 + "]" * 100000)   # X03: nested too deep
         self.assertEqual((ots.verify(f)["status"], ots.verify(f)["confirmed"]), ("malformed", False))
         os.mkdir(os.path.join(d, "dir.ots.json"))                       # NEMESIS V2 giro 2 Q2: unreadable sidecar
         r = ots.verify(os.path.join(d, "dir.ots.json"))
         self.assertEqual((r["status"], r["confirmed"]), ("malformed", False))
         for body in ("[]", "{", '{"status": null}', '{"status": 5}', '{"status": []}'):   # last three: NEMESIS P3
-            f = os.path.join(d, f"x{len(body)}.ots.json"); open(f, "w").write(body)
+            f = os.path.join(d, f"x{len(body)}.ots.json"); open(f, "w", encoding="utf-8").write(body)
             r = ots.verify(f)
             self.assertEqual((r["status"], r["confirmed"]), ("malformed", False))
 

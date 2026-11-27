@@ -223,11 +223,14 @@ class MlDsaFileSigner:
 
 def _owner_only_acl(path: str) -> None:
     """Windows equivalent of mode 0o600 (0.14.1; before, the key file kept the ACL inherited from its folder): inheritance
-    removed and one entry left, full control for the current user. icacls ships with every Windows since Vista. A failure
-    raises, and keygen removes the file: a private key is never left readable by others."""
+    removed and full control granted to the current user, SYSTEM and Administrators only — the set CPython 3.13 itself
+    applies on Windows for mode 0o700 (os.mkdir), SYSTEM and Administrators being able to take any file anyway. icacls
+    ships with every Windows since Vista. A failure raises, and keygen removes the file: a private key is never left
+    readable by others."""
     dom, name = os.environ.get("USERDOMAIN"), os.environ["USERNAME"]
     user = f"{dom}\\{name}" if dom else name
-    r = subprocess.run(["icacls", path, "/inheritance:r", "/grant:r", user + ":F"], capture_output=True, text=True)
+    r = subprocess.run(["icacls", path, "/inheritance:r", "/grant:r", user + ":F", "*S-1-5-18:F", "*S-1-5-32-544:F"],
+                       capture_output=True, text=True)
     if r.returncode != 0:
         raise OSError(f"{path}: icacls could not make the key file owner-only: {(r.stdout + r.stderr).strip()[-300:]}")
 

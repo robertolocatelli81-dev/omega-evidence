@@ -92,7 +92,7 @@ def make_sources(root):
             P.sign_pack(p, idt)
         if tsr:
             dg = hashlib.sha256(open(p, "rb").read()).hexdigest()
-            with open(p[:-5] + ".tsr.json", "w", encoding="utf-8") as f:
+            with open(p[:-5] + ".tsr.json", "w", encoding="utf-8", newline="") as f:
                 json.dump({"digest_sha256": dg, "tsa": "x", "tsr_b64": "MAMCAQA=", "stamped_utc": "2026-10-11T00:00:00+00:00"}, f)
         out[name] = d
     mk("signed-anchored", {"claim": "x", "n": 1})
@@ -111,7 +111,7 @@ def edit_json(path, fn):
     with open(path, encoding="utf-8") as f:
         o = json.load(f)
     fn(o)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", newline="") as f:
         json.dump(o, f, ensure_ascii=False)
 
 
@@ -125,7 +125,7 @@ def rechain(lp, fn):
         if prev is not None:
             e["prev_hash"] = prev
         e["self_hash"] = _hash_entry(e); prev = e["self_hash"]
-    with open(lp, "w", encoding="utf-8") as f:
+    with open(lp, "w", encoding="utf-8", newline="") as f:
         f.write("".join(json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n" for e in es))
 
 
@@ -166,7 +166,7 @@ def m_sig_dup_key(rng, p, has_sig, has_tsr):
     with open(sp, encoding="utf-8") as f:
         txt = f.read().rstrip().rstrip("}")
     k = rng.choice(["signer_id", "sig_alg", "signed_utc"])
-    with open(sp, "w", encoding="utf-8") as f:
+    with open(sp, "w", encoding="utf-8", newline="") as f:
         f.write(txt + ', "%s": "dup"}' % k)
     return "sig_dup_key", "FAIL", None, None
 
@@ -175,7 +175,7 @@ def _tsr_write(p, extra, bad_digest=False):
     dg = hashlib.sha256(open(p, "rb").read()).hexdigest()
     side = {"digest_sha256": ("0" * 64 if bad_digest else dg), "tsa": "x", "tsr_b64": "MAMCAQA=", "stamped_utc": "2026-10-11T00:00:00+00:00"}
     side.update(extra)
-    with open(p[:-5] + ".tsr.json", "w", encoding="utf-8") as f:
+    with open(p[:-5] + ".tsr.json", "w", encoding="utf-8", newline="") as f:
         json.dump(side, f, ensure_ascii=False)
 
 
@@ -217,7 +217,7 @@ def m_ledger_unknown_no_rehash(rng, p, has_sig, has_tsr):
     with open(lp, encoding="utf-8") as f:
         es = [json.loads(ln) for ln in f if ln.strip()]
     es[0][k] = "x"
-    with open(lp, "w", encoding="utf-8") as f:
+    with open(lp, "w", encoding="utf-8", newline="") as f:
         f.write("".join(json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n" for e in es))
     return "ledger_unknown_no_rehash", "FAIL", None, None
 
@@ -227,7 +227,7 @@ def m_ledger_anchor_fields_top_level(rng, p, has_sig, has_tsr):
         H = json.load(f)["pack_sha3"]
     e0 = {"idx": 0, "ts": "2026-10-11T00:00:00+00:00", "data": {}, "prev_hash": "0" * 64, "anchored_pack_sha3": H, "anchored_utc": "2026-10-11T00:00:00+00:00"}
     e0["self_hash"] = _hash_entry(e0)
-    with open(p[:-5] + ".ledger.jsonl", "w", encoding="utf-8") as f:
+    with open(p[:-5] + ".ledger.jsonl", "w", encoding="utf-8", newline="") as f:
         f.write(json.dumps(e0, separators=(",", ":")) + "\n")
     return "ledger_anchor_fields_top_level", "PASS", None, None
 
@@ -237,7 +237,7 @@ def m_ledger_dup_key(rng, p, has_sig, has_tsr):
     with open(lp, encoding="utf-8") as f:
         lines = f.read().splitlines()
     lines[0] = lines[0].rstrip().rstrip("}") + ',"ts":"dup"}'
-    with open(lp, "w", encoding="utf-8") as f:
+    with open(lp, "w", encoding="utf-8", newline="") as f:
         f.write("\n".join(lines) + "\n")
     return "ledger_dup_key", "FAIL", None, None
 
@@ -306,7 +306,9 @@ def discover(tree, tmp, only=None, js_override=None):
 
 def run_one(cmd, cwd, path):
     try:
-        out = subprocess.run(cmd + [path], capture_output=True, text=True, timeout=120, cwd=cwd)
+        # UTF-8 both ways: Node, Go and Java write UTF-8; Python's stdout is the locale's (cp1252 on Windows) unless told
+        out = subprocess.run(cmd + [path], capture_output=True, encoding="utf-8", errors="replace", timeout=120, cwd=cwd,
+                             env=dict(os.environ, PYTHONIOENCODING="utf-8"))
         r = json.loads(out.stdout)
     except Exception:  # noqa: BLE001
         return ("NONJSON/CRASH", None), None
@@ -322,6 +324,8 @@ def layer_detail(receipt, layer):
 
 
 def main(argv=None):
+    if hasattr(sys.stdout, "reconfigure"):   # a mutated key outside the console's code page must not stop the report
+        sys.stdout.reconfigure(errors="backslashreplace")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n", type=int, default=None, help="number of mutations (default 800; --quick = 100)")
     ap.add_argument("--quick", action="store_true")
@@ -383,7 +387,7 @@ def main(argv=None):
         for f_ in failures[:12]:
             print("  [BAD]", f_["mutation"], "expected", f_["expected"], f_["results"], "named", f_["named"])
         if a.out:
-            with open(a.out, "w", encoding="utf-8") as f:
+            with open(a.out, "w", encoding="utf-8", newline="") as f:
                 json.dump(summary, f, indent=1, ensure_ascii=False)
         ok = disagree == 0 and not any(out_of_class.values()) and not any(unnamed.values())
         print("RESULT:", "GREEN" if ok else "RED")

@@ -68,5 +68,21 @@ class Ipv4LiteralOnEverySystem(unittest.TestCase):
         self.assertGreater(n, 1000)   # the generator reaches addresses, not only refusals
 
 
+class OwnerOnlyCheckCanFail(unittest.TestCase):
+    """the positive control of the owner-only check the ML-DSA key file passes (tests/test_toolkit.py): a file made
+    the ordinary way, here, is not owner-only by it (Windows: the folder's entries, inherited; POSIX: the umask's mode)"""
+
+    def test_an_ordinary_file_is_not_owner_only(self):
+        import tempfile
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import _ogni_sistema as OS
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "plain")
+            open(f, "wb").close()
+            if not OS.WINDOWS:
+                os.chmod(f, 0o644)
+            self.assertNotEqual(OS.owner_only_problems(f), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

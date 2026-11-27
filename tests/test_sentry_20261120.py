@@ -169,10 +169,12 @@ class TestAatCliReadsBoundedRegularFiles(unittest.TestCase):
                 self.assertIn("not a regular file", json.loads(out)["error"], args)
 
     def test_a_device_or_a_directory_is_refused(self):
-        """fails on 9c55515: a symlink to /dev/zero was read until memory ran out (Windows: a symlink to the NUL device)"""
+        """fails on 9c55515: a symlink to /dev/zero was read until memory ran out (Windows: the NUL device itself; a
+        symbolic link to it does not open there, EINVAL)"""
         with tempfile.TemporaryDirectory() as tmp:
-            link = os.path.join(tmp, "chain.jsonl")
-            os.symlink("\\\\.\\NUL" if OS.WINDOWS else "/dev/zero", link)
+            link = "\\\\.\\NUL" if OS.WINDOWS else os.path.join(tmp, "chain.jsonl")
+            if not OS.WINDOWS:
+                os.symlink("/dev/zero", link)
             for path in (link, tmp):
                 rc, out, err = self._cli("verify", path)
                 self.assertEqual(rc, 2, (path, out[:200], err[-300:]))

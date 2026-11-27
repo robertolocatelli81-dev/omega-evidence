@@ -19,7 +19,7 @@ these modes:
   slow       a pipe read 0.5 s late: a receipt over 64 KiB still arrives whole, byte for byte the file's
   fsize      stdout to a regular file under `ulimit -f 4` (4 096 bytes): a receipt over that size gets a SHORT write and
              then EFBIG — Node's stdout on a file used to drop the rest of a short write and exit 0 (12/10/2026)
-  fsize_cut  stdout appended to a file of 1 000 bytes under `ulimit -f 1` (1 024 bytes): 24 bytes taken, then EFBIG — with
+  fsize_cut  stdout appended to a file of 8 168 bytes under `ulimit -f 8` (8 KiB): 24 bytes taken, then EFBIG — with
              PYTHONUNBUFFERED (or -u) Python's text layer dropped the rest of that short write and 0.11.3 at 5520cd8 exited
              with the verdict's code (13/10/2026)
 In every losing mode: exit 74, one `receipt not written: <reason>` line on stderr, no traceback, no "Exception ignored".
@@ -161,6 +161,7 @@ def _argv(runtime, pack):
     return base + [pack, "--ledger", led] if runtime in ("python", "node") else base + [pack, "-ledger", led]
 
 
+FSIZE_FILLED = 8192 - 24
 NO_FSIZE = "Windows has no per-process file-size limit (ulimit -f): a short write to a file cannot be made there"
 
 
@@ -197,15 +198,16 @@ def run_mode(argv, mode, env=None):
     if OS.WINDOWS and mode == "closed":
         p = subprocess.run(_closed_fd_argv(argv, 1), stderr=subprocess.PIPE, cwd=ROOT, timeout=120)
         return p.returncode, None, p.stderr.decode("utf-8", "replace")
-    if mode == "fsize_cut":   # 1 000 bytes already in the file, limit 1 024: a short write of 24 bytes, then EFBIG
+    if mode == "fsize_cut":   # 8 168 bytes in the file, limit 8 KiB: a short write of 24 bytes, then EFBIG. A page-aligned
+        # limit (0.14.1): on macOS a 1 024-byte limit let a write end at 1 172 bytes (measured in CI, 27/11/2026)
         with tempfile.TemporaryDirectory() as td:
             o = os.path.join(td, "out")
             with open(o, "wb") as f:
-                f.write(b"x" * 1000)
+                f.write(b"x" * FSIZE_FILLED)
             cmd = " ".join(shlex.quote(a) for a in argv)
-            p = subprocess.run(["bash", "-c", f"ulimit -f 1; exec {cmd} >> {shlex.quote(o)}"], stderr=subprocess.PIPE, cwd=ROOT, timeout=120)
+            p = subprocess.run(["bash", "-c", f"ulimit -f 8; exec {cmd} >> {shlex.quote(o)}"], stderr=subprocess.PIPE, cwd=ROOT, timeout=120)
             with open(o, "rb") as f:
-                return p.returncode, f.read()[1000:], p.stderr.decode("utf-8", "replace")
+                return p.returncode, f.read()[FSIZE_FILLED:], p.stderr.decode("utf-8", "replace")
     if mode == "file":
         with tempfile.TemporaryFile() as f:
             p = subprocess.run(argv, stdout=f, stderr=subprocess.PIPE, cwd=ROOT, timeout=120)
@@ -572,7 +574,7 @@ class TestPython(_PackCLI):
         r, w = os.pipe()
         OS.set_nonblocking(w)
         filled = _fill(w)
-        s = io.TextIOWrapper(io.BufferedWriter(io.FileIO(w, "w", closefd=False)), encoding="utf-8")
+        s = io.TextIOWrapper(io.BufferedWriter(io.FileIO(w, "w", closefd=False)), encoding="utf-8", newline="\n")
         s.write("before\n")
         got = []
 

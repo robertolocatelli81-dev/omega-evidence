@@ -56,7 +56,7 @@ sys.path.insert(0, os.path.join(sys.argv[1], "tests"))
 import _ogni_sistema as OS
 case, root, tsr, ca, recp = sys.argv[2:7]
 from omega_evidence import timestamp as T, preservation as P
-rec = json.load(open(recp))
+rec = json.load(open(recp, encoding="utf-8"))
 kw = {}
 if case == "nproc":
     OS.limit_self_processes()   # RLIMIT_NPROC 1; Windows: a Job Object of one process

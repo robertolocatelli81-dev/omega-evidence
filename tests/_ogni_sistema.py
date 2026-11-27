@@ -18,7 +18,6 @@ macOS and Windows). Each one names what it stands for; where a system has none, 
 import os
 import subprocess
 import sys
-import time
 
 WINDOWS = os.name == "nt"
 MACOS = sys.platform == "darwin"
@@ -141,13 +140,12 @@ def set_nonblocking(fd):
 
 
 def full_file():
-    """a path whose writes fail with ENOSPC, or None: /dev/full, else a new file on the filled volume OE_FULL_DIR"""
+    """a path whose writes fail with ENOSPC, or None: /dev/full, else the empty file `out` the CI made on the filled
+    volume OE_FULL_DIR before filling it (a full HFS+ volume refuses to create a file at all)"""
     if os.path.exists("/dev/full"):
         return "/dev/full"
-    d = os.environ.get("OE_FULL_DIR")
-    if d and os.path.isdir(d):
-        return os.path.join(d, "out-%d-%d" % (os.getpid(), time.monotonic_ns()))
-    return None
+    f = os.path.join(os.environ.get("OE_FULL_DIR", ""), "out")
+    return f if os.environ.get("OE_FULL_DIR") and os.path.isfile(f) else None
 
 
 FULL_WHY = "no /dev/full and no filled volume in OE_FULL_DIR (the CI makes one on macOS and Windows)"
@@ -159,3 +157,19 @@ def win_pipe_server(name):
     path = "\\\\.\\pipe\\" + name
     lst = Listener(path, family="AF_PIPE")
     return path, lst.close
+
+
+def owner_only_problems(path):
+    """[] when `path` is owner-only, else what is not. POSIX: mode 0o600. Windows: no entry inherited, full control for
+    the current user, nobody else but SYSTEM, Administrators and OWNER RIGHTS (CPython 3.13's set for mode 0o700)."""
+    if not WINDOWS:
+        mode = os.stat(path).st_mode & 0o777
+        return [] if mode == 0o600 else [oct(mode)]
+    out = subprocess.run(["icacls", path], capture_output=True, text=True, check=True).stdout
+    aces = [ln.replace(path, "").strip() for ln in out.splitlines() if ":(" in ln]
+    me = os.environ["USERNAME"].lower()
+    allowed = ("nt authority\\system:", "builtin\\administrators:", "owner rights:")
+    bad = [a for a in aces if "(I)" in a or not (me in a.lower().split(":")[0] or a.lower().startswith(allowed))]
+    if not any(me in a.lower() and "(F)" in a for a in aces):
+        bad.append("no full control for " + me)
+    return bad

@@ -698,7 +698,8 @@ class TemporaryFilesAreRemoved(unittest.TestCase):
             "    print('ready', flush=True)\n"
             "    if sys.argv[3] == 'raise':\n"
             "        raise RuntimeError('stopped')\n"
-            "    time.sleep(60)\n"
+            "    for _ in range(600):\n"          # short sleeps: on Windows time.sleep wakes for Ctrl-C only, not for
+            "        time.sleep(0.1)\n"           # SIGBREAK, so its handler would run after the whole sleep
             "O._main = fake\n"
             "O.main()\n")
         r = subprocess.run([sys.executable, "-c", script, ROOT, probe, "raise"], capture_output=True, text=True, timeout=60)
