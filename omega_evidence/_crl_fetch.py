@@ -64,6 +64,7 @@ after `timeout` seconds in all is dropped. The proxies of the environment are us
 
 from __future__ import annotations
 
+import errno
 import http.client
 import ipaddress
 import socket
@@ -73,7 +74,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import List, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from . import _tsa_keyid
 
@@ -150,11 +151,11 @@ def check_url(url) -> Tuple[str, str, int, str]:
     try:
         u = urlsplit(url)
         host, port = u.hostname, u.port
-    except ValueError as e:
-        raise Refused(f"not a URL: {str(e)[:60]}") from None
+    except ValueError:
+        raise Refused("not a URL (urllib.parse refuses it)") from None   # its message repeats the port or the host (0.14.1)
     scheme = u.scheme.lower()
     if scheme not in ("http", "https"):
-        raise Refused(f"scheme {u.scheme[:16]!r} (only http or https)")
+        raise Refused("the scheme is not http or https")   # not repeated: a password typed in its place (0.14.1)
     if "@" in u.netloc:
         raise Refused("userinfo in the URL")
     if not host:
@@ -172,6 +173,25 @@ def check_url(url) -> Tuple[str, str, int, str]:
     if not host:
         raise Refused("no host")
     return scheme, host, port or (443 if scheme == "https" else 80), (u.path or "/") + ("?" + u.query if u.query else "")
+
+
+def reason(e: BaseException) -> str:
+    """What the error of asking a URL may say (0.14.1): a refusal of this module, whose reasons repeat nothing of the URL,
+    or else the exception's type and errno name, never str(e), which a library may fill with the URL it was given."""
+    if isinstance(e, Refused):
+        return f"Refused: {e}"
+    n = getattr(e, "errno", None)
+    if not isinstance(n, int):
+        n = getattr(getattr(e, "reason", None), "errno", None)   # urllib.error.URLError wraps the OSError
+    return type(e).__name__ + (f" ({errno.errorcode.get(n, n)})" if isinstance(n, int) else "")
+
+
+def url_for_record(url) -> str:
+    """The URL a record names (0.14.1): scheme, host, port and path of a URL rule 1 accepts (so no userinfo), without its
+    query and fragment, which can carry an access token. Refused for a URL rule 1 refuses."""
+    check_url(url)
+    u = urlsplit(url)
+    return urlunsplit((u.scheme.lower(), u.netloc, u.path, "", ""))
 
 
 def _resolve(host: str, port: int) -> List[str]:

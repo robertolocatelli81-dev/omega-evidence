@@ -73,15 +73,16 @@ def submit(digest_sha256_hex: str, calendars: Optional[List[str]] = None,
     cals = calendars or DEFAULT_CALENDARS
     results, errors = [], []
     for cal in cals:
-        url = cal.rstrip("/") + "/digest"
+        named = ""   # a calendar URL is written without query and fragment; a refused one is not written (0.14.1)
         try:
-            body = _crl_fetch.ask(url, data=digest, timeout=timeout, max_bytes=OTS_REPLY_MAX_BYTES,
+            named = _crl_fetch.url_for_record(cal)
+            body = _crl_fetch.ask(cal.rstrip("/") + "/digest", data=digest, timeout=timeout, max_bytes=OTS_REPLY_MAX_BYTES,
                                   headers={"Content-Type": "application/octet-stream",
                                            "Accept": "application/octet-stream",
                                            "User-Agent": "omega-evidence/ots"})   # no redirect, bounded
-            results.append({"calendar": cal, "timestamp_b64": base64.b64encode(body).decode()})
+            results.append({"calendar": named, "timestamp_b64": base64.b64encode(body).decode()})
         except Exception as e:  # noqa: BLE001 - fail-soft per calendar
-            errors.append({"calendar": cal, "error": f"{type(e).__name__}: {e}"})
+            errors.append({"calendar": named, "error": _crl_fetch.reason(e)})
     return {"submitted": results, "errors": errors,
             "status": "pending-calendar-attested" if results else "no-calendar-reached"}
 

@@ -678,7 +678,7 @@ def anchor_epoch(records: List[Dict[str, Any]], epoch_id: Optional[str] = None,
         st = _ts.stamp(imprint, tsa_url)
         if not st.get("anchored") or not st.get("tsr_b64"):
             raise RuntimeError(f"TSA anchoring requested and failed: {st.get('note')} — no anchor is returned without a token")
-        anchor["tsa"] = {"tsa_url": tsa_url, "message_imprint_sha256": imprint, "over": "SHA-256(raw 32-byte merkle_root)",
+        anchor["tsa"] = {"tsa_url": st["tsa"], "message_imprint_sha256": imprint, "over": "SHA-256(raw 32-byte merkle_root)",
                          "token": st["tsr_b64"], "anchored": True}
     return anchor
 

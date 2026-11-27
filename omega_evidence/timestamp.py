@@ -51,7 +51,6 @@ import re
 import shutil
 import subprocess  # nosec B404 - fixed-arg openssl calls, no shell
 import tempfile
-from urllib.parse import urlparse
 from typing import Dict, List, Optional, Tuple
 
 from . import _crl_fetch, _tsa_keyid
@@ -153,9 +152,13 @@ TSA_REPLY_MAX_BYTES = 1024 * 1024   # an RFC 3161 reply with its certificates is
 
 def stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
     """Request an RFC 3161 token for digest_hex from a TSA. Returns
-    {anchored, tsa, tsr_b64} or {anchored: False, note}."""
-    if urlparse(tsa_url).scheme not in ("http", "https"):
-        return {"anchored": False, "note": "TSA URL scheme not allowed"}
+    {anchored, tsa, tsr_b64} or {anchored: False, note}. `tsa` is the URL without its query and fragment; a URL with
+    userinfo (`user:password@`) is refused before openssl runs, and neither it nor the text of a network error is
+    repeated in `note` (0.14.1)."""
+    try:   # before openssl and the network; the URL is not repeated, a refused one nor an accepted one (0.14.1)
+        tsa = _crl_fetch.url_for_record(tsa_url)
+    except _crl_fetch.Refused as e:
+        return {"anchored": False, "note": f"TSA URL refused: {e}"}
     exe = shutil.which("openssl")
     if not exe:
         return {"anchored": False, "note": "openssl absent (RFC 3161 optional)"}
@@ -179,10 +182,10 @@ def stamp(digest_hex: str, tsa_url: str, timeout: int = 20) -> Dict:
         # granted status: openssl refuses to parse a non-granted reply that carries one ("token present").
         _, imprint_hex = _reply_facts(exe, tsr, timeout)
         if imprint_hex != digest_hex.lower():
-            return {"anchored": False, "tsa": tsa_url, "note": "TSA reply carries no token for this digest"}
-        return {"anchored": True, "tsa": tsa_url, "tsr_b64": base64.b64encode(resp).decode()}
+            return {"anchored": False, "tsa": tsa, "note": "TSA reply carries no token for this digest"}
+        return {"anchored": True, "tsa": tsa, "tsr_b64": base64.b64encode(resp).decode()}
     except Exception as e:  # noqa: BLE001
-        return {"anchored": False, "note": f"{type(e).__name__}: {str(e)[:80]}"}
+        return {"anchored": False, "note": _crl_fetch.reason(e)}
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

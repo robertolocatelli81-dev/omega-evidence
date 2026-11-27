@@ -451,6 +451,49 @@ public key was read). Rotating the classical key (`rotate`) keeps the pinned PQ 
 registered only after the NIST ACVP known-answer gate, which includes two empty-context signatures through the
 very function registered) the layer is reported present-but-unverifiable (never a pass).
 
+### 0.14.1 (unreleased) — a secret given to the toolkit does not come out of it (27 November 2026)
+
+A review of 0.14.0 for one class: a value that can be a secret — a key, a password in a URL, a token, a value typed
+where a name goes — must not appear in what the toolkit writes or prints. `tests/test_secrets_20261127.py` puts a canary
+in every input that takes a key, a URL or a token (the Ed25519 seed of `Identity`, the ML-DSA-65 key file, the AWS KMS
+key id and the errors of its client, the ES256 key of `interop.aat`, every TSA URL, the OpenTimestamps calendars, the
+two URLs of `chip_registry`, attestation values, a key file where a pack, ledger, trust store, AAT chain or public key
+goes) and searches the return values, the files written, standard output and error of the two CLIs, the exceptions and
+the argv of openssl, raw, as any 12-character piece, in hex, decimal, base64 and base64url at each offset. On 0.14.0
+(the files of the package in the PyPI wheel are those of the tag) 6 of its 16 tests fail (82 cases); with the changes below all pass.
+
+- **A URL that is refused was repeated.** `ots.submit` (and so `ots.stamp_pack`, which writes the `.ots.json` sidecar)
+  recorded each refused calendar URL as given in `calendar_errors`: `https://user:password@host` was refused before the
+  network and its password written to the sidecar. `_crl_fetch.check_url` repeated up to 60 characters of the message of
+  `urllib.parse` (`Port could not be cast to integer value as '<text>'`, `'<host>' does not appear to be an IPv4 or IPv6
+  address`), which went into the `note` of `timestamp.stamp` and so into an evidence record, an AAT error, a
+  `chip_registry` reason; and `timestamp.stamp` parsed the URL outside its `try`, so `http://[<text>]/` raised a
+  `ValueError` carrying the text. Now a refused calendar is written with `calendar: ""`, `check_url` says
+  `not a URL (urllib.parse refuses it)` and `the scheme is not http or https` without repeating any part, and `stamp`
+  checks the URL with `check_url` before openssl runs and returns `note: "TSA URL refused: <reason>"`.
+- **A URL written into a record has no query and no fragment** (an access token often travels there): `tsa` of
+  `stamp` / `pack.stamp_pack` / the evidence record, `tsa_url` of `aat.anchor_epoch`, `calendar` of `ots`, `source` of
+  a `chip_registry` candidate are the scheme, host, port and path (`_crl_fetch.url_for_record`). The request still goes
+  to the URL as given.
+- **A network error is named by its type and errno, never by its text** (`_crl_fetch.reason`: `URLError (ECONNREFUSED)`;
+  a refusal of `_crl_fetch` keeps its reason, which repeats nothing of the URL), in `stamp`, `ots.submit` and
+  `chip_registry`. Measured with an exception whose text holds the canary, standing for a library's message; no such
+  message of urllib was measured here.
+- **`AwsKmsMlDsaSigner`** repeated the KeyId given and 200 characters of the client's exception, chained as its cause.
+  Now `AWS KMS GetPublicKey failed: <type> (<AWS error code>)`, the code only when it is 1 to 64 ASCII letters or digits,
+  and the cause is not chained. `describe()` still names the key id.
+- **`interop.sdjwt.verify` refuses a JWK with a private or symmetric key member** (`d`, `p`, `q`, `dp`, `dq`, `qi`,
+  `oth`, `k`: RFC 7518 §6.2.2.1, §6.3.2, §6.4.1 and RFC 8037 §2, read at rfc-editor.org on 27/11/2026; RFC 7518 is
+  updated by RFC 9864, which defines algorithm identifiers, not key members), as the issuer's key and as the holder's in `cnf`, without
+  repeating it. 0.14.0 took it as the public key and the private member was not written anywhere.
+
+Measured and unchanged: the seed, the ML-DSA-65 key file, the ES256 key and the attestation values are not in any
+output; a key file given in place of a pack, a ledger, a trust store, an AAT chain or a public key is not printed by
+`omega-evidence-verify` (`python -m omega_evidence`) nor by `python -m omega_evidence.interop.aat`; the argv of openssl
+in the six TSA paths (`stamp`, `pack.stamp_pack`, the three of `preservation`, `aat.anchor_epoch`) holds no canary. Not
+covered: the environment inherited by openssl is the caller's, passed as it is; what a process keeps in memory, in a
+core dump or in swap.
+
 0.14.0 was released on 21 November 2026; its changes are the two 0.14.0 sections below (dated 20 November, the day of
 the benches and of the decisions; they also hold the changes of 21 November).
 
@@ -1530,6 +1573,7 @@ python3 tests/test_sdjwt_kb_20261117.py             # SD-JWT+KB: Key Binding JWT
 python3 tests/test_nist_acvp_vectors_20261117.py    # ML-DSA-65 vectors: every NIST case against NIST's verdict, closed reader
 python3 tests/test_uso_reale_20261118.py           # DSSE in ECDSA P-256, RFC 3161 tokens without certificate, sigstore bundles, the Quick start
 python3 tests/test_nemesis_20261118.py             # the same, review of 18/11/2026: unpadded base64, key hint, caller key, valid_for, media types
+python3 tests/test_secrets_20261127.py             # a secret given (key, URL password, token) is in no output, in 10 encodings or in part
 OMEGA_EVIDENCE_REAL_GITHUB=1 python3 tests/test_real_github_20261118.py   # the same on 25 real bundles from GitHub (network, gh)
 python3 tests/fuzz_toolkit.py --iterations 3000     # seeded mutation fuzz of the verifier and the ledger (exit 1 on a violation)
 python3 tests/fuzz_toolkit.py --ablate signature    # positive control: the sabotaged verifier must make the fuzzer red (6 ablations)

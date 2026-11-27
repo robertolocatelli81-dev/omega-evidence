@@ -107,13 +107,20 @@ class _NoBackend(Exception):
     pass
 
 
+_PRIVATE_JWK_MEMBERS = ("d", "p", "q", "dp", "dq", "qi", "oth", "k")
+
+
 def _issuer_key(key: Any):
     """("Ed25519", standard-base64 raw key) or ("P-256", cryptography public key) or (other kind, None). `key` is the
     standard base64 of a raw Ed25519 key (as before 0.12.0), a PEM SubjectPublicKeyInfo, or a JWK (RFC 7517) of kty
     OKP/Ed25519 or EC/P-256. A JWK's `use` other than "sig", or `key_ops` without "verify", makes it unusable (RFC 7517
-    §4.2, §4.3); its `alg`, when present, must be the header's (checked by the caller); other members are ignored, as
-    RFC 7517 §4 says."""
+    §4.2, §4.3); its `alg`, when present, must be the header's (checked by the caller); a JWK holding a private or
+    symmetric key member (d, p, q, dp, dq, qi, oth, k) is refused (0.14.1); other members are ignored, as RFC 7517 §4
+    says."""
     if isinstance(key, dict):
+        if any(m in key for m in _PRIVATE_JWK_MEMBERS):   # 0.14.1: a private key is refused, its members not repeated
+            raise _Reject("a JWK with a private or symmetric key member (RFC 7518 §6.2.2, §6.3.2, §6.4.1; "
+                             "RFC 8037 §2) is not a public key")   # the issuer's, or the holder's in cnf
         kty, crv = key.get("kty"), key.get("crv")
         if ("use" in key and key["use"] != "sig") or ("key_ops" in key and (not isinstance(key["key_ops"], list)
                                                                             or "verify" not in key["key_ops"])):

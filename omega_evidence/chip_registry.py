@@ -238,7 +238,7 @@ class ChipRegistry:
             body = _http_get(pack_url, timeout)
             sig = _http_get(sig_url, timeout)
         except Exception as e:   # noqa: BLE001 - fail-closed on any fetch failure
-            return {"applied": False, "reason": f"fetch failed: {e}", "added": [], "rejected": []}
+            return {"applied": False, "reason": f"fetch failed: {_crl_fetch.reason(e)}", "added": [], "rejected": []}
         with tempfile.TemporaryDirectory() as tmp:
             pp = os.path.join(tmp, "update.json")
             with open(pp, "wb") as f:
@@ -255,9 +255,10 @@ class ChipRegistry:
         for. Fail-closed on network error."""
         try:
             data = loads_bounded(_http_get(url, timeout).decode("utf-8"))
+            source = _crl_fetch.url_for_record(url)   # without query and fragment (0.14.1)
         except Exception as e:   # noqa: BLE001 - fail-closed
-            return {"discovered": [], "reason": f"fetch failed: {e}"}
-        return self.ingest_candidates(data.get("candidates", []), source=url)
+            return {"discovered": [], "reason": f"fetch failed: {_crl_fetch.reason(e)}"}
+        return self.ingest_candidates(data.get("candidates", []), source=source)
 
     def ingest_candidates(self, entries: List[Dict[str, Any]], source: str) -> Dict[str, Any]:
         """Record candidate classes from an already-fetched list (offline-testable).

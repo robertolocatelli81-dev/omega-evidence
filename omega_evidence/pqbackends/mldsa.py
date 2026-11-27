@@ -235,6 +235,15 @@ def _mldsa65_raw_from_spki(der: bytes) -> bytes:
     return raw
 
 
+def _kms_reason(e: BaseException) -> str:
+    """The type of a KMS client error and its AWS error code (botocore ClientError: "AccessDeniedException", ...), never
+    its text nor the KeyId given, which can be a secret typed in its place (0.14.1)."""
+    code = getattr(e, "response", None)
+    code = code.get("Error", {}).get("Code") if isinstance(code, dict) else None
+    ok = isinstance(code, str) and 0 < len(code) <= 64 and code.isascii() and code.isalnum()
+    return type(e).__name__ + (f" ({code})" if ok else "")
+
+
 class AwsKmsMlDsaSigner:
     """AWS KMS ML-DSA-65 (KeySpec ML_DSA_65, ML_DSA_SHAKE_256, MessageType RAW = empty context). boto3."""
     alg = ALG
@@ -253,7 +262,7 @@ class AwsKmsMlDsaSigner:
         try:
             r = self._client.get_public_key(KeyId=key_id)
         except Exception as e:  # noqa: BLE001
-            raise RuntimeError(f"AWS KMS GetPublicKey failed for {key_id}: {type(e).__name__}: {str(e)[:200]}") from e
+            raise RuntimeError(f"AWS KMS GetPublicKey failed: {_kms_reason(e)}") from None
         self.key_arn = str(r.get("KeyId") or key_id)
         self.public_key_b64 = base64.b64encode(_mldsa65_raw_from_spki(bytes(r["PublicKey"]))).decode()
 
@@ -265,7 +274,7 @@ class AwsKmsMlDsaSigner:
         try:
             r = self._client.sign(KeyId=self._key_id, Message=bytes(message), MessageType="RAW", SigningAlgorithm="ML_DSA_SHAKE_256")
         except Exception as e:  # noqa: BLE001
-            raise RuntimeError(f"AWS KMS Sign failed for {self._key_id}: {type(e).__name__}: {str(e)[:200]}") from e
+            raise RuntimeError(f"AWS KMS Sign failed: {_kms_reason(e)}") from None
         if r.get("SigningAlgorithm", "") != "ML_DSA_SHAKE_256":      # a response without the field is refused
             raise RuntimeError(f"AWS KMS signed with {r.get('SigningAlgorithm')}, not ML_DSA_SHAKE_256")
         if r.get("KeyId") and r["KeyId"] != self.key_arn:
