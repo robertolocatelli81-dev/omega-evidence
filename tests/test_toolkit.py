@@ -2203,6 +2203,10 @@ class TestMlDsaHybrid(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0][1:], ["C:\\k.key", "/inheritance:r", "/grant:r", "*S-1-3-4:F", "*S-1-5-18:F", "*S-1-5-32-544:F"])
         self.assertNotIn("intruder", " ".join(seen[0]))
+        self.assertEqual(seen[0][0], "icacls")
+        refused = types.SimpleNamespace(run=lambda argv, **kw: types.SimpleNamespace(returncode=5, stdout="", stderr="denied"))
+        with unittest.mock.patch.object(self.m, "subprocess", refused), self.assertRaises(OSError):
+            self.m._owner_only_acl("C:\\k.key")                        # fail-closed: icacls refused = raised
 
     def test_file_signer_pinned_tri_state(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -300,9 +300,10 @@ def _owner_only_acl(path: str) -> None:
     """Windows equivalent of mode 0o600 (0.14.1; before, the key file kept the ACL inherited from its folder):
     inheritance removed and full control granted to the file's owner (OWNER RIGHTS, S-1-3-4), SYSTEM and Administrators
     only — the set CPython 3.13 itself applies on Windows for mode 0o700 (os.mkdir: OW, SY, BA), SYSTEM and Administrators
-    being able to take any file anyway. The owner is the account that created the file, read by Windows from the
-    process token: not from USERNAME/USERDOMAIN, which the environment can set to another account. icacls ships with
-    every Windows since Vista. A failure raises."""
+    being able to take any file anyway. The owner is set by Windows from the token of the process that created the
+    file — its user, or the Administrators group for an elevated administrator whose default owner is that group (then
+    only an elevated process of that account reads the key) — never from USERNAME/USERDOMAIN, which the environment can
+    set to another account. icacls ships with every Windows since Vista. A failure raises."""
     r = subprocess.run(["icacls", path, "/inheritance:r", "/grant:r", "*S-1-3-4:F", "*S-1-5-18:F", "*S-1-5-32-544:F"],
                        capture_output=True, text=True)
     if r.returncode != 0:
