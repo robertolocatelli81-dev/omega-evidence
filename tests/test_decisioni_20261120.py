@@ -705,18 +705,26 @@ class TemporaryFilesAreRemoved(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("RuntimeError", r.stderr)
         self.assertEqual(os.listdir(probe), [])
-        p = subprocess.Popen([sys.executable, "-c", script, ROOT, probe, "sleep"], stdout=subprocess.PIPE, text=True)
+        import signal
+        import time
+        # Windows: terminate() is TerminateProcess, which no process can handle (SIGKILL); the stop a process can handle
+        # there is Ctrl-Break (SIGBREAK), sent to a child started in its own process group. Windows has no SIGHUP.
+        stop, group = ((signal.CTRL_BREAK_EVENT, subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else
+                       (signal.SIGTERM, 0))
+        p = subprocess.Popen([sys.executable, "-c", script, ROOT, probe, "sleep"], stdout=subprocess.PIPE, text=True,
+                             creationflags=group)
         self.assertEqual(p.stdout.readline().strip(), "ready")
         self.assertEqual(len(os.listdir(probe)), 1)                    # control: the cases are there while it runs
-        p.terminate()
+        p.send_signal(stop)
         p.wait(timeout=30)
         p.stdout.close()
         self.assertEqual(os.listdir(probe), [])
         # fails on 1e2896e: SIGHUP, and a second SIGTERM while the directory is being removed, left it
-        import signal
-        import time
-        for sigs in ([signal.SIGHUP], [signal.SIGTERM, signal.SIGTERM], [signal.SIGTERM, signal.SIGINT]):
-            p = subprocess.Popen([sys.executable, "-c", script, ROOT, probe, "many"], stdout=subprocess.PIPE, text=True)
+        cases = ([[stop], [stop, stop]] if os.name == "nt" else
+                 [[signal.SIGHUP], [signal.SIGTERM, signal.SIGTERM], [signal.SIGTERM, signal.SIGINT]])
+        for sigs in cases:
+            p = subprocess.Popen([sys.executable, "-c", script, ROOT, probe, "many"], stdout=subprocess.PIPE, text=True,
+                                 creationflags=group)
             self.assertEqual(p.stdout.readline().strip(), "ready")
             self.assertEqual(len(os.listdir(probe)), 1)
             for n, s in enumerate(sigs):
@@ -752,9 +760,11 @@ class TemporaryFilesAreRemoved(unittest.TestCase):
         # fails on 1e2896e: a run stopped by SIGTERM or SIGHUP left the corpus directory
         import signal
         import time
-        for s in (signal.SIGTERM, signal.SIGHUP):
+        win = os.name == "nt"   # Windows: Ctrl-Break (SIGBREAK) to its own process group; no SIGHUP there
+        for s in ((signal.CTRL_BREAK_EVENT,) if win else (signal.SIGTERM, signal.SIGHUP)):
             p = subprocess.Popen([sys.executable, os.path.join(ROOT, "tests", "fuzz_toolkit.py"), "--seed", "1", "--iterations",
-                                  "500000"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, cwd=ROOT)
+                                  "500000"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, cwd=ROOT,
+                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if win else 0)
             for _ in range(600):
                 if os.listdir(probe):
                     break

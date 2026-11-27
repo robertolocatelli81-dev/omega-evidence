@@ -667,7 +667,7 @@ def run(args):
     if threading.current_thread() is threading.main_thread():      # signal handlers can be set in the main thread only
         def _stop(signum, frame):
             sys.exit(128 + signum)
-        for s in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        for s in (signal.SIGTERM, getattr(signal, "SIGHUP", None), getattr(signal, "SIGBREAK", None)):
             if s is not None:
                 previous[s] = signal.signal(s, _stop)
         previous[signal.SIGINT] = signal.getsignal(signal.SIGINT)

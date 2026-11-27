@@ -50,18 +50,21 @@ basicConstraints = CA:FALSE
 
 # the child: sets its case up, calls verify and verify_evidence_record, prints what each returned or raised
 CHILD = r"""
-import json, os, resource, shutil, sys, tempfile
+import json, os, shutil, sys, tempfile
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, os.path.join(sys.argv[1], "tests"))
+import _ogni_sistema as OS
 case, root, tsr, ca, recp = sys.argv[2:7]
 from omega_evidence import timestamp as T, preservation as P
 rec = json.load(open(recp))
 kw = {}
 if case == "nproc":
-    resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))
+    OS.limit_self_processes()   # RLIMIT_NPROC 1; Windows: a Job Object of one process
 elif case == "notmp":
     tempfile.tempdir = os.path.join(recp + ".missing", "x")
 elif case == "efbig":
     tempfile.gettempdir()
+    import resource
     resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
 elif case == "slow":
     kw = {"timeout": 1}
@@ -85,7 +88,11 @@ def _run(*a):
     subprocess.run(list(a), check=True, capture_output=True)
 
 
-@unittest.skipUnless(EXE and hasattr(os, "fork"), "openssl absent (or no fork): the local TSA cannot be built")
+WIN = os.name == "nt"
+NO_FSIZE = "Windows has no per-process file-size limit: RLIMIT_FSIZE has no equivalent there"
+
+
+@unittest.skipUnless(EXE, "openssl absent: the local TSA cannot be built")
 class TestCheckNotRun(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -95,7 +102,7 @@ class TestCheckNotRun(unittest.TestCase):
         j = lambda n: os.path.join(d, n)  # noqa: E731
         cls.j = staticmethod(j)
         with open(j("tsa.cnf"), "w") as f:
-            f.write(CNF.format(d=d))
+            f.write(CNF.format(d=d.replace(os.sep, "/")))   # an OpenSSL config reads \ as an escape
         with open(j("serial"), "w") as f:
             f.write("01\n")
         _run(EXE, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout",
@@ -149,14 +156,18 @@ class TestCheckNotRun(unittest.TestCase):
             f.write(aat.to_jsonl(chain))
         with open(j("epochs.json"), "w") as f:
             json.dump([anchor], f)
-        os.mkdir(j("slow"))   # an openssl that answers `ts -verify` at once and `ts -reply` after 3 s
-        with open(j("slow/openssl"), "w") as f:
-            f.write('#!/bin/sh\ncase "$*" in *-reply*) sleep 3;; esac\nexec %s "$@"\n' % EXE)
-        os.chmod(j("slow/openssl"), 0o755)
-        os.mkdir(j("slowverify"))   # an openssl that answers `ts -verify` after 3 s
-        with open(j("slowverify/openssl"), "w") as f:
-            f.write('#!/bin/sh\ncase "$*" in *-verify*) sleep 3;; esac\nexec %s "$@"\n' % EXE)
-        os.chmod(j("slowverify/openssl"), 0o755)
+        for name, word in (("slow", "-reply"), ("slowverify", "-verify")):   # an openssl that answers `ts <word>` after 3 s
+            os.mkdir(j(name))
+            if WIN:   # no shebang there: openssl.cmd runs this Python on a script, the equivalent
+                with open(j(name + ".py"), "w") as f:
+                    f.write("import subprocess, sys, time\nif %r in sys.argv: time.sleep(3)\n"
+                            "sys.exit(subprocess.call([%r] + sys.argv[1:]))\n" % (word, EXE))
+                with open(j(name + "/openssl.cmd"), "w") as f:
+                    f.write('@"%s" "%s" %%*\n' % (sys.executable, j(name + ".py")))
+            else:
+                with open(j(name + "/openssl"), "w") as f:
+                    f.write('#!/bin/sh\ncase "$*" in *%s*) sleep 3;; esac\nexec %s "$@"\n' % (word, EXE))
+                os.chmod(j(name + "/openssl"), 0o755)
         os.mkdir(j("empty"))
 
     @classmethod
@@ -185,6 +196,9 @@ class TestCheckNotRun(unittest.TestCase):
 
     def test_fork_refused(self):   # 0.11.3: verified False, record valid false
         out = self.child("nproc")
+        if WIN:   # CreateProcess refused by the Job Object: the reason is the system's
+            self.assertNotRun(out, "cannot run openssl here: ")
+            return
         self.assertNotRun(out, "cannot run openssl here: BlockingIOError")
         self.assertEqual(out["verify"]["msg"], "cannot run openssl here: BlockingIOError: " + os.strerror(errno.EAGAIN))
 
@@ -192,6 +206,7 @@ class TestCheckNotRun(unittest.TestCase):
         self.assertNotRun(self.child("notmp"), "cannot write a temporary file for openssl: OSError: no usable "
                                                "temporary directory")
 
+    @unittest.skipIf(WIN, NO_FSIZE)
     def test_token_file_refused(self):   # 0.11.3: verified False (EFBIG on the token's temporary file)
         self.assertNotRun(self.child("efbig"), "cannot write a temporary file for openssl: OSError: File too large")
 
@@ -207,12 +222,26 @@ class TestCheckNotRun(unittest.TestCase):
         self.assertNotRun(out, "cannot run openssl here: OSError: no answer within 1 s", record=False)
 
     def aat_cli(self, nproc, epochs=True):
-        pre = "import resource; resource.setrlimit(resource.RLIMIT_NPROC, (1, 1)); " if nproc else ""
         args = (["verify", self.j("chain.jsonl"), "--epochs", self.j("epochs.json")] if epochs else
                 ["verify", self.j("chain_et.jsonl")])
+        if WIN:   # os.execv there starts a second process, which a one-process Job Object refuses: the CLI runs in this one
+            pre = ("import sys; sys.path.insert(0, 'tests'); import _ogni_sistema as OS; OS.limit_self_processes(); "
+                   if nproc else "import sys; ")
+            return subprocess.run([sys.executable, "-B", "-c", pre + "import runpy; sys.argv = ['aat'] + sys.argv[1:]; "
+                                   "runpy.run_module('omega_evidence.interop.aat', run_name='__main__')"] + args +
+                                  ["--tsa-ca", self.j("ca.crt")], cwd=ROOT, capture_output=True, timeout=120)
+        pre = "import resource; resource.setrlimit(resource.RLIMIT_NPROC, (1, 1)); " if nproc else ""
         return subprocess.run([sys.executable, "-c", pre + "import os, sys; os.execv(sys.argv[1], sys.argv[1:])",
                                sys.executable, "-B", "-m", "omega_evidence.interop.aat"] + args +
                               ["--tsa-ca", self.j("ca.crt")], cwd=ROOT, capture_output=True, timeout=120)
+
+    def assert_fork_refused_line(self, p):
+        if WIN:
+            self.assertTrue(p.stderr.startswith(b"receipt not written: cannot run openssl here: "), p.stderr)
+            self.assertEqual(p.stderr.count(b"\n"), 1, p.stderr)
+            return
+        self.assertEqual(p.stderr, ("receipt not written: cannot run openssl here: BlockingIOError: %s\n"
+                                    % os.strerror(errno.EAGAIN)).encode())
 
     def test_aat_cli_control_the_record_token_verifies(self):
         p = self.aat_cli(False, epochs=False)
@@ -222,8 +251,7 @@ class TestCheckNotRun(unittest.TestCase):
     def test_aat_cli_record_token_fork_refused_is_74(self):   # 0.11.3: exit 1, "external_timestamp token not verified"
         p = self.aat_cli(True, epochs=False)
         self.assertEqual((p.returncode, p.stdout), (74, b""), p.stderr[-300:])
-        self.assertEqual(p.stderr, ("receipt not written: cannot run openssl here: BlockingIOError: %s\n"
-                                    % os.strerror(errno.EAGAIN)).encode())
+        self.assert_fork_refused_line(p)
 
     def test_aat_cli_control_the_epoch_token_verifies(self):
         p = self.aat_cli(False)
@@ -234,9 +262,9 @@ class TestCheckNotRun(unittest.TestCase):
     def test_aat_cli_fork_refused_is_74(self):   # 0.11.3: exit 1, "RFC 3161 token over the root does not verify"
         p = self.aat_cli(True)
         self.assertEqual((p.returncode, p.stdout), (74, b""), p.stderr[-300:])
-        self.assertEqual(p.stderr, ("receipt not written: cannot run openssl here: BlockingIOError: %s\n"
-                                    % os.strerror(errno.EAGAIN)).encode())
+        self.assert_fork_refused_line(p)
 
+    @unittest.skipIf(WIN, NO_FSIZE)
     def test_aat_cli_no_temporary_file_is_74_with_its_own_line(self):   # 0.11.3: exit 2, "verifier error: FileNotFoundError"
         pre = "import resource; resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0)); "
         p = subprocess.run([sys.executable, "-c", pre + "import os, sys; os.execv(sys.argv[1], sys.argv[1:])",

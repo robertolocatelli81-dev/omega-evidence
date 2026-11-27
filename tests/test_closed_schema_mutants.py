@@ -26,8 +26,10 @@ class TestClosedSchemaMutants(unittest.TestCase):
     def _run(self, *extra):
         out = os.path.join(self.d, "out.json")
         r = subprocess.run([sys.executable, BENCH, "--quick", "--seed", "20261011", "--out", out, *extra], capture_output=True, text=True, timeout=1800, cwd=ROOT)
+        tail = r.stdout[-2000:] + r.stderr[-800:]
+        self.assertTrue(os.path.exists(out), f"the bench wrote no summary (exit {r.returncode}): {tail}")
         with open(out, encoding="utf-8") as f:
-            return r.returncode, json.load(f), r.stdout[-2000:] + r.stderr[-800:]
+            return r.returncode, json.load(f), tail
 
     def test_quick_bench_is_green_on_every_verifier_that_builds(self):
         rc, s, tail = self._run()

@@ -110,7 +110,7 @@ class TestValidityTimeOfRenewedTokens(unittest.TestCase):
         with open(cls._p(name + ".key"), "wb") as f:
             f.write(_key_pem(k))
         with open(cls._p(name + ".cnf"), "w") as f:
-            f.write(CNF.format(d=cls.d, n=name))
+            f.write(CNF.format(d=cls.d.replace(os.sep, "/"), n=name))
         return calendar.timegm(c.not_valid_after_utc.utctimetuple())
 
     @classmethod
@@ -340,7 +340,7 @@ class TestValidityTimeOfRenewedTokens(unittest.TestCase):
         with open(self._p("late_l.key"), "wb") as f:
             f.write(_key_pem(k))
         with open(self._p("late_l.cnf"), "w") as f:
-            f.write(CNF.format(d=self.d, n="late_l"))
+            f.write(CNF.format(d=self.d.replace(os.sep, "/"), n="late_l"))
         rec = self._record(["short_l", "late_l"], [0])        # late_l signs before its notBefore
         self._wait_until(max(exp, now + 2))
         res = PR.verify_evidence_record(rec, tsa_ca_file=self._p("ca.crt"))

@@ -40,6 +40,7 @@ import base64
 import binascii
 import json
 import os
+import subprocess
 from typing import Any, Dict, Optional
 
 from .. import signing
@@ -203,6 +204,13 @@ class MlDsaFileSigner:
         der = sk.private_bytes(ser.Encoding.DER, ser.PrivateFormat.PKCS8, ser.NoEncryption())
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
+            if os.name == "nt":   # 0o600 is ignored there; the ACL is set on the empty file, before the key is written
+                try:
+                    _owner_only_acl(path)
+                except Exception:
+                    f.close()
+                    os.remove(path)
+                    raise
             f.write(base64.b64encode(der).decode() + "\n")
         return {"path": path, "alg": ALG, "public_key_b64": base64.b64encode(sk.public_key().public_bytes_raw()).decode()}
 
@@ -211,6 +219,17 @@ class MlDsaFileSigner:
 
     def describe(self) -> Dict[str, Any]:
         return {"pq_backend": "file", "alg": ALG, "key_in_process_memory": True}
+
+
+def _owner_only_acl(path: str) -> None:
+    """Windows equivalent of mode 0o600 (0.14.1; before, the key file kept the ACL inherited from its folder): inheritance
+    removed and one entry left, full control for the current user. icacls ships with every Windows since Vista. A failure
+    raises, and keygen removes the file: a private key is never left readable by others."""
+    dom, name = os.environ.get("USERDOMAIN"), os.environ["USERNAME"]
+    user = f"{dom}\\{name}" if dom else name
+    r = subprocess.run(["icacls", path, "/inheritance:r", "/grant:r", user + ":F"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise OSError(f"{path}: icacls could not make the key file owner-only: {(r.stdout + r.stderr).strip()[-300:]}")
 
 
 def _mldsa65_raw_from_spki(der: bytes) -> bytes:

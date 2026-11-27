@@ -302,7 +302,7 @@ class LocalTsa(unittest.TestCase):
         cls._w(name + ".key", k.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                               serialization.NoEncryption()))
         with open(cls._p(name + ".cnf"), "w") as f:
-            f.write(CNF.format(d=cls.d, n=name))
+            f.write(CNF.format(d=cls.d.replace(os.sep, "/"), n=name))
         cls._w(name + ".untrusted.pem", c.public_bytes(serialization.Encoding.PEM)
                + cls.inter.public_bytes(serialization.Encoding.PEM))
         return calendar.timegm(c.not_valid_after_utc.utctimetuple())

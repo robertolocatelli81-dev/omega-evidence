@@ -21,6 +21,7 @@ load rather than being silently accepted. Self-contained (stdlib only).
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -31,27 +32,61 @@ from typing import Dict, List, Tuple
 
 try:
     import fcntl                       # POSIX: the cross-process lock below
-except ImportError:                    # Windows: no flock; see _lock_file
+except ImportError:                    # Windows: no flock; msvcrt.locking is the equivalent (see _lock_file)
     fcntl = None
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 GENESIS = "0" * 64
+# Windows: the byte msvcrt.locking holds. A Windows lock is mandatory for the bytes it covers, so it sits far past any
+# real ledger (no reader or writer ever touches it) — the region is only a name every process agrees on.
+_WIN_LOCK_OFFSET = 1 << 62
 
 
 def _lock_file(fd: int, shared: bool = False) -> None:
-    """Advisory lock on the OPEN ledger file (POSIX flock), exclusive for a writer, shared for a reader. Held for one
-    append (or one load), so N processes appending to the same ledger serialize and each one re-reads what the others
-    wrote before it writes (28/09/2026: measured before this lock, 4 processes x 200 appends to one file left 401 lines
-    of 801, verify() FAIL, 200 duplicate idx, two processes refused to open the file mid-write). The threading.Lock of
-    the instance covers threads of ONE process sharing ONE instance; this covers everything else on the same inode.
-    Advisory: a writer that does not use this module is not stopped. Not on Windows (no fcntl: single writer process
-    per ledger there), not reliable on NFS. Module-level on purpose: a test disables it to show the failure it prevents."""
+    """Cross-process lock on the OPEN ledger file, held for one append (or one load), so N processes appending to the
+    same ledger serialize and each one re-reads what the others wrote before it writes (28/09/2026: measured before this
+    lock, 4 processes x 200 appends to one file left 401 lines of 801, verify() FAIL, 200 duplicate idx, two processes
+    refused to open the file mid-write). The threading.Lock of the instance covers threads of ONE process sharing ONE
+    instance; this covers everything else on the same file. POSIX: advisory flock, exclusive for a writer, shared for a
+    reader. Windows (0.14.1, before: no lock at all there): msvcrt.locking of one byte far past the data, waited for;
+    exclusive for readers too (Windows has no shared msvcrt lock: readers serialize, they are not refused). Advisory in
+    effect on both: a writer that does not use this module is not stopped. Not reliable on NFS. Module-level on
+    purpose: a test disables it to show the failure it prevents."""
     if fcntl is not None:
         fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+    elif msvcrt is not None:
+        _win_locking(fd, True)
 
 
 def _unlock_file(fd: int) -> None:
     if fcntl is not None:
         fcntl.flock(fd, fcntl.LOCK_UN)
+    elif msvcrt is not None:
+        _win_locking(fd, False)
+
+
+def _win_locking(fd: int, lock: bool) -> None:
+    """msvcrt.locking starts at the file position: move it to the lock byte and put it back, so the reads and writes of
+    the caller are where they were. LK_NBLCK in a loop rather than LK_LOCK, which gives up after 10 s."""
+    pos = os.lseek(fd, 0, os.SEEK_CUR)
+    os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
+    try:
+        if not lock:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            return
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as e:
+                if e.errno not in (errno.EACCES, errno.EDEADLK):   # held by another handle: wait; anything else: raise
+                    raise
+                time.sleep(0.002)
+    finally:
+        os.lseek(fd, pos, os.SEEK_SET)
 
 # One bound for every file a verifier reads (pack, .sig.json, .tsr.json, ledger, trust store) — and so for any single
 # ledger line — the same number in the Python, Node, Go and Java verifiers (25/09/2026). Chosen where the peak memory of
@@ -231,10 +266,10 @@ class Ledger:
         final fsync. Trade-off DECLARED, not hidden.
 
     Concurrency (28/09/2026): threads sharing one instance are serialized by the instance lock; instances in other
-      threads or other PROCESSES appending to the same file are serialized by an advisory POSIX file lock (flock) held
-      for one append, under which the instance first replays what the others appended since its last write, so every
-      entry links to the last hash on disk and carries the next idx. A file truncated by someone else is refused. Not
-      on Windows (no fcntl: one writer process per ledger), advisory only, not reliable on NFS. Measured in
+      threads or other PROCESSES appending to the same file are serialized by an advisory file lock (POSIX flock; Windows
+      msvcrt.locking, 0.14.1) held for one append, under which the instance first replays what the others appended since its last write, so every
+      entry links to the last hash on disk and carries the next idx. A file truncated by someone else is refused.
+      Advisory only, not reliable on NFS. Measured in
       tests/test_toolkit.py (TestConcurrentAppend20260928) with the lock disabled as the positive control.
     """
 

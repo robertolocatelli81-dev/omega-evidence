@@ -652,12 +652,12 @@ def run(cmd, path, flags, go_style, name=""):
 
 def main():
     """The cases (about 450 MB with the bound cases) live in one temporary directory that is removed when the run ends
-    by a return, an exception, Ctrl-C, SIGTERM or SIGHUP; a signal that arrives while it is being removed is ignored
+    by a return, an exception, Ctrl-C, SIGTERM or SIGHUP (on Windows Ctrl-Break, SIGBREAK, 0.14.1); a signal that arrives while it is being removed is ignored
     (21/11/2026: a run that stopped on an exception left 450 MB in /tmp, measured; the removal was the last line of the
     function. Measured the same day on the first correction: SIGHUP, and a second SIGTERM during the removal, left the
     directory). SIGKILL, which no process can handle, leaves it."""
     import signal
-    stops = [s for s in (signal.SIGTERM, getattr(signal, "SIGHUP", None)) if s is not None]
+    stops = [s for s in (signal.SIGTERM, getattr(signal, "SIGHUP", None), getattr(signal, "SIGBREAK", None)) if s is not None]
 
     def _stop(signum, frame):
         sys.exit(128 + signum)

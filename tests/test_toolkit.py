@@ -25,6 +25,8 @@ from omega_evidence import (_ed25519_pure, agent, attestation, canonical,  # noq
 from omega_evidence.interop import dsse, sdjwt  # noqa: E402
 from omega_evidence import verifier  # noqa: E402
 from omega_evidence.pqbackends import gate as pqgate  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ogni_sistema as OS  # noqa: E402
 
 
 def _layer_of(r, name):
@@ -44,7 +46,7 @@ class TestCanonicalLedger(unittest.TestCase):
             lg = ledger.Ledger(p)
             lg.append({"x": 1}); lg.append({"x": 2})
             self.assertTrue(lg.verify()[0])
-            lines = Path(p).read_text().splitlines()
+            lines = Path(p).read_text(encoding="utf-8").splitlines()
             e = json.loads(lines[0]); e["data"]["x"] = 99
             Path(p).write_text(json.dumps(e, separators=(",", ":")) + "\n" + lines[1] + "\n")
             with self.assertRaises(RuntimeError):
@@ -94,7 +96,7 @@ class TestBatchDurability(unittest.TestCase):
             with ledger.Ledger(p, durability="batch", batch_size=8) as lg:
                 for i in range(20):
                     lg.append({"i": i})
-            lines = Path(p).read_text().splitlines()
+            lines = Path(p).read_text(encoding="utf-8").splitlines()
             e = json.loads(lines[10]); e["data"]["i"] = 999
             lines[10] = json.dumps(e, separators=(",", ":"))
             Path(p).write_text("\n".join(lines) + "\n")
@@ -183,7 +185,7 @@ class TestPackVerify(unittest.TestCase):
     def test_tampered_pack_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             pp = self._pack(tmp, with_ledger=True)
-            d = json.loads(Path(pp).read_text()); d["payload"] = "TAMPERED"
+            d = json.loads(Path(pp).read_text(encoding="utf-8")); d["payload"] = "TAMPERED"
             Path(pp).write_text(json.dumps(d))
             self.assertFalse(verify_pack(pp)["valid"])
 
@@ -351,7 +353,7 @@ class TestChipRegistrySelfUpdate(unittest.TestCase):
             up, ident = self._signed_update(tmp, {self.FUTURE: "nvidia-nras"})
             store = os.path.join(tmp, "trust.jsonl")
             trust.TrustRegistry(store).trust(ident.name, ident.public_key_b64)
-            d = json.loads(Path(up).read_text())
+            d = json.loads(Path(up).read_text(encoding="utf-8"))
             d["chip_classes"]["evil-chip"] = "attacker-service"   # tamper after signing
             Path(up).write_text(json.dumps(d))
             r = reg.apply_signed_update(up, store)
@@ -472,7 +474,7 @@ class TestCryptoAgility(unittest.TestCase):
     def test_sig_alg_present_and_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             pp, store = self._signed_pack(tmp)
-            side = json.loads(Path(pp[:-5] + ".sig.json").read_text())
+            side = json.loads(Path(pp[:-5] + ".sig.json").read_text(encoding="utf-8"))
             self.assertEqual(side["sig_alg"], "ed25519")
             self.assertTrue(verify_pack(pp, trust_store=store)["valid"])
 
@@ -480,7 +482,7 @@ class TestCryptoAgility(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pp, store = self._signed_pack(tmp)
             sp = pp[:-5] + ".sig.json"
-            side = json.loads(Path(sp).read_text()); side.pop("sig_alg")
+            side = json.loads(Path(sp).read_text(encoding="utf-8")); side.pop("sig_alg")
             Path(sp).write_text(json.dumps(side))
             self.assertTrue(verify_pack(pp, trust_store=store)["valid"])  # back-compat
 
@@ -488,7 +490,7 @@ class TestCryptoAgility(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pp, store = self._signed_pack(tmp)
             sp = pp[:-5] + ".sig.json"
-            side = json.loads(Path(sp).read_text()); side["sig_alg"] = "martian-sig"
+            side = json.loads(Path(sp).read_text(encoding="utf-8")); side["sig_alg"] = "martian-sig"
             Path(sp).write_text(json.dumps(side))
             # 0.14.0 (Decision 1, 20/11/2026): a trust store requires a signature, so beside one this is a FAIL
             st = verify_pack(pp, trust_store=store)
@@ -791,7 +793,7 @@ class TestLTVValidationMaterial(unittest.TestCase):
                         capture_output=True)
             if r.returncode != 0:
                 self.skipTest("openssl req -addext unsupported here")
-            pem = Path(cpem).read_text()
+            pem = Path(cpem).read_text(encoding="utf-8")
             dps = ts._cert_crl_dps(exe, pem, tmp)
             self.assertIn("http://example.com/t.crl", dps)
             der = ts._pem_cert_to_der_b64(exe, pem, tmp)
@@ -832,7 +834,7 @@ class TestNemesisRegressions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pp = os.path.join(tmp, "p.json")
             pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
-            dg = json.loads(Path(pp).read_text())["pack_sha3"]
+            dg = json.loads(Path(pp).read_text(encoding="utf-8"))["pack_sha3"]
             ledger.Ledger(pp[:-5] + ".ledger.jsonl").append({"junk": dg})   # value in junk field
             self.assertFalse(verify_pack(pp)["valid"])
             # dedicated anchor entry (anchor_pack) DOES anchor
@@ -928,7 +930,7 @@ class TestNemesisRegressions(unittest.TestCase):
                 e = {"idx": idx, "ts": "2026-09-21T00:00:00+00:00", "prev_hash": prev}; e.update(extra); e["self_hash"] = _hash_entry(e); return e
             for name, extra, want in (("top", lambda H: {"data": {}, "anchored_pack_sha3": H}, True),
                                       ("dd", lambda H: {"data": {"data": {"anchored_pack_sha3": H}}}, False)):
-                pp = os.path.join(tmp, name + ".json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x")); H = json.loads(Path(pp).read_text())["pack_sha3"]
+                pp = os.path.join(tmp, name + ".json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x")); H = json.loads(Path(pp).read_text(encoding="utf-8"))["pack_sha3"]
                 Path(pp[:-5] + ".ledger.jsonl").write_text(json.dumps(entry(0, GENESIS, extra(H)), separators=(",", ":")) + "\n", encoding="utf-8")
                 self.assertEqual(verify_pack(pp)["valid"], want, name)
             idt = signing.Identity("acme"); pp = os.path.join(tmp, "signed2.json"); pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x")); pack.sign_pack(pp, idt)
@@ -978,7 +980,7 @@ class TestNemesisRegressions(unittest.TestCase):
             pp = os.path.join(tmp, "p.json")
             pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
             idt = signing.Identity("a"); pack.sign_pack(pp, idt)
-            dg = json.loads(Path(pp).read_text())["pack_sha3"]
+            dg = json.loads(Path(pp).read_text(encoding="utf-8"))["pack_sha3"]
             pack.add_pq_signature(pp, "ed25519", idt.public_key_b64, idt.sign(dg.encode()))
             pq = [l for l in verify_pack(pp)["layers"] if l["layer"] == "pq-signature"][0]
             self.assertEqual(pq["status"], "SKIP")
@@ -2087,12 +2089,25 @@ class TestMlDsaHybrid(unittest.TestCase):
             self.skipTest("cryptography >= 48 (ML-DSA) absent")
         self.assertTrue(autoload()["mldsa"]["registered"], autoload())
 
+    def assert_owner_only(self, kf):
+        """POSIX: mode 0o600. Windows: the equivalent, an ACL with one entry (the current user, full control) and nothing
+        inherited — failed on 0.14.0, whose key file kept the ACL of its folder."""
+        if os.name != "nt":
+            self.assertEqual(oct(os.stat(kf).st_mode & 0o777), "0o600")
+            return
+        out = subprocess.run(["icacls", kf], capture_output=True, text=True, check=True).stdout
+        aces = [ln.replace(kf, "").strip() for ln in out.splitlines() if ":(" in ln]
+        self.assertEqual(len(aces), 1, out)
+        self.assertIn(os.environ["USERNAME"].lower(), aces[0].lower(), out)
+        self.assertIn("(F)", aces[0], out)
+        self.assertNotIn("(I)", aces[0], out)
+
     def _hybrid(self, tmp):
         pp = os.path.join(tmp, "p.json")
         pack.write_pack(pp, pack.build_pack("d", {"x": 1}, "ref; NOT x"))
         idt = signing.Identity("acme"); pack.sign_pack(pp, idt)
         kf = os.path.join(tmp, "pq.key"); kg = self.m.MlDsaFileSigner.keygen(kf)
-        self.assertEqual(oct(os.stat(kf).st_mode & 0o777), "0o600")
+        self.assert_owner_only(kf)
         signer = self.m.MlDsaFileSigner(kf)
         side = pack.pq_cosign(pp, signer)
         self.assertEqual(side["pq_sig_alg"], "ml-dsa-65"); self.assertEqual(side["pq_public_key_b64"], kg["public_key_b64"])
@@ -2437,6 +2452,18 @@ class AbsenceSideOfTheVerdict(unittest.TestCase):
         self.assertTrue(clean["valid"]); self.assertTrue(clean["assessed"])
 
 
+DEVICE = "\\\\.\\NUL" if OS.WINDOWS else "/dev/zero"   # a device: Windows has no endless one, NUL is not a regular file either
+
+
+def _fifo(tmp, name):
+    """a FIFO at tmp/name (POSIX) or a listening Windows named pipe; returns (path, closer)"""
+    if OS.WINDOWS:
+        return OS.win_pipe_server(f"oe-{os.getpid()}-{name}")
+    p = os.path.join(tmp, name)
+    os.mkfifo(p)
+    return p, lambda: None
+
+
 class NemesisInputsAndFaults(unittest.TestCase):
     """25/09/2026 (NEMESIS on 0.9.0): files that are not regular, the input bound, the sidecar fields nobody read, and a
     fault of the verifier reported as a FAIL of the pack. Every test here is red on 0.9.0."""
@@ -2451,13 +2478,9 @@ class NemesisInputsAndFaults(unittest.TestCase):
         return p
 
     def _cli(self, args, env=None, timeout=60):
-        # a child with an address-space limit: a verifier that reads /dev/zero hits MemoryError, not the host's memory
-        import resource
-        def lim():
-            resource.setrlimit(resource.RLIMIT_AS, (1 << 30, 1 << 30))
-        return subprocess.run([sys.executable, "-m", "omega_evidence"] + args, capture_output=True, text=True, timeout=timeout,
-                              cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))), preexec_fn=lim,
-                              env=dict(os.environ, **(env or {})))
+        # a child with a memory cap (tests/_ogni_sistema.py): a verifier that reads /dev/zero hits MemoryError, not the host's memory
+        return OS.run_capped([sys.executable, "-m", "omega_evidence"] + args, 1 << 30, timeout, capture_output=True, text=True,
+                             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))), env=dict(os.environ, **(env or {})))
 
     def test_read_input_bounds_and_file_type(self):
         from omega_evidence.ledger import read_input
@@ -2467,16 +2490,18 @@ class NemesisInputsAndFaults(unittest.TestCase):
             open(f, "wb").write(b"x" * 11)
             with self.assertRaises(OSError):
                 read_input(f, limit=10)                                     # one byte over: refused
-            fifo = os.path.join(tmp, "fifo"); os.mkfifo(fifo)
-            with self.assertRaises(OSError):
-                read_input(fifo)                                            # returns at once: O_NONBLOCK + not regular
-            z = os.path.join(tmp, "z"); os.symlink("/dev/zero", z)
+            fifo, close = _fifo(tmp, "fifo")                               # Windows: a named pipe that is listening
+            try:
+                with self.assertRaises(OSError):
+                    read_input(fifo)                                        # returns at once: O_NONBLOCK + not regular
+            finally:
+                close()
+            z = os.path.join(tmp, "z"); os.symlink(DEVICE, z)
             with self.assertRaises(OSError):
                 read_input(z)
             with self.assertRaises(OSError):
                 read_input(tmp)                                             # a directory
 
-    @unittest.skipUnless(hasattr(os, "mkfifo") and os.path.exists("/dev/zero"), "POSIX FIFO and /dev/zero")
     def test_non_regular_file_in_every_position_is_a_prompt_fail(self):
         for kind in ("fifo", "devzero"):
             for where in ("pack", "sig", "ledger", "tsr", "trust"):
@@ -2486,11 +2511,19 @@ class NemesisInputsAndFaults(unittest.TestCase):
                               "tsr": p[:-5] + ".tsr.json", "trust": os.path.join(tmp, "t.jsonl")}[where]
                     if os.path.lexists(target):
                         os.remove(target)
-                    os.mkfifo(target) if kind == "fifo" else os.symlink("/dev/zero", target)
+                    if kind == "fifo" and OS.WINDOWS:   # a named pipe lives in \\.\pipe\ only: a symbolic link to it here
+                        pipe, close = OS.win_pipe_server(f"oe-{os.getpid()}-{where}")
+                        os.symlink(pipe, target)
+                    elif kind == "fifo":
+                        os.mkfifo(target); close = lambda: None  # noqa: E731
+                    else:
+                        os.symlink(DEVICE, target); close = lambda: None  # noqa: E731
                     try:
                         out = self._cli([p] + (["--trust-store", target] if where == "trust" else []), timeout=20)
                     except subprocess.TimeoutExpired:
                         self.fail(f"{where} {kind}: the verifier blocked")
+                    finally:
+                        close()
                     self.assertEqual(out.returncode, 1, out.stderr[-300:])
                     self.assertEqual(json.loads(out.stdout)["verdict"], "FAIL")
 
@@ -2754,7 +2787,8 @@ class TestSigAlg20260929(unittest.TestCase):
                 sd.pop("sig_alg")
             else:
                 sd["sig_alg"] = alg
-            json.dump(sd, open(sp, "w"), ensure_ascii=False)
+            with open(sp, "w", encoding="utf-8") as fh:
+                json.dump(sd, fh, ensure_ascii=False)
         return p
 
     @staticmethod

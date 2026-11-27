@@ -44,6 +44,8 @@ except ImportError:   # 9c55515: the module is not there; the tests that need it
     F = None
 EXE = shutil.which("openssl")
 from omega_evidence.interop import aat  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ogni_sistema as OS  # noqa: E402
 
 SECOND = "a second recording component in one session"
 
@@ -127,16 +129,11 @@ class TestAatSessionRecorderChosenOnce(unittest.TestCase):
 class TestAatCliReadsBoundedRegularFiles(unittest.TestCase):
     """Every input file of the aat CLI goes through ledger.read_input: a regular file, at most 64 MiB, never blocking."""
 
-    @staticmethod
-    def _limit_memory():   # the old code read a device without end: the control must not exhaust this host
-        import resource
-        resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
-
-    def _cli(self, *args):
+    def _cli(self, *args):   # the old code read a device without end: the control must not exhaust this host
         env = dict(os.environ, PYTHONPATH=ROOT)
         try:
-            p = subprocess.run([sys.executable, "-m", "omega_evidence.interop.aat", *args], capture_output=True, text=True,
-                               timeout=20, env=env, cwd=ROOT, preexec_fn=self._limit_memory if os.name == "posix" else None)
+            p = OS.run_capped([sys.executable, "-m", "omega_evidence.interop.aat", *args], 2 << 30, 20, capture_output=True,
+                              text=True, env=env, cwd=ROOT)
         except subprocess.TimeoutExpired:
             self.fail(f"aat {' '.join(args)}: no answer within 20 s (blocked on an input file)")
         return p.returncode, p.stdout, p.stderr
@@ -151,25 +148,31 @@ class TestAatCliReadsBoundedRegularFiles(unittest.TestCase):
             f.write(newline.join(json.dumps(r) for r in recs).encode() + newline.encode())
         return p
 
-    @unittest.skipUnless(hasattr(os, "mkfifo"), "no FIFO on this system")
     def test_a_fifo_in_place_of_any_input_is_refused_at_once(self):
-        """fails on 9c55515: the CLI blocked on the FIFO (chain, --pubkey, --key, --epochs)"""
+        """fails on 9c55515: the CLI blocked on the FIFO (chain, --pubkey, --key, --epochs). Windows: a listening named
+        pipe, the equivalent (one per argument: a client that connected takes the instance)"""
         with tempfile.TemporaryDirectory() as tmp:
-            fifo = os.path.join(tmp, "fifo")
-            os.mkfifo(fifo)
             chain = self._chain_file(tmp)
-            for args in (["verify", fifo], ["csv", fifo], ["verify", chain, "--pubkey", fifo],
-                         ["verify", chain, "--key", "kid=" + fifo], ["verify", chain, "--epochs", fifo]):
-                rc, out, err = self._cli(*args)
+            for i, mk in enumerate((lambda f: ["verify", f], lambda f: ["csv", f], lambda f: ["verify", chain, "--pubkey", f],
+                                    lambda f: ["verify", chain, "--key", "kid=" + f], lambda f: ["verify", chain, "--epochs", f])):
+                if OS.WINDOWS:
+                    fifo, close = OS.win_pipe_server(f"oe-sentry-{os.getpid()}-{i}")
+                else:
+                    fifo, close = os.path.join(tmp, f"fifo{i}"), (lambda: None)
+                    os.mkfifo(fifo)
+                args = mk(fifo)
+                try:
+                    rc, out, err = self._cli(*args)
+                finally:
+                    close()
                 self.assertEqual(rc, 2, (args, out, err))
                 self.assertIn("not a regular file", json.loads(out)["error"], args)
 
-    @unittest.skipUnless(os.path.exists("/dev/zero"), "no /dev/zero")
     def test_a_device_or_a_directory_is_refused(self):
-        """fails on 9c55515: a symlink to /dev/zero was read until memory ran out"""
+        """fails on 9c55515: a symlink to /dev/zero was read until memory ran out (Windows: a symlink to the NUL device)"""
         with tempfile.TemporaryDirectory() as tmp:
             link = os.path.join(tmp, "chain.jsonl")
-            os.symlink("/dev/zero", link)
+            os.symlink("\\\\.\\NUL" if OS.WINDOWS else "/dev/zero", link)
             for path in (link, tmp):
                 rc, out, err = self._cli("verify", path)
                 self.assertEqual(rc, 2, (path, out[:200], err[-300:]))

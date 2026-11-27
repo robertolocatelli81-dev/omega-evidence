@@ -37,6 +37,42 @@ jobs:
           elif [ "$RUNNER_OS" = "Windows" ]; then
             echo "C:\Program Files\Git\usr\bin" >> "$GITHUB_PATH"
           fi
+      - name: "A full volume where there is no /dev/full (macOS: HFS+ RAM disk; Windows: FAT VHD), for the exit-74 tests"
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            dev=$(hdiutil attach -nomount ram://8192 | tr -d ' \t')
+            diskutil erasevolume HFS+ oefull "$dev" >/dev/null
+            d=/Volumes/oefull
+          else
+            printf 'create vdisk file="%s" maximum=8 type=fixed\nselect vdisk file="%s"\nattach vdisk\ncreate partition primary\nformat fs=fat quick label=OEFULL\nassign letter=Q\n' \
+              "$RUNNER_TEMP\\full.vhd" "$RUNNER_TEMP\\full.vhd" > "$RUNNER_TEMP/dp.txt"
+            diskpart //s "$(cygpath -w "$RUNNER_TEMP/dp.txt")" > /dev/null
+            d='Q:\'
+          fi
+          python - "$d" <<'PY'
+          import errno, os, sys
+          d = sys.argv[1]
+          with open(os.path.join(d, "filler"), "wb") as f:
+              for size in (1 << 20, 1 << 12, 1 << 9, 1):
+                  while True:
+                      try:
+                          f.write(b"\0" * size); f.flush(); os.fsync(f.fileno())
+                      except OSError as e:
+                          if e.errno != errno.ENOSPC:
+                              raise
+                          break
+          # positive check: a new file there takes no byte, at the write itself (no fsync: the CLIs only flush)
+          try:
+              with open(os.path.join(d, "probe"), "wb", buffering=0) as f:
+                  f.write(b"x" * 65536)
+              sys.exit("the volume is not full")
+          except OSError as e:
+              assert e.errno == errno.ENOSPC, e
+              print("full volume ready:", d, "ENOSPC on write")
+          PY
+          echo "OE_FULL_DIR=$d" >> "$GITHUB_ENV"
       - name: Install package
         shell: bash
         run: |

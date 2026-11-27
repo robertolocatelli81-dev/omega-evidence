@@ -55,7 +55,7 @@ class TestStampOnlyGrantedTokenForThisDigest(unittest.TestCase):
     def setUpClass(cls):
         cls.d = d = tempfile.mkdtemp(prefix="tsa_")
         with open(os.path.join(d, "tsa.cnf"), "w") as f:
-            f.write(CNF.format(d=d))
+            f.write(CNF.format(d=d.replace(os.sep, "/")))   # an OpenSSL config reads \ as an escape
         with open(os.path.join(d, "serial"), "w") as f:
             f.write("01\n")
         j = lambda n: os.path.join(d, n)  # noqa: E731

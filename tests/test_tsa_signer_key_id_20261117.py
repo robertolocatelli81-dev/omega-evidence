@@ -82,9 +82,10 @@ class Lab:
     def tsr(self, tsa_name=False):
         """a granted reply of `openssl ts -reply` (sid = issuerAndSerialNumber)"""
         j = self.j
+        c = lambda n: j(n).replace(os.sep, "/")  # noqa: E731 — an OpenSSL config reads a backslash as an escape
         with open(j("tsa.cnf"), "w") as f:
-            f.write(f"[ tsa ]\ndefault_tsa = t1\n[ t1 ]\nserial = {j('serial')}\ncrypto_device = builtin\n"
-                    f"signer_cert = {j('tsa.crt')}\ncerts = {j('ca.crt')}\nsigner_key = {j('tsa.key')}\n"
+            f.write(f"[ tsa ]\ndefault_tsa = t1\n[ t1 ]\nserial = {c('serial')}\ncrypto_device = builtin\n"
+                    f"signer_cert = {c('tsa.crt')}\ncerts = {c('ca.crt')}\nsigner_key = {c('tsa.key')}\n"
                     "signer_digest = sha256\ndefault_policy = 1.2.3.4.1\ndigests = sha256\naccuracy = secs:1\n"
                     f"ordering = yes\ntsa_name = {'yes' if tsa_name else 'no'}\ness_cert_id_chain = no\n"
                     "ess_cert_id_alg = sha256\n")

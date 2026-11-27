@@ -52,6 +52,7 @@ import json
 import sys
 import os
 import re as _re
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -718,10 +719,15 @@ def _wait_writable(buf) -> None:
     """stdout is non-blocking and full: wait until it can take more, as a blocking write would (the reader is slow, not
     gone; one that goes away makes the next write EPIPE). `select` sleeps in the kernel and Python retries it after a
     signal (PEP 475). The descriptor is asked for only here: a byte stream with no descriptor (an io.BytesIO under a
-    TextIOWrapper, as pytest's capsys) never blocks. POSIX only: on Windows `select` waits on sockets only, so a full
-    non-blocking pipe there is reported as 74 (not measured)."""
+    TextIOWrapper, as pytest's capsys) never blocks. Windows (0.14.1): `select` waits on sockets only, and a pipe has no
+    call that waits until it can be written, so the equivalent is a sleep of 10 ms and another try — before, a full
+    non-blocking pipe was exit 74 there. A reader that has gone makes the next write fail, as on POSIX."""
     import select
     try:
+        if os.name == "nt":
+            buf.fileno()
+            time.sleep(0.01)
+            return
         select.select([], [buf.fileno()], [])
     except (OSError, ValueError) as e:   # no descriptor, or one select cannot wait on
         raise OSError(f"stdout is non-blocking and cannot be waited for: {e}")

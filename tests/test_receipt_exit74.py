@@ -54,6 +54,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 from omega_evidence import pack as P, signing as S   # noqa: E402
+sys.path.insert(0, HERE)
+import _ogni_sistema as OS  # noqa: E402
 
 EX_IOERR = 74
 SCOPE = "Proves the recorded facts' integrity and order; does NOT prove their truth and is NOT an accredited certification."
@@ -159,10 +161,42 @@ def _argv(runtime, pack):
     return base + [pack, "--ledger", led] if runtime in ("python", "node") else base + [pack, "-ledger", led]
 
 
+NO_FSIZE = "Windows has no per-process file-size limit (ulimit -f): a short write to a file cannot be made there"
+
+
+def why_not_here(mode, argv=None):
+    """None when `mode` can be run on this system, else the reason. Windows has no bash redirections of its own: `head`
+    is the pipe whose reader has gone before the first write (the case `head` builds with its 0.2 s), `closed` is a
+    Python that closes its fd 1 and runs the module in process (what a start with fd 1 closed gives it)."""
+    if mode in ("devfull", "devfull-both") and OS.full_file() is None:
+        return OS.FULL_WHY
+    if mode in ("fsize", "fsize_cut") and OS.WINDOWS:
+        return NO_FSIZE
+    if mode == "closed" and OS.WINDOWS and not (argv and argv[0] == sys.executable and argv[1:2] == ["-m"]):
+        return "Windows: stdout closed at start is made for a Python module only (no bash redirection there)"
+    return None
+
+
+def _closed_fd_argv(argv, fd):
+    """argv (`python -m module ...`) as a Python that closes fd `fd` and runs the module in this process"""
+    mod = argv[2]
+    stream = "stdout" if fd == 1 else "stderr"
+    return [sys.executable, "-c", f"import os, runpy, sys; os.close({fd}); sys.{stream} = None; sys.argv = [{mod!r}] + "
+            f"sys.argv[1:]; runpy.run_module({mod!r}, run_name='__main__', alter_sys=True)"] + argv[3:]
+
+
 def run_mode(argv, mode, env=None):
     """Run argv as a real process with stdout in `mode`; return (rc, stdout bytes or None, stderr text)."""
     if env is not None:
         return _with_env(env, run_mode, argv, mode)
+    why = why_not_here(mode, argv)
+    if why:
+        raise unittest.SkipTest(why)
+    if OS.WINDOWS and mode == "head":
+        mode = "gone"
+    if OS.WINDOWS and mode == "closed":
+        p = subprocess.run(_closed_fd_argv(argv, 1), stderr=subprocess.PIPE, cwd=ROOT, timeout=120)
+        return p.returncode, None, p.stderr.decode("utf-8", "replace")
     if mode == "fsize_cut":   # 1 000 bytes already in the file, limit 1 024: a short write of 24 bytes, then EFBIG
         with tempfile.TemporaryDirectory() as td:
             o = os.path.join(td, "out")
@@ -178,11 +212,11 @@ def run_mode(argv, mode, env=None):
             f.seek(0)
             return p.returncode, f.read(), p.stderr.decode("utf-8", "replace")
     if mode == "devfull":
-        with open("/dev/full", "wb") as f:
+        with open(OS.full_file(), "wb") as f:
             p = subprocess.run(argv, stdout=f, stderr=subprocess.PIPE, cwd=ROOT, timeout=120)
         return p.returncode, None, p.stderr.decode("utf-8", "replace")
     if mode == "devfull-both":   # stderr full too: no line can be written, the exit is still 74 and nothing is raised
-        with open("/dev/full", "wb") as f:
+        with open(OS.full_file(), "wb") as f:
             p = subprocess.run(argv, stdout=f, stderr=f, cwd=ROOT, timeout=120)
         return p.returncode, None, ""
     if mode == "gone":
@@ -240,11 +274,18 @@ def _with_env(env, fn, *a):
                 os.environ[k] = v
 
 
-def _cpu_seconds(pid):
-    """utime + stime of a live process, all its threads, from /proc (Linux)."""
-    with open(f"/proc/{pid}/stat", "rb") as f:
-        fields = f.read().rsplit(b")", 1)[1].split()
-    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+def _fill(w):
+    """fill the non-blocking pipe w; the bytes it took"""
+    filled = 0
+    while True:
+        try:
+            n = os.write(w, b"P" * 4096)
+        except BlockingIOError:
+            break
+        if not n:            # Windows PIPE_NOWAIT: a full pipe takes 0 bytes
+            break
+        filled += n
+    return filled
 
 
 def run_prefilled(argv, env=None, late=0.0):
@@ -254,15 +295,9 @@ def run_prefilled(argv, env=None, late=0.0):
     does — and once the pipe is drained the receipt must arrive whole, promptly (Java sleeps 1 to 50 ms between tries).
     Returns (idle, min_cpu_window, rc, receipt bytes or None, stderr text, seconds from the first read to the receipt's last
     byte)."""
-    import fcntl
     r, w = os.pipe()
-    fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) | os.O_NONBLOCK)
-    filled = 0
-    while True:
-        try:
-            filled += os.write(w, b"P" * 4096)
-        except BlockingIOError:
-            break
+    OS.set_nonblocking(w)   # fcntl O_NONBLOCK; Windows: PIPE_NOWAIT
+    filled = _fill(w)
     try:
         p = subprocess.Popen(argv, stdout=w, stderr=subprocess.PIPE, cwd=ROOT, env=dict(os.environ, **(env or {})))
     finally:
@@ -274,9 +309,9 @@ def run_prefilled(argv, env=None, late=0.0):
     time.sleep(1.0)
     while p.poll() is None and time.time() - t0 < 10:
         try:
-            c0 = _cpu_seconds(p.pid)
+            c0 = OS.cpu_seconds(p)
             time.sleep(1.0)
-            c1 = _cpu_seconds(p.pid)
+            c1 = OS.cpu_seconds(p)
         except OSError:   # exited during the window
             break
         if p.poll() is not None:
@@ -309,14 +344,26 @@ LATE = {"valid": 0.0, "big": 0.33, "invalid": 0.66}   # the reader comes back at
 # least one of them: one phase alone can fall just before its wake-up every time (NEMESIS 13/10/2026: nap = 1000 survived)
 
 
-def usage_with_stderr_lost(argv):
+def usage_with_stderr_lost(argv, tc):
     """argv is a usage error. With stderr full, closed, or a pipe whose reader has gone, the exit stays 2 and nothing is
-    written to stdout (a file here). Returns the cases that did otherwise."""
+    written to stdout (a file here). Returns the cases that did otherwise. Full: /dev/full or a file on the filled volume
+    (skipped, said through tc, where there is neither); closed on Windows: the Python that closes its fd 2."""
     bad = []
     for redir in ("2>/dev/full", "2>&-", "gone"):
         with tempfile.TemporaryDirectory() as td:
             o = os.path.join(td, "out")
-            if redir == "gone":
+            if redir == "2>/dev/full" and OS.full_file() is None:
+                with tc.subTest(redir=redir):
+                    tc.skipTest(OS.FULL_WHY)
+                continue
+            if redir == "2>/dev/full" and not os.path.exists("/dev/full") or redir == "2>&-" and OS.WINDOWS:
+                with open(o, "wb") as f:
+                    if redir == "2>&-":
+                        rc = subprocess.run(_closed_fd_argv(argv, 2), stdout=f, cwd=ROOT, timeout=120).returncode
+                    else:
+                        with open(OS.full_file(), "wb") as e:
+                            rc = subprocess.run(argv, stdout=f, stderr=e, cwd=ROOT, timeout=120).returncode
+            elif redir == "gone":
                 r, w = os.pipe()
                 os.close(r)
                 try:
@@ -345,12 +392,29 @@ class _Base(unittest.TestCase):
             self.skipTest(f"{self.runtime} verifier NOT measured: {v}")
 
     def assert_lost(self, argv, mode, label):
+        why = why_not_here(mode, argv)
+        if why:
+            with self.subTest(mode=mode, label=label):
+                self.skipTest(why)
+            return
         rc, _, err = run_mode(argv, mode)
         self.assertEqual(rc, EX_IOERR, f"{label} {mode}: exit {rc}, stderr {err[-400:]!r}")
         self.assertIn("receipt not written:", err, f"{label} {mode}")
         self.assertNotIn("Traceback", err, f"{label} {mode}")
         self.assertNotIn("Exception ignored", err, f"{label} {mode}")
         self.assertNotIn("panic", err, f"{label} {mode}")
+
+    def here(self, *modes, argv=None):
+        """the modes that can run on this system; each one that cannot is a skipped sub-test with its reason"""
+        out = []
+        for m in modes:
+            why = why_not_here(m, argv)
+            if why:
+                with self.subTest(mode=m):
+                    self.skipTest(why)
+            else:
+                out.append(m)
+        return out
 
     def check_cli(self, argv, expected_rc, label, closed_seen=True):
         rc, out, err = run_mode(argv, "file")
@@ -359,8 +423,9 @@ class _Base(unittest.TestCase):
         self.assertNotIn("receipt not written", err)
         for mode in ("devfull", "gone", "head"):
             self.assert_lost(argv, mode, label)
-        rc3, _, _ = run_mode(argv, "devfull-both")
-        self.assertEqual(rc3, EX_IOERR, f"{label} devfull-both: exit {rc3}")
+        if self.here("devfull-both"):
+            rc3, _, _ = run_mode(argv, "devfull-both")
+            self.assertEqual(rc3, EX_IOERR, f"{label} devfull-both: exit {rc3}")
         if closed_seen:
             self.assert_lost(argv, "closed", label)
         else:   # runtime reopens fd 1 on /dev/null: `>&-` is `>/dev/null`, the verdict's code is the right answer
@@ -393,6 +458,7 @@ class _PackCLI(_Base):
         self.assert_lost(argv, "fsize", f"{self.runtime} big")
 
 
+    @unittest.skipIf(OS.WINDOWS, NO_FSIZE)
     def test_short_write_to_a_file(self):   # 24 bytes taken, then EFBIG: 74, never the verdict's code
         for k in ("valid", "invalid"):
             self.assert_lost(_argv(self.runtime, FX[k]), "fsize_cut", f"{self.runtime} {k}")
@@ -410,7 +476,7 @@ class _PackCLI(_Base):
                 self.assertTrue(latency is not None and latency < PROMPT, f"{label}: {latency} s from the first read to the receipt's end")
 
     def test_usage_with_stderr_lost(self):   # the usage error keeps exit 2 and never goes to stdout
-        self.assertEqual(usage_with_stderr_lost(RUNTIMES[self.runtime][:]), [])
+        self.assertEqual(usage_with_stderr_lost(RUNTIMES[self.runtime][:], self), [])
 
     BUFFERINGS = ({},)
 
@@ -425,7 +491,7 @@ class TestPython(_PackCLI):
             argv = _argv("python", FX[k])
             rc, out, err = run_mode(argv, "file", u)
             self.assertEqual(rc, code, err[-300:])
-            for mode in ("devfull", "gone", "head", "closed", "fsize_cut"):
+            for mode in self.here("devfull", "gone", "head", "closed", "fsize_cut", argv=argv):
                 rc2, _, err2 = run_mode(argv, mode, u)
                 self.assertEqual(rc2, EX_IOERR, f"unbuffered {k} {mode}: exit {rc2}, stderr {err2[-300:]!r}")
                 self.assertEqual(err2.count("receipt not written:"), 1, err2[-300:])
@@ -434,7 +500,7 @@ class TestPython(_PackCLI):
         rc_s, piped, err = run_mode(argv, "slow", u)
         self.assertEqual(rc_s, 0, err[-300:])
         self.assertTrue(same_receipt(piped, whole))
-        for mode in ("fsize", "fsize_cut", "head"):
+        for mode in self.here("fsize", "fsize_cut", "head", argv=argv):
             self.assertEqual(run_mode(argv, mode, u)[0], EX_IOERR, f"unbuffered big {mode}")
 
     def test_encodings_are_the_text_layers(self):
@@ -491,7 +557,7 @@ class TestPython(_PackCLI):
             text = s.getvalue() if isinstance(s, io.StringIO) else s.buffer.getvalue().decode("utf-8")
             self.assertEqual((rc, json.loads(text)["verdict"]), (0, "PASS"), type(s).__name__)
         # what the caller wrote before stays before the receipt: the text layer is flushed first
-        s = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        s = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", newline="\n")   # LF on Windows too: the test splits on it
         s.write("before\n")
         saved = sys.stdout
         sys.stdout = s
@@ -503,15 +569,9 @@ class TestPython(_PackCLI):
         self.assertEqual((rc, head, json.loads(rest)["verdict"]), (0, "before", "PASS"))
         # ... also when that text is still buffered and stdout is a non-blocking pipe that is full: the caller's text is
         # flushed first and waited for like the receipt (at 5b78982: exit 74 and nothing written, NEMESIS 13/10/2026)
-        import fcntl
         r, w = os.pipe()
-        fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) | os.O_NONBLOCK)
-        filled = 0
-        while True:
-            try:
-                filled += os.write(w, b"P" * 4096)
-            except BlockingIOError:
-                break
+        OS.set_nonblocking(w)
+        filled = _fill(w)
         s = io.TextIOWrapper(io.BufferedWriter(io.FileIO(w, "w", closefd=False)), encoding="utf-8")
         s.write("before\n")
         got = []
@@ -596,11 +656,13 @@ class TestPythonAAT(_Base):
         self.assertIn("receipt not written:", err)
         self.assertNotIn("Traceback", err)
 
+    @unittest.skipIf(OS.WINDOWS, NO_FSIZE)
     def test_unbuffered_short_write(self):
         for args, code in ((["verify", FX["chain"]], 0), (["verify", FX["chain_bad"]], 1), (["verify", FX["missing"]], 2),
                            (["csv", FX["chain"]], 0)):
-            rc, _, err = run_mode(self.AAT + args, "fsize_cut", {"PYTHONUNBUFFERED": "1"})
-            self.assertEqual(rc, EX_IOERR, f"{args} unbuffered fsize_cut: exit {rc} (verdict {code}), stderr {err[-300:]!r}")
+            rc, got, err = run_mode(self.AAT + args, "fsize_cut", {"PYTHONUNBUFFERED": "1"})
+            self.assertEqual(rc, EX_IOERR, f"{args} unbuffered fsize_cut: exit {rc} (verdict {code}), stderr {err[-300:]!r}, "
+                                           f"{len(got)} bytes taken: {got[:120]!r}")
             self.assertEqual(err.count("receipt not written:"), 1)
 
     def test_full_non_blocking_stdout_is_waited_for(self):
@@ -613,7 +675,7 @@ class TestPythonAAT(_Base):
 
     def test_usage_with_stderr_lost(self):
         for args in (["verify"], ["nosuchcommand"], []):
-            self.assertEqual(usage_with_stderr_lost(self.AAT + args), [], args)
+            self.assertEqual(usage_with_stderr_lost(self.AAT + args, self), [], args)
         p = subprocess.run(self.AAT + ["verify"], capture_output=True, cwd=ROOT, timeout=120)
         self.assertEqual((p.returncode, p.stdout), (2, b""))
         self.assertIn(b"error: the following arguments are required: chain", p.stderr)
