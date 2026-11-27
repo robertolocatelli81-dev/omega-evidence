@@ -680,7 +680,19 @@ def run(args):
         for s in previous:
             signal.signal(s, signal.SIG_IGN)                     # the removal is not interrupted by a second signal
         if root is not None and not keep:
-            shutil.rmtree(root, ignore_errors=True)
+            # Windows: a file still open (a handle the interrupted frame had not closed yet) cannot be removed, and
+            # rmtree(ignore_errors) left the folder in silence after a Ctrl-Break (CI, windows 3.9); the collector
+            # closes such files, and the removal is tried again for up to 5 s; a folder that stays is said
+            import gc
+            import time
+            for _ in range(50):
+                gc.collect()
+                shutil.rmtree(root, ignore_errors=True)
+                if not os.path.exists(root):
+                    break
+                time.sleep(0.1)
+            else:
+                print("fuzz_toolkit: the corpus folder %s could not be removed" % root, file=sys.stderr)
         for s, handler in previous.items():
             signal.signal(s, handler)
 
