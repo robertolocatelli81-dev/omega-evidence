@@ -104,7 +104,12 @@ def read_input(path: str, limit: int = MAX_INPUT_BYTES) -> bytes:
     device such as a symlink to /dev/zero, a directory: refused); read to at most `limit` + 1 bytes, so a file beyond
     the bound is refused, never exhausted. Every refusal is an OSError, which the verifier already reports as the FAIL of
     the layer that reads the file (25/09/2026, NEMESIS: a FIFO blocked all four verifiers, /dev/zero exhausted memory)."""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except PermissionError:
+        if os.path.isdir(path):   # Windows refuses to open a directory (EACCES) before fstat can say what it is (0.14.1)
+            raise OSError(f"{path}: not a regular file") from None
+        raise
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(f"{path}: not a regular file")

@@ -54,7 +54,20 @@ jobs:
           python - "$d" <<'PY'
           import errno, os, sys
           d = sys.argv[1]
-          open(os.path.join(d, "out"), "wb").close()   # made BEFORE: on a full HFS+ no file can be created (measured)
+          if os.name == "nt":   # the allocation unit: bytes per sector x sectors per cluster
+              import ctypes
+              spc, bps, free, tot = (ctypes.c_ulong() for _ in range(4))
+              assert ctypes.windll.kernel32.GetDiskFreeSpaceW(d, *(ctypes.byref(x) for x in (spc, bps, free, tot)))
+              bs = spc.value * bps.value
+          else:
+              bs = os.statvfs(d).f_frsize
+          # made BEFORE the volume is full (a full HFS+ volume creates no file): `out` empty (every write fails); `short*`
+          # 24 bytes short of a whole block (a short write of 24 bytes, then ENOSPC); `room*` 1 byte (bs - 1 bytes of room)
+          open(os.path.join(d, "out"), "wb").close()
+          for i in range(33):
+              for name, size in (("short%d" % i, bs - 24), ("room%d" % i, 1)):
+                  with open(os.path.join(d, name), "wb") as f:
+                      f.write(b"x" * size)
           with open(os.path.join(d, "filler"), "wb", buffering=0) as f:   # raw: no buffer left for close() to flush
               for size in (1 << 20, 1 << 12, 1 << 9, 1):
                   while True:
@@ -66,14 +79,21 @@ jobs:
                           if e.errno != errno.ENOSPC:
                               raise
                           break
-          # positive check: a new file there takes no byte, at the write itself (no fsync: the CLIs only flush)
-          try:
-              with open(os.path.join(d, "out"), "wb", buffering=0) as f:
-                  f.write(b"x" * 65536)
-              sys.exit("the volume is not full")
-          except OSError as e:
-              assert e.errno == errno.ENOSPC, e
-              print("full volume ready:", d, "ENOSPC on write")
+          # positive checks, at the write itself (no fsync: the CLIs only flush): `out` takes nothing, `short32` takes 24
+          def took(name):
+              n = 0
+              with open(os.path.join(d, name), "ab", buffering=0) as f:
+                  try:
+                      while True:
+                          k = f.write(b"y" * 65536)
+                          if not k:
+                              return n, "0"
+                          n += k
+                  except OSError as e:
+                      return n, errno.errorcode.get(e.errno, str(e.errno))
+          o, s, r = took("out"), took("short32"), took("room32")   # 32: the spares; the tests use 0 to 31
+          print("allocation unit", bs, "bytes; taken before ENOSPC: out", o, "short", s, "room", r)
+          assert o == (0, "ENOSPC") and s[1] == r[1] == "ENOSPC" and 0 < s[0] < 100 and s[0] < r[0] < 1 << 20, (o, s, r)
           PY
           echo "OE_FULL_DIR=$d" >> "$GITHUB_ENV"
       - name: Install package

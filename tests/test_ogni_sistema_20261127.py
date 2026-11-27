@@ -9,6 +9,7 @@ import ipaddress
 import os
 import random
 import socket
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -68,20 +69,32 @@ class Ipv4LiteralOnEverySystem(unittest.TestCase):
         self.assertGreater(n, 1000)   # the generator reaches addresses, not only refusals
 
 
-class OwnerOnlyCheckCanFail(unittest.TestCase):
-    """the positive control of the owner-only check the ML-DSA key file passes (tests/test_toolkit.py): a file made
-    the ordinary way, here, is not owner-only by it (Windows: the folder's entries, inherited; POSIX: the umask's mode)"""
+class OwnerOnlyKeyFile(unittest.TestCase):
+    """The ML-DSA-65 key file is owner-only where the folder lets others read (POSIX: umask 022; Windows: the folder
+    grants BUILTIN\\Users read, inherited by what is made in it). The positive control: a file made the ordinary way
+    in the same folder is NOT owner-only by the same check. On 0.14.0 the key file on Windows kept the folder's entries."""
 
-    def test_an_ordinary_file_is_not_owner_only(self):
+    def test_key_file_owner_only_and_an_ordinary_file_not(self):
         import tempfile
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import _ogni_sistema as OS
+        from omega_evidence.pqbackends import mldsa
         with tempfile.TemporaryDirectory() as d:
-            f = os.path.join(d, "plain")
-            open(f, "wb").close()
-            if not OS.WINDOWS:
-                os.chmod(f, 0o644)
-            self.assertNotEqual(OS.owner_only_problems(f), [])
+            if OS.WINDOWS:
+                subprocess.run(["icacls", d, "/grant", "*S-1-5-32-545:(OI)(CI)R"], check=True, capture_output=True)
+            plain = os.path.join(d, "plain")
+            old = os.umask(0o022) if not OS.WINDOWS else None
+            try:
+                open(plain, "wb").close()
+            finally:
+                if old is not None:
+                    os.umask(old)
+            self.assertNotEqual(OS.owner_only_problems(plain), [])          # the check can fail
+            if not mldsa.available():
+                self.skipTest("cryptography >= 48 (ML-DSA) absent: no key file to make")
+            kf = os.path.join(d, "pq.key")
+            mldsa.MlDsaFileSigner.keygen(kf)
+            self.assertEqual(OS.owner_only_problems(kf), [])
 
 
 if __name__ == "__main__":

@@ -8,11 +8,11 @@ macOS and Windows). Each one names what it stands for; where a system has none, 
                                                                                                  cannot be lowered)
   process-count cap       RLIMIT_NPROC                | Windows Job Object ActiveProcessLimit
   CPU time of a child     /proc/<pid>/stat (Linux)    | macOS `ps -o time=` | Windows GetProcessTimes
-  non-blocking pipe       fcntl O_NONBLOCK            | os.set_blocking (Windows pipes from 3.12) | before 3.12 on Windows
-                                                                         SetNamedPipeHandleState(PIPE_NOWAIT), which
-                                                                         is what os.set_blocking calls
+  non-blocking pipe       fcntl O_NONBLOCK            | os.set_blocking (Windows pipes from 3.12; before, none: skipped)
   a device that is full   /dev/full (Linux)           | a filled volume named by OE_FULL_DIR (CI: an HFS+ RAM disk on
                                                         macOS, a FAT VHD on Windows)
+  a file-size limit       ulimit -f (Linux)           | a file on that volume with a few bytes of room left in its last
+                                                        block (macOS, Windows)
   FIFO                    os.mkfifo                   | Windows named pipe \\\\.\\pipe\\<name>
 """
 import os
@@ -47,8 +47,6 @@ if WINDOWS:
     _k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
     _k32.GetCurrentProcess.restype = wintypes.HANDLE
     _k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(ctypes.c_ulonglong)] * 4
-    _k32.SetNamedPipeHandleState.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
-                                             ctypes.c_void_p]
     _ntdll = ctypes.WinDLL("ntdll")
     _ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
 
@@ -129,13 +127,16 @@ def cpu_seconds(p):
     return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 
 
+NONBLOCK_WHY = ("Windows, Python before 3.12: os.set_blocking does not take a pipe, and a full PIPE_NOWAIT pipe answers "
+                "a write with ENOSPC (measured in CI, 27/11/2026), which no writer can tell from a full disk; measured on "
+                "3.12 and later") if WINDOWS and sys.version_info < (3, 12) else None
+
+
 def set_nonblocking(fd):
-    if WINDOWS and sys.version_info < (3, 12):
-        import msvcrt
-        mode = wintypes.DWORD(1)                     # PIPE_NOWAIT
-        if not _k32.SetNamedPipeHandleState(msvcrt.get_osfhandle(fd), ctypes.byref(mode), None, None):
-            raise ctypes.WinError(ctypes.get_last_error())
-        return
+    """O_NONBLOCK; on Windows PIPE_NOWAIT through os.set_blocking (3.12+). Raises unittest.SkipTest where NONBLOCK_WHY."""
+    if NONBLOCK_WHY:
+        import unittest
+        raise unittest.SkipTest(NONBLOCK_WHY)
     os.set_blocking(fd, False)
 
 
@@ -146,6 +147,23 @@ def full_file():
         return "/dev/full"
     f = os.path.join(os.environ.get("OE_FULL_DIR", ""), "out")
     return f if os.environ.get("OE_FULL_DIR") and os.path.isfile(f) else None
+
+
+_USED = {"short": 0, "room": 0}
+
+
+def next_short(kind):
+    """the next unused `short<i>` (24 bytes of room) or `room<i>` (a block less 1 byte of room) the CI left on the filled
+    volume, or None: the equivalent of `ulimit -f` where there is none (Windows) or where it is not byte-exact (macOS:
+    a 1 024-byte and an 8 KiB limit both let a write end past them, measured in CI on 27/11/2026)"""
+    d = os.environ.get("OE_FULL_DIR")
+    if not d:
+        return None
+    f = os.path.join(d, "%s%d" % (kind, _USED[kind]))
+    if not os.path.isfile(f):
+        return None
+    _USED[kind] += 1
+    return f
 
 
 FULL_WHY = "no /dev/full and no filled volume in OE_FULL_DIR (the CI makes one on macOS and Windows)"

@@ -19,7 +19,7 @@ these modes:
   slow       a pipe read 0.5 s late: a receipt over 64 KiB still arrives whole, byte for byte the file's
   fsize      stdout to a regular file under `ulimit -f 4` (4 096 bytes): a receipt over that size gets a SHORT write and
              then EFBIG — Node's stdout on a file used to drop the rest of a short write and exit 0 (12/10/2026)
-  fsize_cut  stdout appended to a file of 8 168 bytes under `ulimit -f 8` (8 KiB): 24 bytes taken, then EFBIG — with
+  fsize_cut  stdout appended to a file of 1 000 bytes under `ulimit -f 1` (1 024 bytes): 24 bytes taken, then EFBIG — with
              PYTHONUNBUFFERED (or -u) Python's text layer dropped the rest of that short write and 0.11.3 at 5520cd8 exited
              with the verdict's code (13/10/2026)
 In every losing mode: exit 74, one `receipt not written: <reason>` line on stderr, no traceback, no "Exception ignored".
@@ -161,8 +161,9 @@ def _argv(runtime, pack):
     return base + [pack, "--ledger", led] if runtime in ("python", "node") else base + [pack, "-ledger", led]
 
 
-FSIZE_FILLED = 8192 - 24
-NO_FSIZE = "Windows has no per-process file-size limit (ulimit -f): a short write to a file cannot be made there"
+FSIZE_FILLED = 1000
+NO_FSIZE = ("no byte-exact file-size limit here (Windows has none, macOS's ulimit -f is not byte-exact) and no filled "
+            "volume in OE_FULL_DIR (the CI makes one on macOS and Windows)")
 
 
 def why_not_here(mode, argv=None):
@@ -171,7 +172,7 @@ def why_not_here(mode, argv=None):
     Python that closes its fd 1 and runs the module in process (what a start with fd 1 closed gives it)."""
     if mode in ("devfull", "devfull-both") and OS.full_file() is None:
         return OS.FULL_WHY
-    if mode in ("fsize", "fsize_cut") and OS.WINDOWS:
+    if mode in ("fsize", "fsize_cut") and not sys.platform.startswith("linux") and not os.environ.get("OE_FULL_DIR"):
         return NO_FSIZE
     if mode == "closed" and OS.WINDOWS and not (argv and argv[0] == sys.executable and argv[1:2] == ["-m"]):
         return "Windows: stdout closed at start is made for a Python module only (no bash redirection there)"
@@ -198,14 +199,24 @@ def run_mode(argv, mode, env=None):
     if OS.WINDOWS and mode == "closed":
         p = subprocess.run(_closed_fd_argv(argv, 1), stderr=subprocess.PIPE, cwd=ROOT, timeout=120)
         return p.returncode, None, p.stderr.decode("utf-8", "replace")
-    if mode == "fsize_cut":   # 8 168 bytes in the file, limit 8 KiB: a short write of 24 bytes, then EFBIG. A page-aligned
-        # limit (0.14.1): on macOS a 1 024-byte limit let a write end at 1 172 bytes (measured in CI, 27/11/2026)
+    if mode in ("fsize", "fsize_cut") and not sys.platform.startswith("linux"):
+        # macOS and Windows: appended to a file on the filled volume with 24 bytes (fsize_cut) or a block less 1 byte
+        # (fsize) of room: a short write, then ENOSPC — the equivalent of the file-size limit below
+        f = OS.next_short("short" if mode == "fsize_cut" else "room")
+        if f is None:
+            raise unittest.SkipTest("the filled volume has no unused file left for " + mode)
+        before = os.path.getsize(f)
+        with open(f, "ab") as fo:
+            p = subprocess.run(argv, stdout=fo, stderr=subprocess.PIPE, cwd=ROOT, timeout=120)
+        with open(f, "rb") as fi:
+            return p.returncode, fi.read()[before:], p.stderr.decode("utf-8", "replace")
+    if mode == "fsize_cut":   # 1 000 bytes already in the file, limit 1 024: a short write of 24 bytes, then EFBIG
         with tempfile.TemporaryDirectory() as td:
             o = os.path.join(td, "out")
             with open(o, "wb") as f:
                 f.write(b"x" * FSIZE_FILLED)
             cmd = " ".join(shlex.quote(a) for a in argv)
-            p = subprocess.run(["bash", "-c", f"ulimit -f 8; exec {cmd} >> {shlex.quote(o)}"], stderr=subprocess.PIPE, cwd=ROOT, timeout=120)
+            p = subprocess.run(["bash", "-c", f"ulimit -f 1; exec {cmd} >> {shlex.quote(o)}"], stderr=subprocess.PIPE, cwd=ROOT, timeout=120)
             with open(o, "rb") as f:
                 return p.returncode, f.read()[FSIZE_FILLED:], p.stderr.decode("utf-8", "replace")
     if mode == "file":
@@ -460,7 +471,6 @@ class _PackCLI(_Base):
         self.assert_lost(argv, "fsize", f"{self.runtime} big")
 
 
-    @unittest.skipIf(OS.WINDOWS, NO_FSIZE)
     def test_short_write_to_a_file(self):   # 24 bytes taken, then EFBIG: 74, never the verdict's code
         for k in ("valid", "invalid"):
             self.assert_lost(_argv(self.runtime, FX[k]), "fsize_cut", f"{self.runtime} {k}")
@@ -658,10 +668,11 @@ class TestPythonAAT(_Base):
         self.assertIn("receipt not written:", err)
         self.assertNotIn("Traceback", err)
 
-    @unittest.skipIf(OS.WINDOWS, NO_FSIZE)
     def test_unbuffered_short_write(self):
         for args, code in ((["verify", FX["chain"]], 0), (["verify", FX["chain_bad"]], 1), (["verify", FX["missing"]], 2),
                            (["csv", FX["chain"]], 0)):
+            if why_not_here("fsize_cut"):
+                self.skipTest(why_not_here("fsize_cut"))
             rc, got, err = run_mode(self.AAT + args, "fsize_cut", {"PYTHONUNBUFFERED": "1"})
             self.assertEqual(rc, EX_IOERR, f"{args} unbuffered fsize_cut: exit {rc} (verdict {code}), stderr {err[-300:]!r}, "
                                            f"{len(got)} bytes taken: {got[:120]!r}")
