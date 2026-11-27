@@ -685,14 +685,18 @@ def run(args):
             # closes such files, and the removal is tried again for up to 5 s; a folder that stays is said
             import gc
             import time
-            for _ in range(50):
+            errors = []
+            for _ in range(100):
                 gc.collect()
-                shutil.rmtree(root, ignore_errors=True)
+                if sys.version_info >= (3, 12):   # onerror is deprecated from 3.12; onexc gets the exception itself
+                    shutil.rmtree(root, onexc=lambda fn, path, e: errors.append((fn.__name__, os.path.basename(path), type(e).__name__)))
+                else:
+                    shutil.rmtree(root, onerror=lambda fn, path, ei: errors.append((fn.__name__, os.path.basename(path), ei[0].__name__)))
                 if not os.path.exists(root):
                     break
                 time.sleep(0.1)
             else:
-                print("fuzz_toolkit: the corpus folder %s could not be removed" % root, file=sys.stderr)
+                print("fuzz_toolkit: the corpus folder could not be removed: %s" % errors[-3:], file=sys.stderr)
         for s, handler in previous.items():
             signal.signal(s, handler)
 

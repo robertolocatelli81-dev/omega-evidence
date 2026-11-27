@@ -764,7 +764,7 @@ class TemporaryFilesAreRemoved(unittest.TestCase):
         win = os.name == "nt"   # Windows: Ctrl-Break (SIGBREAK) to its own process group; no SIGHUP there
         for s in ((signal.CTRL_BREAK_EVENT,) if win else (signal.SIGTERM, signal.SIGHUP)):
             p = subprocess.Popen([sys.executable, os.path.join(ROOT, "tests", "fuzz_toolkit.py"), "--seed", "1", "--iterations",
-                                  "500000"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, cwd=ROOT,
+                                  "500000"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, cwd=ROOT,
                                  creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if win else 0)
             for _ in range(2400):                                       # up to 120 s: a macOS runner took over 30 s to start it
                 if os.listdir(probe):
@@ -773,8 +773,8 @@ class TemporaryFilesAreRemoved(unittest.TestCase):
             self.assertEqual(len(os.listdir(probe)), 1)                # control: the corpus is there while it runs
             time.sleep(0.5)
             p.send_signal(s)
-            p.wait(timeout=60)
-            self.assertEqual(os.listdir(probe), [], s)
+            _, err = p.communicate(timeout=60)
+            self.assertEqual(os.listdir(probe), [], (s, p.returncode, err.decode("utf-8", "replace")[-600:]))
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
