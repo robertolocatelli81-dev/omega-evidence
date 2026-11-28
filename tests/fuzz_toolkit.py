@@ -652,6 +652,7 @@ ABLATIONS = {
     "require-signed": _ignore_require_signed,                                    # the requirement silently dropped
 }
 _ORIGINAL = {}
+_STOP = []   # signals received during run(): _run exits at the next iteration
 UNVERIFIED_PREFIX = "signature present, algorithm unsupported, not verified"
 
 
@@ -664,25 +665,33 @@ def run(args):
     import signal
     import threading
     previous = {}
+    _STOP.clear()
     if threading.current_thread() is threading.main_thread():      # signal handlers can be set in the main thread only
         def _stop(signum, frame):
-            sys.exit(128 + signum)
-        for s in (signal.SIGTERM, getattr(signal, "SIGHUP", None), getattr(signal, "SIGBREAK", None)):
+            # only a flag (28/11/2026): an exception raised here can land between os.open and its try in read_input,
+            # and that descriptor is never closed: on Windows the folder then cannot be removed (measured on Linux:
+            # 8 of 628 SIGTERMs left a corpus file open at the removal, after gc.collect). _run stops at the next
+            # iteration instead, where no file of the corpus is open.
+            _STOP.append(signum)
+        for s in (signal.SIGTERM, signal.SIGINT, getattr(signal, "SIGHUP", None), getattr(signal, "SIGBREAK", None)):
             if s is not None:
                 previous[s] = signal.signal(s, _stop)
-        previous[signal.SIGINT] = signal.getsignal(signal.SIGINT)
     root = None
     keep = []
     try:
         root = tempfile.mkdtemp(prefix="oe-fuzz-")
-        return _run(args, root, keep)
+        rc = _run(args, root, keep)
+        if _STOP:
+            sys.exit(128 + _STOP[0])
+        return rc
     finally:
         for s in previous:
             signal.signal(s, signal.SIG_IGN)                     # the removal is not interrupted by a second signal
         if root is not None and not keep:
-            # Windows: a file still open (a handle the interrupted frame had not closed yet) cannot be removed, and
-            # rmtree(ignore_errors) left the folder in silence after a Ctrl-Break (CI, windows 3.9); the collector
-            # closes such files, and the removal is tried again for up to 5 s; a folder that stays is said
+            # Windows: a file still open cannot be removed; rmtree(ignore_errors) left the folder in silence after a
+            # Ctrl-Break (CI, windows 3.9 and 3.12; the cause, a descriptor left open by the exception the handler
+            # raised, is gone with the flag above). The removal is tried again for up to 10 s, for a handle another
+            # program may hold a moment; a folder that stays is said
             import gc
             import time
             errors = []
@@ -721,6 +730,8 @@ def _run(args, root, keep):
     verdict_seq = hashlib.sha256()
     t0 = time.perf_counter()
     while True:
+        if _STOP:   # a signal arrived: stop here, where no file of the corpus is open
+            sys.exit(128 + _STOP[0])
         if args.iterations and stats["iterations"] >= args.iterations:
             break
         if args.seconds and time.perf_counter() - t0 >= args.seconds:

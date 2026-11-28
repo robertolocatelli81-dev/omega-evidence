@@ -776,5 +776,30 @@ class TemporaryFilesAreRemoved(unittest.TestCase):
             _, err = p.communicate(timeout=60)
             self.assertEqual(os.listdir(probe), [], (s, p.returncode, err.decode("utf-8", "replace")[-600:]))
 
+    def test_the_fuzzer_signal_handler_only_sets_a_flag(self):
+        """fails on 0c56003: the handler raised SystemExit wherever the signal fell, also between os.open and its try
+        in read_input, and that descriptor stayed open: on Windows the corpus folder could not be removed (CI, Ctrl-Break)"""
+        import argparse
+        import signal
+        from unittest import mock
+        sys.path.insert(0, os.path.join(ROOT, "tests"))
+        import fuzz_toolkit as fz
+        probe = self._fresh_tmp()
+        for s in (signal.SIGTERM, signal.SIGINT):   # Ctrl-C too; the second run also sees a flag left by the first
+            before = signal.getsignal(s)
+            seen = []
+
+            def fake_run(args, root, keep):
+                signal.raise_signal(s)
+                seen.append(os.path.isdir(root))   # reached only if the handler did not raise
+                return 0
+            with mock.patch.object(fz, "_run", fake_run), mock.patch.object(tempfile, "tempdir", probe):
+                with self.assertRaises(SystemExit) as cm:
+                    fz.run(argparse.Namespace())
+            self.assertEqual(seen, [True], s)
+            self.assertEqual(cm.exception.code, 128 + s)
+            self.assertEqual(os.listdir(probe), [], s)
+            self.assertIs(signal.getsignal(s), before)
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
